@@ -1,6 +1,7 @@
-import sys, json, time, asyncio
+import sys, json, time, asyncio, logging
 from pathlib import Path
 from typing import Dict, Any
+from datetime import datetime
 
 # Third Party
 import keyring
@@ -9,7 +10,24 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 # --- 0. METADATA ---
 APP_NAME = "UserManager"
-APP_VERSION = "1.3.1"
+APP_VERSION = "0.5"
+LOG_FILE = Path("api_calls.log")
+
+# Global logging flag
+API_LOGGING_ENABLED = False
+
+def init_logger():
+    """Initialize logger for API calls."""
+    logger = logging.getLogger("PingOneAPI")
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        handler = logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
+
+api_logger = init_logger()
 
 # --- 1. CORE API CLIENT & WORKERS ---
 
@@ -40,8 +58,12 @@ class PingOneClient:
                 data = resp.json()
                 self._token = data.get("access_token")
                 self._token_expires = now + data.get("expires_in", 3600) - 60
+                if API_LOGGING_ENABLED:
+                    api_logger.info(f"Token obtained: expires_in={data.get('expires_in', 3600)}s")
                 return self._token
-        except Exception:
+        except Exception as e:
+            if API_LOGGING_ENABLED:
+                api_logger.error(f"Token request failed: {str(e)}")
             return None
 
     async def update_user(self, user_id, data):
@@ -52,9 +74,14 @@ class PingOneClient:
         headers = self._get_auth_headers(token)
         update_url = f"{self.base_url}/users/{user_id}"
         async with httpx.AsyncClient(timeout=10.0) as client:
+            if API_LOGGING_ENABLED:
+                api_logger.info(f"PUT {update_url} - Request body: {json.dumps(data)}")
             resp = await client.put(update_url, headers=headers, json=data)
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            if API_LOGGING_ENABLED:
+                api_logger.info(f"PUT {update_url} - Status: {resp.status_code}")
+            return result
 
 class WorkerSignals(QtCore.QObject):
     finished = QtCore.Signal(dict)
@@ -75,16 +102,29 @@ class UserFetchWorker(QtCore.QRunnable):
                 return
             headers = {"Authorization": f"Bearer {token}"}
             async with httpx.AsyncClient() as session:
+                if API_LOGGING_ENABLED:
+                    api_logger.info(f"GET {self.client.base_url}/populations")
                 p_resp = await session.get(f"{self.client.base_url}/populations", headers=headers)
                 pop_map = {p['id']: p['name'] for p in p_resp.json().get('_embedded', {}).get('populations', [])}
+                if API_LOGGING_ENABLED:
+                    api_logger.info(f"GET {self.client.base_url}/populations - Status: {p_resp.status_code}, Populations: {len(pop_map)}")
                 all_users, url = [], f"{self.client.base_url}/users"
+                page = 1
                 while url:
+                    if API_LOGGING_ENABLED:
+                        api_logger.info(f"GET {url} (page {page})")
                     resp = await session.get(url, headers=headers)
                     data = resp.json()
+                    users_count = len(data.get("_embedded", {}).get("users", []))
                     all_users.extend(data.get("_embedded", {}).get("users", []))
+                    if API_LOGGING_ENABLED:
+                        api_logger.info(f"GET {url} - Status: {resp.status_code}, Users in page: {users_count}")
                     url = data.get("_links", {}).get("next", {}).get("href")
+                    page += 1
             self.signals.finished.emit({"users": all_users, "pop_map": pop_map, "user_count": len(all_users), "pop_count": len(pop_map)})
         except Exception as e:
+            if API_LOGGING_ENABLED:
+                api_logger.error(f"UserFetchWorker failed: {str(e)}")
             self.signals.error.emit(str(e))
 
 class BulkDeleteWorker(QtCore.QRunnable):
@@ -100,10 +140,19 @@ class BulkDeleteWorker(QtCore.QRunnable):
         async with httpx.AsyncClient() as session:
             for i, uid in enumerate(self.user_ids):
                 try:
-                    await session.delete(f"{self.client.base_url}/users/{uid}", headers=headers)
+                    delete_url = f"{self.client.base_url}/users/{uid}"
+                    if API_LOGGING_ENABLED:
+                        api_logger.info(f"DELETE {delete_url}")
+                    resp = await session.delete(delete_url, headers=headers)
+                    if API_LOGGING_ENABLED:
+                        api_logger.info(f"DELETE {delete_url} - Status: {resp.status_code}")
                     success += 1
-                except: pass
+                except Exception as e:
+                    if API_LOGGING_ENABLED:
+                        api_logger.error(f"DELETE {self.client.base_url}/users/{uid} - Failed: {str(e)}")
                 self.signals.progress.emit(i + 1, len(self.user_ids))
+        if API_LOGGING_ENABLED:
+            api_logger.info(f"Bulk delete completed: {success}/{len(self.user_ids)} users deleted")
         self.signals.finished.emit({"deleted": success, "total": len(self.user_ids)})
 
 class UserUpdateWorker(QtCore.QRunnable):
@@ -114,9 +163,15 @@ class UserUpdateWorker(QtCore.QRunnable):
     def run(self): asyncio.run(self.execute())
     async def execute(self):
         try:
+            if API_LOGGING_ENABLED:
+                api_logger.info(f"UserUpdateWorker: Updating user {self.user_id}")
             result = await self.client.update_user(self.user_id, self.data)
+            if API_LOGGING_ENABLED:
+                api_logger.info(f"UserUpdateWorker: User {self.user_id} updated successfully")
             self.signals.finished.emit({"updated": True, "user": result})
         except Exception as e:
+            if API_LOGGING_ENABLED:
+                api_logger.error(f"UserUpdateWorker failed: {str(e)}")
             self.signals.error.emit(str(e))
 
 # --- 2. MAIN WINDOW ---
@@ -310,6 +365,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_friendly_names_action.triggered.connect(self.toggle_friendly_names)
         self.revert_columns_action = settings_menu.addAction("Revert to Default Columns")
         self.revert_columns_action.triggered.connect(self.revert_to_default_columns)
+        settings_menu.addSeparator()
+        self.enable_api_logging_action = settings_menu.addAction("Enable API Logging")
+        self.enable_api_logging_action.setCheckable(True)
+        self.enable_api_logging_action.setChecked(False)
+        self.enable_api_logging_action.triggered.connect(self.toggle_api_logging)
         help_menu = menubar.addMenu("Help")
         config_help_action = help_menu.addAction("Configuration Help")
         config_help_action.triggered.connect(self.show_config_help)
@@ -543,6 +603,17 @@ class MainWindow(QtWidgets.QMainWindow):
         """Toggle JSON editing mode."""
         self.json_editing_enabled = self.enable_json_edit_action.isChecked()
 
+    def toggle_api_logging(self):
+        """Toggle API logging to file."""
+        global API_LOGGING_ENABLED
+        API_LOGGING_ENABLED = self.enable_api_logging_action.isChecked()
+        if API_LOGGING_ENABLED:
+            api_logger.info(f"API Logging enabled at {datetime.now()}")
+            self.status_label.setText(f"API logging enabled - File: {LOG_FILE.resolve()}")
+        else:
+            api_logger.info(f"API Logging disabled at {datetime.now()}")
+            self.status_label.setText("API logging disabled")
+
     def toggle_friendly_names(self):
         """Toggle between friendly names and attribute names for columns."""
         self.use_friendly_names = self.use_friendly_names_action.isChecked()
@@ -634,6 +705,7 @@ Available Options:
   - Enable JSON Editing: Toggle to allow editing of JSON content in double-click dialogs.
   - Use Friendly Column Names: Toggle between user-friendly names and raw attribute names for column headers.
   - Revert to Default Columns: Reset column selection to the default set.
+  - Enable API Logging: Toggle to log all API calls to 'api_calls.log' file for debugging.
 
 - Table Features:
   - Click column headers to sort.
