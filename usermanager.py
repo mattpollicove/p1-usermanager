@@ -558,7 +558,7 @@ class MainWindow(QtWidgets.QMainWindow):
             client = PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             self.prog.show()
             w = BulkDeleteWorker(client, uids)
-            w.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users(), self.status_label.setText(f"Deleted {len(uids)} users")))
+            w.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
             self.threadpool.start(w)
 
     def filter_table(self):
@@ -595,7 +595,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 client = PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
                 self.prog.show()
                 worker = UserUpdateWorker(client, user_id, new_data)
-                worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users(), self.status_label.setText("User updated")))
+                worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
                 worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Error", m)))
                 self.threadpool.start(worker)
 
@@ -648,7 +648,7 @@ class MainWindow(QtWidgets.QMainWindow):
             client = PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             self.prog.show()
             worker = UserUpdateWorker(client, user_id, user)
-            worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users(), self.status_label.setText("User field updated")))
+            worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
             worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Error", m)))
             self.threadpool.start(worker)
 
@@ -795,15 +795,7 @@ Note: All operations require valid credentials and will show progress. Status up
             col_name = self.columns[logicalIndex]
             self.column_widths[col_name] = newSize
             self.save_columns_to_config()
-            self.status_label.setText(f"Column width updated: {col_name}")
-
-    def on_column_resized(self, logicalIndex, oldSize, newSize):
-        """Save column width when resized."""
-        if logicalIndex < len(self.columns):
-            col_name = self.columns[logicalIndex]
-            self.column_widths[col_name] = newSize
-            self.save_columns_to_config()
-            self.status_label.setText(f"Column width updated: {col_name}")
+            # Only show brief update in status bar
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
