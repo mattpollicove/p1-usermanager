@@ -139,7 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
         
-        # Set DPI-aware window size (not full screen)
+        # Set DPI-aware window size (not full screen) and center on screen
         try:
             screen = QtWidgets.QApplication.primaryScreen()
             if screen:
@@ -147,11 +147,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 min_width = int(1200 * max(1.0, dpi_scale * 0.8))
                 min_height = int(800 * max(1.0, dpi_scale * 0.8))
                 self.setMinimumSize(min_width, min_height)
-                # Set initial size to 80% of screen to avoid full screen
+                # Set initial size to 75% of screen and center the window
                 screen_geometry = screen.availableGeometry()
-                initial_width = int(screen_geometry.width() * 0.8)
-                initial_height = int(screen_geometry.height() * 0.8)
+                initial_width = int(screen_geometry.width() * 0.75)
+                initial_height = int(screen_geometry.height() * 0.75)
                 self.resize(initial_width, initial_height)
+                # Center the window on screen
+                x = screen_geometry.x() + (screen_geometry.width() - initial_width) // 2
+                y = screen_geometry.y() + (screen_geometry.height() - initial_height) // 2
+                self.move(x, y)
             else:
                 self.setMinimumSize(1200, 800)
                 self.resize(1200, 800)
