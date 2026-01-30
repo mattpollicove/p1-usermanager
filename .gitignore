@@ -65,3 +65,9 @@ dist/
 # Wheels
 pip-wheel-metadata/
 
+# Data and configuration files (sample/test data)
+*.csv
+*.json
+*.ldif
+DEVELOPMENT_RULES.md
+
