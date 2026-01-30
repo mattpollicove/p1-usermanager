@@ -371,7 +371,9 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.search_bar = QtWidgets.QLineEdit(); self.search_bar.setPlaceholderText("Filter...")
         self.search_bar.textChanged.connect(self.filter_table)
-        self.search_bar.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_L))
+        # Create a shortcut to focus the search bar (QLineEdit doesn't have setShortcut method)
+        search_shortcut = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_L), self)
+        search_shortcut.activated.connect(self.search_bar.setFocus)
         self.search_bar.setToolTip(f"Focus filter field ({'Cmd' if IS_MACOS else 'Ctrl'}+L)")
         
         toolbar.addWidget(btn_reload); toolbar.addWidget(btn_del); toolbar.addWidget(self.search_bar)
