@@ -6,6 +6,7 @@ import functools
 import zipfile
 import shutil
 import sys
+import platform
 
 # If this file is executed directly (e.g. via the editor), ensure the
 # project root is on `sys.path` so local packages like `api` and `workers`
@@ -22,6 +23,16 @@ import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker
 from ui.dialogs import EditUserDialog, ColumnSelectDialog, JSONViewDialog, AttributeMappingDialog
 
+# Platform detection for cross-platform UI optimization
+IS_MACOS = platform.system() == 'Darwin'
+IS_WINDOWS = platform.system() == 'Windows'
+IS_LINUX = platform.system() == 'Linux'
+
+# Platform-aware keyboard shortcut modifier
+SHORTCUT_MODIFIER = QtCore.Qt.KeyboardModifier.ControlModifier
+if IS_MACOS:
+    SHORTCUT_MODIFIER = QtCore.Qt.KeyboardModifier.MetaModifier
+
 """Main application window and UI glue.
 
 This module builds the Qt UI, handles user interactions, and wires
@@ -31,7 +42,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "UserManager"
-APP_VERSION = "0.51"
+APP_VERSION = "0.52"
 
 
 # Predefined help texts to avoid reallocating large strings on each call.
@@ -127,7 +138,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
-        self.setMinimumSize(1200, 800)
+        
+        # Set DPI-aware minimum window size
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            if screen:
+                dpi_scale = screen.devicePixelRatio()
+                min_width = int(1200 * max(1.0, dpi_scale * 0.8))
+                min_height = int(800 * max(1.0, dpi_scale * 0.8))
+                self.setMinimumSize(min_width, min_height)
+            else:
+                self.setMinimumSize(1200, 800)
+        except Exception:
+            self.setMinimumSize(1200, 800)
+        
         self.threadpool = QtCore.QThreadPool()
         self.config_file, self.users_cache, self.pop_map = Path("profiles.json"), [], {}
         self.columns = []
@@ -161,15 +185,22 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Menu Bar
         menubar = self.menuBar()
+        # On macOS, use the native menu bar
+        if IS_MACOS:
+            menubar.setNativeMenuBar(True)
+        
         settings_menu = menubar.addMenu("Settings")
         self.enable_json_edit_action = settings_menu.addAction("Enable JSON Editing")
         self.enable_json_edit_action.setCheckable(True)
         self.enable_json_edit_action.setChecked(False)
         self.enable_json_edit_action.triggered.connect(self.toggle_json_editing)
+        self.enable_json_edit_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_J))
+        
         self.use_friendly_names_action = settings_menu.addAction("Use Friendly Column Names")
         self.use_friendly_names_action.setCheckable(True)
         self.use_friendly_names_action.setChecked(True)
         self.use_friendly_names_action.triggered.connect(self.toggle_friendly_names)
+        self.use_friendly_names_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_F))
         # Validation mode: server dry-run or local schema
         settings_menu.addSeparator()
         self.use_server_dryrun_action = settings_menu.addAction("Use Server Dry-Run")
@@ -217,6 +248,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logs_clear_all.triggered.connect(self.clear_all_logs)
         self.logs_archive = logs_menu.addAction("Archive Logs...")
         self.logs_archive.triggered.connect(self.archive_logs)
+        
+        # File menu for quit action (standard on all platforms)
+        file_menu = menubar.addMenu("File")
+        quit_action = file_menu.addAction("Quit")
+        quit_action.triggered.connect(self.close)
+        quit_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Q))
+        quit_action.setToolTip(f"Quit application ({'Cmd' if IS_MACOS else 'Ctrl'}+Q)")
+        if IS_MACOS:
+            # On macOS, the quit action should have the QuitRole to appear in app menu
+            quit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
+        
         help_menu = menubar.addMenu("Help")
         config_help_action = help_menu.addAction("Configuration Help")
         config_help_action.triggered.connect(self.show_config_help)
@@ -276,10 +318,23 @@ class MainWindow(QtWidgets.QMainWindow):
         secret_widget = QtWidgets.QWidget()
         secret_widget.setLayout(secret_layout)
 
-        btn_save = QtWidgets.QPushButton("Save Profile"); btn_save.clicked.connect(self.save_current_profile)
-        btn_sync = QtWidgets.QPushButton("Connect"); btn_sync.clicked.connect(self.connect_only)
-        btn_test = QtWidgets.QPushButton("Test Credentials"); btn_test.clicked.connect(self.test_credentials)
-        btn_delete = QtWidgets.QPushButton("Delete Profile"); btn_delete.clicked.connect(self.delete_current_profile)
+        btn_save = QtWidgets.QPushButton("Save Profile")
+        btn_save.clicked.connect(self.save_current_profile)
+        btn_save.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_P))
+        btn_save.setToolTip(f"Save profile ({'Cmd' if IS_MACOS else 'Ctrl'}+P)")
+        
+        btn_sync = QtWidgets.QPushButton("Connect")
+        btn_sync.clicked.connect(self.connect_only)
+        btn_sync.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_N))
+        btn_sync.setToolTip(f"Connect to PingOne ({'Cmd' if IS_MACOS else 'Ctrl'}+N)")
+        
+        btn_test = QtWidgets.QPushButton("Test Credentials")
+        btn_test.clicked.connect(self.test_credentials)
+        btn_test.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_T))
+        btn_test.setToolTip(f"Test credentials ({'Cmd' if IS_MACOS else 'Ctrl'}+T)")
+        
+        btn_delete = QtWidgets.QPushButton("Delete Profile")
+        btn_delete.clicked.connect(self.delete_current_profile)
         # Swap Test Credentials and Save Profile positions per request
         cred_form.addRow("Env ID:", self.env_id); cred_form.addRow("Client ID:", self.cl_id)
         cred_form.addRow("Secret:", secret_widget); cred_form.addRow(btn_test); cred_form.addRow(btn_save); cred_form.addRow(btn_sync); cred_form.addRow(btn_delete)
@@ -300,29 +355,59 @@ class MainWindow(QtWidgets.QMainWindow):
         user_tab = QtWidgets.QWidget(); user_lay = QtWidgets.QVBoxLayout(user_tab)
         toolbar = QtWidgets.QHBoxLayout()
         btn_reload = QtWidgets.QPushButton("🔄 Refresh"); btn_reload.clicked.connect(self.refresh_users)
+        btn_reload.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_R))
+        btn_reload.setToolTip(f"Refresh user list ({'Cmd' if IS_MACOS else 'Ctrl'}+R)")
+        
         btn_del = QtWidgets.QPushButton("🗑 Delete Selected")
         btn_del.setStyleSheet("background-color: #d9534f; color: white;")
         btn_del.clicked.connect(self.delete_selected_users)
+        # Delete key works on Windows/Linux, Backspace on macOS is more common
+        if IS_MACOS:
+            btn_del.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace))
+            btn_del.setToolTip("Delete selected users (Backspace)")
+        else:
+            btn_del.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete))
+            btn_del.setToolTip("Delete selected users (Delete)")
         
         self.search_bar = QtWidgets.QLineEdit(); self.search_bar.setPlaceholderText("Filter...")
         self.search_bar.textChanged.connect(self.filter_table)
+        self.search_bar.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_L))
+        self.search_bar.setToolTip(f"Focus filter field ({'Cmd' if IS_MACOS else 'Ctrl'}+L)")
         
         toolbar.addWidget(btn_reload); toolbar.addWidget(btn_del); toolbar.addWidget(self.search_bar)
         btn_import_csv = QtWidgets.QPushButton("Import CSV")
         btn_import_csv.clicked.connect(self.import_from_csv)
+        btn_import_csv.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_I))
+        btn_import_csv.setToolTip(f"Import from CSV ({'Cmd' if IS_MACOS else 'Ctrl'}+I)")
+        
         btn_import_ldif = QtWidgets.QPushButton("Import LDIF")
         btn_import_ldif.clicked.connect(self.import_from_ldif)
+        btn_import_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Shift | QtCore.Qt.Key.Key_I))
+        btn_import_ldif.setToolTip(f"Import from LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+I)")
+        
         btn_export_csv = QtWidgets.QPushButton("Export CSV")
         btn_export_csv.clicked.connect(self.export_to_csv)
+        btn_export_csv.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_E))
+        btn_export_csv.setToolTip(f"Export to CSV ({'Cmd' if IS_MACOS else 'Ctrl'}+E)")
+        
         btn_export_ldif = QtWidgets.QPushButton("Export LDIF")
         btn_export_ldif.clicked.connect(self.export_to_ldif)
+        btn_export_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Shift | QtCore.Qt.Key.Key_E))
+        btn_export_ldif.setToolTip(f"Export to LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+E)")
+        
         toolbar.addWidget(btn_import_csv); toolbar.addWidget(btn_import_ldif)
         toolbar.addWidget(btn_export_csv); toolbar.addWidget(btn_export_ldif)
         btn_columns = QtWidgets.QPushButton("Columns")
         btn_columns.clicked.connect(self.select_columns)
+        btn_columns.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_K))
+        btn_columns.setToolTip(f"Select columns ({'Cmd' if IS_MACOS else 'Ctrl'}+K)")
+        
         toolbar.addWidget(btn_columns)
         btn_save_layout = QtWidgets.QPushButton("Save Layout")
         btn_save_layout.clicked.connect(self.save_columns_to_config)
+        btn_save_layout.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_S))
+        btn_save_layout.setToolTip(f"Save column layout ({'Cmd' if IS_MACOS else 'Ctrl'}+S)")
+        
         toolbar.addWidget(btn_save_layout)
         
         self.u_table = QtWidgets.QTableWidget(0, 0)
@@ -368,6 +453,20 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         self.tabs.addTab(env_tab, "Configuration"); self.tabs.addTab(user_tab, "User Management")
+
+    def _get_native_file_dialog_options(self):
+        """Return platform-appropriate file dialog options."""
+        options = QtWidgets.QFileDialog.Option(0)
+        # On macOS, use native dialogs for better integration
+        if IS_MACOS:
+            options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+            # Actually, we want native dialogs on macOS, so don't set this flag
+            options = QtWidgets.QFileDialog.Option(0)
+        elif IS_LINUX:
+            # On Linux, Qt dialogs sometimes work better than native
+            options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
+        # Windows uses native by default, which is fine
+        return options
 
     # --- Profile Methods ---
     def _read_config(self):
@@ -990,7 +1089,10 @@ class MainWindow(QtWidgets.QMainWindow):
             start_btn.setEnabled(True); stop_btn.setEnabled(False)
 
         def save():
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Capture", "api_capture.txt", "Text Files (*.txt);;All Files (*)")
+            options = self._get_native_file_dialog_options()
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save Capture", "api_capture.txt", "Text Files (*.txt);;All Files (*)", options=options
+            )
             if not path:
                 return
             try:
@@ -1053,7 +1155,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not existing:
             QtWidgets.QMessageBox.information(self, "Archive Logs", "No log files found to archive.")
             return
-        dest_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Archive Directory", str(Path.cwd()))
+        options = self._get_native_file_dialog_options()
+        dest_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Archive Directory", str(Path.cwd()), options=options
+        )
         if not dest_dir:
             return
         ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
@@ -1324,7 +1429,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         if not self.users_cache:
             QtWidgets.QMessageBox.information(self, "Export", "No users to export.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export CSV", "users.csv", "CSV Files (*.csv);;All Files (*)")
+        options = self._get_native_file_dialog_options()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export CSV", "users.csv", "CSV Files (*.csv);;All Files (*)", options=options
+        )
         if not path:
             return
         # Load per-profile defaults (if any)
@@ -1405,7 +1513,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         if not self.users_cache:
             QtWidgets.QMessageBox.information(self, "Export", "No users to export.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export LDIF", "users.ldif", "LDIF Files (*.ldif);;All Files (*)")
+        options = self._get_native_file_dialog_options()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export LDIF", "users.ldif", "LDIF Files (*.ldif);;All Files (*)", options=options
+        )
         if not path:
             return
         # Load per-profile defaults (if any)
@@ -1558,7 +1669,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
     def import_from_csv(self):
         """Import users from a CSV file. CSV must have headers matching exported columns (dot-notation)."""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import CSV", "", "CSV Files (*.csv);;All Files (*)")
+        options = self._get_native_file_dialog_options()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import CSV", "", "CSV Files (*.csv);;All Files (*)", options=options
+        )
         if not path:
             return
         try:
@@ -1915,7 +2029,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
     def import_from_ldif(self):
         """Import users from a simple LDIF file created by this app's export."""
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import LDIF", "", "LDIF Files (*.ldif);;All Files (*)")
+        options = self._get_native_file_dialog_options()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import LDIF", "", "LDIF Files (*.ldif);;All Files (*)", options=options
+        )
         if not path:
             return
         try:

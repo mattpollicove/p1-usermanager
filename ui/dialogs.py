@@ -6,6 +6,7 @@ table columns, and viewing/editing JSON payloads.
 
 import json
 import sys
+import platform
 from pathlib import Path
 
 # Add project root to sys.path when running this file directly so
@@ -17,6 +18,29 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from PySide6 import QtWidgets, QtCore, QtGui
 
+# Platform detection for cross-platform UI optimization
+IS_MACOS = platform.system() == 'Darwin'
+IS_WINDOWS = platform.system() == 'Windows'
+IS_LINUX = platform.system() == 'Linux'
+
+
+def get_dpi_scale():
+    """Get the current DPI scale factor for sizing dialogs appropriately."""
+    try:
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen:
+            return screen.devicePixelRatio()
+    except Exception:
+        pass
+    return 1.0
+
+
+def scale_size(base_size, dpi_scale=None):
+    """Scale a size value based on DPI, ensuring minimum readability."""
+    if dpi_scale is None:
+        dpi_scale = get_dpi_scale()
+    return int(base_size * max(1.0, dpi_scale * 0.8))
+
 
 class EditUserDialog(QtWidgets.QDialog):
     """Dialog for editing user information."""
@@ -24,6 +48,11 @@ class EditUserDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Edit User")
         self.setModal(True)
+        
+        # Set minimum size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(450, dpi_scale), scale_size(400, dpi_scale))
+        
         layout = QtWidgets.QFormLayout(self)
         
         self.username = QtWidgets.QLineEdit(user_data.get('username', ''))
@@ -102,6 +131,11 @@ class ColumnSelectDialog(QtWidgets.QDialog):
     def __init__(self, all_columns, selected, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Columns")
+        
+        # Set minimum size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(400, dpi_scale), scale_size(300, dpi_scale))
+        
         layout = QtWidgets.QHBoxLayout(self)
         self.checkboxes = {}
         sorted_cols = sorted(all_columns)
@@ -137,6 +171,11 @@ class JSONViewDialog(QtWidgets.QDialog):
         self.user_id = user_id
         self.col_name = col_name
         self.parent = parent
+        
+        # Set minimum size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(600, dpi_scale), scale_size(400, dpi_scale))
+        
         layout = QtWidgets.QVBoxLayout(self)
         self.text = QtWidgets.QTextEdit()
         self.text.setPlainText(json.dumps(data, indent=2))
@@ -178,7 +217,11 @@ class TextViewDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumSize(600, 400)
+        
+        # Set minimum size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(600, dpi_scale), scale_size(400, dpi_scale))
+        
         layout = QtWidgets.QVBoxLayout(self)
         self.text = QtWidgets.QTextEdit()
         self.text.setReadOnly(not bool(editable))
@@ -238,6 +281,11 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Attribute Mapping")
         self.setModal(True)
+        
+        # Set minimum size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(700, dpi_scale), scale_size(500, dpi_scale))
+        
         layout = QtWidgets.QVBoxLayout(self)
 
         # Keep a local copy of headers for dropdowns
