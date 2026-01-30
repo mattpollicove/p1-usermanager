@@ -39,140 +39,79 @@ APP_VERSION = "0.51"
 # whenever you change features or behavior. See DEVELOPMENT_RULES.md
 # for the project rule about keeping help docs in sync.
 HELP_CONFIG = """
-            try:
-                if not pops:
-                    pops = asyncio.run(client.get_populations())
-                # convert any user with population.name -> population.id for both creates and updates
-                targets = []
-                if create_users:
-                    targets.extend(create_users)
-                if update_pairs:
-                    targets.extend([u for (_id, u) in update_pairs])
-                for u in targets:
-                    if fixed_pop_id:
-                        u['population'] = {'id': fixed_pop_id}
-                        continue
-                    pop = u.get('population')
-                    if isinstance(pop, dict):
-                        name = pop.get('name')
-                        if name and name in pops:
-                            u['population'] = {'id': pops[name]}
-                            continue
-                        val = pop.get('id')
-                        if val:
-                            if val in pops.values():
-                                u['population'] = {'id': val}
-                            elif val in pops:
-                                u['population'] = {'id': pops[val]}
-            except Exception:
-                pass
+Configuration Tab Help:
 
-            # Helper to start updates after create finishes
-            def _start_updates_and_show(prev_created=0, prev_total=0, prev_errors=None):
-                prev_errors = prev_errors or []
-                if not update_pairs:
-                    # No updates to perform; show final result
-                    created = prev_created
-                    total = prev_total
-                    errors = prev_errors
-                    if created == 0 and errors:
-                        dlg = QtWidgets.QDialog(self)
-                        dlg.setWindowTitle("Import Result")
-                        lay = QtWidgets.QVBoxLayout(dlg)
-                        lab = QtWidgets.QLabel(f"Created {created}/{total} users. No users were created.")
-                        te = QtWidgets.QTextEdit()
-                        te.setReadOnly(True)
-                        te.setPlainText('\n'.join(errors))
-                        te.setMinimumHeight(300)
-                        lay.addWidget(lab)
-                        lay.addWidget(te)
-                        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                        btns.accepted.connect(dlg.accept)
-                        lay.addWidget(btns)
-                        try:
-                            screen = QtWidgets.QApplication.primaryScreen()
-                            geom = screen.availableGeometry()
-                            w = min(int(geom.width() * 0.75), 1100)
-                            h = min(int(geom.height() * 0.6), 800)
-                            dlg.resize(max(700, w), max(400, h))
-                        except Exception:
-                            dlg.resize(900, 500)
-                        dlg.exec()
-                    else:
-                        QtWidgets.QMessageBox.information(self, "Import Complete", f"Created {created}/{total} users")
-                    self.refresh_users()
-                    return
+Connecting to PingOne:
 
-                # Start bulk update worker
-                self.prog.show(); self.prog.setRange(0, len(update_pairs))
-                upd_w = BulkUpdateWorker(client, update_pairs)
-                upd_w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
-                def _on_updates_done(res):
-                    self.prog.hide()
-                    updated = res.get('updated', 0)
-                    total_upd = res.get('total', 0)
-                    upd_errors = res.get('errors', []) or []
-                    # Combine previous create results with update results for reporting
-                    created = prev_created
-                    total = prev_total
-                    errors = (prev_errors or []) + upd_errors
-                    msg = f"Created {created}/{total} users; Updated {updated}/{total_upd} users"
-                    if errors:
-                        dlg = QtWidgets.QDialog(self)
-                        dlg.setWindowTitle("Import Result")
-                        lay = QtWidgets.QVBoxLayout(dlg)
-                        lab = QtWidgets.QLabel(msg)
-                        te = QtWidgets.QTextEdit()
-                        te.setReadOnly(True)
-                        te.setPlainText('\n'.join(errors))
-                        te.setMinimumHeight(300)
-                        lay.addWidget(lab)
-                        lay.addWidget(te)
-                        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                        btns.accepted.connect(dlg.accept)
-                        lay.addWidget(btns)
-                        try:
-                            screen = QtWidgets.QApplication.primaryScreen()
-                            geom = screen.availableGeometry()
-                            w = min(int(geom.width() * 0.75), 1100)
-                            h = min(int(geom.height() * 0.6), 800)
-                            dlg.resize(max(700, w), max(400, h))
-                        except Exception:
-                            dlg.resize(900, 500)
-                        dlg.exec()
-                    else:
-                        QtWidgets.QMessageBox.information(self, "Import Complete", msg)
-                    self.refresh_users()
+1. Obtain your PingOne Environment ID, Client ID, and Client Secret from the 
+   PingOne admin console.
 
-                upd_w.signals.finished.connect(_on_updates_done)
-                upd_w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Update Error", m)))
-                self.threadpool.start(upd_w)
-            if create_users:
-                # Start create worker and chain updates
-                self.prog.show(); self.prog.setRange(0, len(create_users))
-                w = BulkCreateWorker(client, create_users)
-                w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
-                def on_done(res):
-                    created = res.get('created', 0)
-                    total = res.get('total', 0)
-                    errors = res.get('errors', []) or []
-                    _start_updates_and_show(prev_created=created, prev_total=total, prev_errors=errors)
-                w.signals.finished.connect(on_done)
-                w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
-                self.threadpool.start(w)
-                msg = f"Import started: {len(create_users)} users to create; {len(update_pairs)} to update"
-            else:
-                # No creates; start updates directly
-                _start_updates_and_show(prev_created=0, prev_total=0, prev_errors=[])
-- View the Connection Log to inspect connection errors and recent API
-    request/response summaries when API logging is enabled.
+2. Select an existing profile or create a new one using the "Active Profile" dropdown.
 
-User Management Tab:
-- View the user table (UUID, username, first/last name, population).
-- Refresh to reload users from PingOne.
-- Delete Selected removes users (with confirmation) and shows progress.
-- Columns opens a dialog to choose which attributes to display; new
-    columns are appended to the end of the selection by default.
+3. Enter the Environment ID, Client ID, and Client Secret in the respective fields. 
+   The Client Secret is stored securely in your system's keyring.
+
+4. Click "Save Profile" to persist the credentials and settings.
+
+5. Click "Connect & Sync" to authenticate and fetch users from PingOne.
+
+Profile Settings:
+- Credentials (Env ID, Client ID, Secret) are saved per-profile.
+- Column selection and order are saved per-profile.
+- Import/export preferences are saved per-profile when "Remember" is checked.
+- The last active profile can auto-connect on startup (see Settings menu).
+
+Status Bar:
+- Shows live API call summaries when "Show API calls in status bar" is enabled.
+- Displays connection status and recent operation results.
+- API call logging can be toggled from the Settings menu.
+
+See the User Management help for information about working with users.
+"""
+
+HELP_USER = """
+User Management Tab Help:
+
+Viewing Users:
+- The table displays users with selected columns (UUID, username, name, etc.).
+- Click "Refresh" to reload users from PingOne.
+- Use "Columns" to select which attributes to display.
+- Column selection and order are saved per-profile.
+
+Editing Users:
+- Double-click on the UUID or username to open the edit dialog.
+- Single-click selects a row without opening the editor.
+- Double-click on email addresses to open your email client.
+- Double-click on JSON-formatted attributes (name, address, etc.) to view/edit in a separate window.
+- The context menu (right-click) offers "Delete Selected" only.
+
+Importing Users:
+- Click "Import CSV" or "Import LDIF" to bulk-create or update users.
+- The mapping dialog lets you map file headers to PingOne attributes:
+  • Required fields: username, email, name.given, name.family
+  • The 'enabled' field is a dropdown (true/false)
+  • You can assign a fixed population to all imported users
+  • Check "Remember mapping for this profile" to save mappings
+- Usernames are normalized (whitespace trimmed, case-insensitive comparison).
+- If a username already exists on the server, the import updates that user instead of creating a duplicate.
+- Local JSON Schema validation is performed if jsonschema is installed and user_schema.json exists.
+
+Exporting Users:
+- Click "Export CSV" or "Export LDIF" to save users.
+- Choose to export all users or selected rows only.
+- Choose to export all columns or only visible columns.
+- Check "Remember these choices" to save export preferences per-profile.
+
+Deleting Users:
+- Select one or more rows and click "Delete Selected" or use the context menu.
+- A confirmation dialog will appear before deletion.
+- Progress is shown for bulk deletions.
+
+Logs Menu:
+- "Show Log Files" displays connection and API logs in a dialog.
+- "Reset Log" clears an individual log file.
+- "Clear All Logs" empties all log files at once.
+- "Archive Logs" creates a timestamped .zip archive of all logs, with optional rotation (truncate originals after archiving).
 """
 
 
@@ -1272,71 +1211,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.threadpool.start(worker)
 
     def show_config_help(self):
-        help_text = """
-Configuration Tab Help:
-
-To make a connection to PingOne:
-
-1. Obtain your PingOne Environment ID, Client ID, and Client Secret from your PingOne admin console.
-
-2. Select or create a profile name in the "Active Profile" dropdown.
-
-3. Enter the Environment ID in the "Env ID" field.
-
-4. Enter the Client ID in the "Client ID" field.
-
-5. Enter the Client Secret in the "Secret" field (it will be stored securely using keyring).
-
-6. Click "Save Profile" to save the credentials. This also saves the selected columns for the profile.
-
-7. Click "Connect & Sync" to test the connection and load users.
-
-Note: Credentials and column preferences (selection and order) are stored securely and associated with the profile name.
-"""
         QtWidgets.QMessageBox.information(self, "Configuration Help", HELP_CONFIG)
 
     def show_user_help(self):
-        help_text = """
-User Management Tab Help:
-
-Available Options:
-
-
-
-
-
-
-  - Edit: Opens a dialog to edit the first selected user's details (username, email, first/last name, phone, address). Population is displayed but not modifiable. A confirmation dialog will appear before saving changes.
-  - Delete Selected: Deletes all currently selected users.
-
-  - Double-click on UUID (ID) to edit the user.
-  - Double-click on an email cell to prompt opening the email client.
-  - Double-click on JSON-formatted attributes (e.g., name, address, phoneNumbers) to view/edit the JSON in a separate window.
-
         QtWidgets.QMessageBox.information(self, "User Management Help", HELP_USER)
-  - Enable JSON Editing: Toggle to allow editing of JSON content in double-click dialogs.
-  - Use Friendly Column Names: Toggle between user-friendly names and raw attribute names for column headers.
-  - Revert to Default Columns: Reset column selection to the default set.
-  - Enable API Logging: Toggle to log all API calls to 'api_calls.log' file for debugging.
-
-- Table Features:
-  - Click column headers to sort.
-  - Drag column boundaries to adjust widths (widths are saved per profile).
-  - Drag column headers to reorder columns (order is saved per profile).
-  - Select multiple rows with Ctrl+Click or Shift+Click.
-  - The 'id' column is always available but cannot be deselected.
-
-Note: All operations require valid credentials and will show progress. Status updates are displayed at the bottom of the screen.
-"""
-        QtWidgets.QMessageBox.information(self, "User Management Help", help_text)
 
     def show_full_help(self):
         """Show comprehensive help covering all UI options and configuration."""
-        QtWidgets.QMessageBox.information(self, "Full Help & Options", HELP_FULL)
+        combined = f"{HELP_CONFIG}\n\n{HELP_USER}"
+        QtWidgets.QMessageBox.information(self, "Full Help & Options", combined)
 
     def show_tabs_help(self):
         """Show a focused help dialog describing the Connection and User tabs."""
-        QtWidgets.QMessageBox.information(self, "Tabs Overview", HELP_TABS)
+        tabs_text = """
+Tabs Overview:
+
+Configuration Tab:
+- Connect to PingOne environments using worker app credentials
+- Manage multiple profiles with saved credentials and column preferences
+- View status bar updates for API calls and operations
+
+User Management Tab:
+- View, edit, import, export, and delete users
+- Customize table columns per-profile
+- Import/export CSV and LDIF formats with attribute mapping
+- Update existing users during import (no duplicates)
+
+See Configuration Help and User Management Help from the Help menu for detailed information.
+"""
+        QtWidgets.QMessageBox.information(self, "Tabs Overview", tabs_text)
 
     def show_app_help(self):
         """Show the project's README.md as application help in a resizable dialog."""
@@ -1347,9 +1250,9 @@ Note: All operations require valid credentials and will show progress. Status up
                 with open(readme, 'r', encoding='utf-8') as f:
                     content = f.read()
             else:
-                content = HELP_FULL
+                content = f"{HELP_CONFIG}\n\n{HELP_USER}"
         except Exception as e:
-            content = f"Failed to load README.md: {e}\n\nFallback help:\n" + HELP_FULL
+            content = f"Failed to load README.md: {e}\n\nFallback help:\n{HELP_CONFIG}\n\n{HELP_USER}"
 
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle('Application Help')
