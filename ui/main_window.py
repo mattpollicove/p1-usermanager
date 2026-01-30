@@ -139,7 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
         
-        # Set DPI-aware minimum window size
+        # Set DPI-aware window size (not full screen)
         try:
             screen = QtWidgets.QApplication.primaryScreen()
             if screen:
@@ -147,10 +147,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 min_width = int(1200 * max(1.0, dpi_scale * 0.8))
                 min_height = int(800 * max(1.0, dpi_scale * 0.8))
                 self.setMinimumSize(min_width, min_height)
+                # Set initial size to 80% of screen to avoid full screen
+                screen_geometry = screen.availableGeometry()
+                initial_width = int(screen_geometry.width() * 0.8)
+                initial_height = int(screen_geometry.height() * 0.8)
+                self.resize(initial_width, initial_height)
             else:
                 self.setMinimumSize(1200, 800)
+                self.resize(1200, 800)
         except Exception:
             self.setMinimumSize(1200, 800)
+            self.resize(1200, 800)
         
         self.threadpool = QtCore.QThreadPool()
         self.config_file, self.users_cache, self.pop_map = Path("profiles.json"), [], {}
