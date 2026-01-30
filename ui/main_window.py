@@ -42,7 +42,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "UserManager"
-APP_VERSION = "0.52"
+APP_VERSION = "0.53"
 
 
 # Predefined help texts to avoid reallocating large strings on each call.
@@ -143,24 +143,30 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             screen = QtWidgets.QApplication.primaryScreen()
             if screen:
-                dpi_scale = screen.devicePixelRatio()
-                min_width = int(1200 * max(1.0, dpi_scale * 0.8))
-                min_height = int(800 * max(1.0, dpi_scale * 0.8))
-                self.setMinimumSize(min_width, min_height)
-                # Set initial size to 75% of screen and center the window
                 screen_geometry = screen.availableGeometry()
+                dpi_scale = screen.devicePixelRatio()
+                
+                # Calculate 75% of screen as the initial/target size
                 initial_width = int(screen_geometry.width() * 0.75)
                 initial_height = int(screen_geometry.height() * 0.75)
+                
+                # Set minimum size to be smaller than 75% to allow window to be 75% or less
+                # Use 800x600 as base minimum, adjusted for DPI
+                min_width = min(int(800 * max(1.0, dpi_scale * 0.8)), initial_width)
+                min_height = min(int(600 * max(1.0, dpi_scale * 0.8)), initial_height)
+                self.setMinimumSize(min_width, min_height)
+                
+                # Set initial size to 75% of screen and center the window
                 self.resize(initial_width, initial_height)
                 # Center the window on screen
                 x = screen_geometry.x() + (screen_geometry.width() - initial_width) // 2
                 y = screen_geometry.y() + (screen_geometry.height() - initial_height) // 2
                 self.move(x, y)
             else:
-                self.setMinimumSize(1200, 800)
+                self.setMinimumSize(800, 600)
                 self.resize(1200, 800)
         except Exception:
-            self.setMinimumSize(1200, 800)
+            self.setMinimumSize(800, 600)
             self.resize(1200, 800)
         
         self.threadpool = QtCore.QThreadPool()
@@ -188,6 +194,16 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         self.init_ui()
         self.load_profiles_from_disk()
+        # Don't restore geometry here - do it in showEvent after window is shown
+
+    def showEvent(self, event):
+        """Override showEvent to restore geometry after window is fully initialized."""
+        super().showEvent(event)
+        # Only restore geometry once
+        if not hasattr(self, '_geometry_restored'):
+            self._geometry_restored = True
+            # Use a timer to restore geometry after the window is fully shown
+            QtCore.QTimer.singleShot(0, self.restore_window_geometry)
 
     def init_ui(self):
         # Build the main UI widgets and wire actions to slots.
@@ -486,6 +502,112 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.config_file.exists():
             with open(self.config_file, 'r') as f: return json.load(f)
         return {}
+
+    def restore_window_geometry(self):
+        """Restore saved window geometry from profiles.json __meta__ section."""
+        try:
+            cfg = self._read_config()
+            meta = cfg.get('__meta__', {})
+            
+            # Check window state flags first
+            was_maximized = meta.get('was_maximized', False)
+            was_fullscreen = meta.get('was_fullscreen', False)
+            
+            # Only restore saved geometry if NOT maximized/fullscreen
+            if not was_maximized and not was_fullscreen:
+                # Manually restore size and position instead of using restoreGeometry
+                width = meta.get('window_width')
+                height = meta.get('window_height')
+                x = meta.get('window_x')
+                y = meta.get('window_y')
+                
+                if width and height:
+                    # Get screen info to enforce limits
+                    screen = QtWidgets.QApplication.primaryScreen()
+                    if screen:
+                        screen_geometry = screen.availableGeometry()
+                        max_width = int(screen_geometry.width() * 0.75)
+                        max_height = int(screen_geometry.height() * 0.75)
+                        
+                        # Enforce 75% width and height limits
+                        if width > max_width:
+                            width = max_width
+                        if height > max_height:
+                            height = max_height
+                        
+                        # Ensure position is valid
+                        if x is None or y is None:
+                            # Center the window
+                            x = screen_geometry.x() + (screen_geometry.width() - width) // 2
+                            y = screen_geometry.y() + (screen_geometry.height() - height) // 2
+                        
+                        # Force the window to be in normal state before setting geometry
+                        self.setWindowState(QtCore.Qt.WindowState.WindowNoState)
+                        
+                        # Simply resize and move - minimum size is already set appropriately in __init__
+                        self.resize(width, height)
+                        self.move(x, y)
+            
+            # Explicitly set window state
+            if was_fullscreen:
+                self.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
+            elif was_maximized:
+                self.setWindowState(QtCore.Qt.WindowState.WindowMaximized)
+            else:
+                # Explicitly ensure normal state
+                self.setWindowState(QtCore.Qt.WindowState.WindowNoState)
+        except Exception:
+            # If restore fails, keep default geometry
+            pass
+
+    def save_window_geometry(self):
+        """Save window geometry to profiles.json __meta__ section."""
+        try:
+            cfg = self._read_config()
+            if '__meta__' not in cfg:
+                cfg['__meta__'] = {}
+            
+            # Save window state flags (maximized, fullscreen, etc.)
+            state = self.windowState()
+            is_maximized = bool(state & QtCore.Qt.WindowState.WindowMaximized)
+            is_fullscreen = bool(state & QtCore.Qt.WindowState.WindowFullScreen)
+            
+            cfg['__meta__']['was_maximized'] = is_maximized
+            cfg['__meta__']['was_fullscreen'] = is_fullscreen
+            
+            # Only save geometry if in normal state (not maximized/fullscreen)
+            if not is_maximized and not is_fullscreen:
+                # Get current screen to enforce 75% limits on save
+                screen = QtWidgets.QApplication.primaryScreen()
+                if screen:
+                    screen_geometry = screen.availableGeometry()
+                    max_width = int(screen_geometry.width() * 0.75)
+                    max_height = int(screen_geometry.height() * 0.75)
+                    
+                    # Cap to 75% when saving
+                    width = min(self.width(), max_width)
+                    height = min(self.height(), max_height)
+                    
+                    cfg['__meta__']['window_width'] = width
+                    cfg['__meta__']['window_height'] = height
+                    cfg['__meta__']['window_x'] = self.x()
+                    cfg['__meta__']['window_y'] = self.y()
+                else:
+                    # Fallback if screen not available
+                    cfg['__meta__']['window_width'] = self.width()
+                    cfg['__meta__']['window_height'] = self.height()
+                    cfg['__meta__']['window_x'] = self.x()
+                    cfg['__meta__']['window_y'] = self.y()
+            
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """Override closeEvent to save window geometry before closing."""
+        self.save_window_geometry()
+        super().closeEvent(event)
 
     def load_profiles_from_disk(self):
         # Load profiles.json, migrate column definitions if needed,
