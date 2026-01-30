@@ -384,7 +384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         btn_import_ldif = QtWidgets.QPushButton("Import LDIF")
         btn_import_ldif.clicked.connect(self.import_from_ldif)
-        btn_import_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Shift | QtCore.Qt.Key.Key_I))
+        btn_import_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_I))
         btn_import_ldif.setToolTip(f"Import from LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+I)")
         
         btn_export_csv = QtWidgets.QPushButton("Export CSV")
@@ -394,7 +394,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         btn_export_ldif = QtWidgets.QPushButton("Export LDIF")
         btn_export_ldif.clicked.connect(self.export_to_ldif)
-        btn_export_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Shift | QtCore.Qt.Key.Key_E))
+        btn_export_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_E))
         btn_export_ldif.setToolTip(f"Export to LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+E)")
         
         toolbar.addWidget(btn_import_csv); toolbar.addWidget(btn_import_ldif)
