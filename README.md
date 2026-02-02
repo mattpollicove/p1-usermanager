@@ -2,11 +2,11 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.52)
+PingOne UserManager (v0.6)
 UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
 🚀 Key Features
-Multi-Profile Support: Manage multiple PingOne environments (Dev, Staging, Prod) with easy switching.
+Multi-Profile Support: Manage multiple PingOne environments (Dev, Staging, Prod) with easy switching. Use the Profile Manager (File → Manage Profiles) to view all configurations and delete unwanted profiles.
 
 Hardware-Backed Security: Sensitive Client Secrets are never stored in plain text; they are vaulted in the OS-native keychain (Windows Credential Manager, macOS Keychain, or Linux Secret Service).
 
@@ -17,6 +17,8 @@ Delta-Patching: Updates are sent via HTTP PATCH, sending only the fields you cha
 Bulk Operations: Select and delete multiple users simultaneously with a safe, queued background worker.
 
 Live Statistics: Real-time dashboard showing total user and population counts.
+
+Dark Mode: Toggle between light and dark themes for comfortable viewing in any environment. Theme preference is saved and persists across sessions.
 
 🛠️ Technical Architecture
 The application uses a Non-Blocking Worker Pattern. All API communications are handled by QRunnable workers in a dedicated thread pool, ensuring the interface remains responsive even when fetching thousands of users.
@@ -70,6 +72,27 @@ Manage Users:
 Double-click a row to edit a user's full attribute set.
 
 Use Ctrl+Click or Shift+Click to select multiple users for deletion.
+
+Customize Columns:
+
+The default column display includes: UUID, First Name, Last Name, Email, and Population (in that order).
+
+Column settings are saved per-profile, allowing different column configurations for different environments.
+
+Use Settings → Select Columns (Cmd/Ctrl+K) to customize which attributes appear in the table.
+
+Column Selection Dialog features:
+  - **Select All**: Check all available columns
+  - **Clear All**: Uncheck all columns (except required UUID)
+  - **Reset to Defaults**: Restore the default column set
+
+Use Settings → Revert to Default Columns to quickly reset your column selection.
+
+The active profile name is displayed in the status bar for easy reference.
+
+Customize Appearance:
+
+Toggle Dark Mode from the Settings menu (Cmd+D / Ctrl+D) for comfortable viewing in low-light environments.
 
 Exporting Users
 

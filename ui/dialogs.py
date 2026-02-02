@@ -131,12 +131,17 @@ class ColumnSelectDialog(QtWidgets.QDialog):
     def __init__(self, all_columns, selected, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Columns")
+        self.parent_window = parent
+        self.defaults_applied = False  # Track if user clicked Reset to Defaults
         
         # Set minimum size based on DPI
         dpi_scale = get_dpi_scale()
         self.setMinimumSize(scale_size(400, dpi_scale), scale_size(300, dpi_scale))
         
-        layout = QtWidgets.QHBoxLayout(self)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        
+        # Columns checkboxes
+        columns_layout = QtWidgets.QHBoxLayout()
         self.checkboxes = {}
         sorted_cols = sorted(all_columns)
         mid = len(sorted_cols) // 2
@@ -151,16 +156,78 @@ class ColumnSelectDialog(QtWidgets.QDialog):
                 col_layout.addWidget(cb)
                 self.checkboxes[col] = cb
             col_layout.addStretch()
-            layout.addLayout(col_layout)
+            columns_layout.addLayout(col_layout)
         
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        main_layout.addLayout(columns_layout)
+        
+        # Buttons
+        buttons_layout = QtWidgets.QHBoxLayout()
+        
+        select_all_btn = QtWidgets.QPushButton("Select All")
+        select_all_btn.clicked.connect(self.select_all)
+        buttons_layout.addWidget(select_all_btn)
+        
+        clear_all_btn = QtWidgets.QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self.clear_all)
+        buttons_layout.addWidget(clear_all_btn)
+        
+        reset_btn = QtWidgets.QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(self.reset_to_defaults)
+        buttons_layout.addWidget(reset_btn)
+        
+        buttons_layout.addStretch()
+        
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        buttons_layout.addWidget(button_box)
+        
+        main_layout.addLayout(buttons_layout)
     
     def get_selected(self):
         """Return the list of selected column names."""
+        # If defaults were applied, return them in the correct order
+        if self.defaults_applied and self.parent_window and hasattr(self.parent_window, 'default_columns'):
+            default_columns = self.parent_window.default_columns
+            # Return defaults first, then any additional selected columns
+            selected = [col for col in default_columns if self.checkboxes.get(col, QtWidgets.QCheckBox()).isChecked()]
+            # Add any non-default columns that are selected
+            for col, cb in self.checkboxes.items():
+                if cb.isChecked() and col not in default_columns:
+                    selected.append(col)
+            return selected
+        
         return [col for col, cb in self.checkboxes.items() if cb.isChecked()]
+    
+    def reset_to_defaults(self):
+        """Reset checkboxes to default columns."""
+        # Get default columns from parent window
+        default_columns = ['id', 'name.given', 'name.family', 'email', 'population.name']
+        if self.parent_window and hasattr(self.parent_window, 'default_columns'):
+            default_columns = self.parent_window.default_columns
+        
+        # Mark that defaults were applied
+        self.defaults_applied = True
+        
+        # Update checkboxes
+        for col, cb in self.checkboxes.items():
+            if col == 'id':
+                continue  # Always checked and disabled
+            cb.setChecked(col in default_columns)
+    
+    def select_all(self):
+        """Select all column checkboxes."""
+        self.defaults_applied = False  # Clear defaults flag since this is a custom selection
+        for col, cb in self.checkboxes.items():
+            cb.setChecked(True)
+    
+    def clear_all(self):
+        """Clear all column checkboxes except the required 'id' column."""
+        self.defaults_applied = False  # Clear defaults flag since this is a custom selection
+        for col, cb in self.checkboxes.items():
+            if col == 'id':
+                continue  # ID is always required and disabled
+            cb.setChecked(False)
 
 
 class JSONViewDialog(QtWidgets.QDialog):
@@ -733,3 +800,463 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             'only_visible_columns': bool(self.only_visible_cb.isChecked()),
             'remember': bool(self.remember_cb.isChecked())
         }
+
+
+class NewProfileDialog(QtWidgets.QDialog):
+    """Dialog for creating a new profile with connection details."""
+    
+    def __init__(self, existing_profiles: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Create New Profile')
+        self.setModal(True)
+        self.existing_profiles = existing_profiles
+        
+        # Set dialog size
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(600, dpi_scale), scale_size(350, dpi_scale))
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Info label
+        info = QtWidgets.QLabel(
+            "Create a new profile by entering a name and connection details.\n"
+            "Connection details are optional and can be configured later."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        # Form for profile details
+        form = QtWidgets.QFormLayout()
+        
+        # Profile name - make it wide enough for reasonable names
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText("e.g., Production, Development")
+        self.name_edit.setMinimumWidth(scale_size(400, dpi_scale))
+        form.addRow("Profile Name*:", self.name_edit)
+        
+        form.addRow(QtWidgets.QLabel(""))  # Spacer
+        
+        # Connection details header
+        conn_label = QtWidgets.QLabel("Connection Details (Optional):")
+        font = conn_label.font()
+        font.setBold(True)
+        conn_label.setFont(font)
+        form.addRow(conn_label)
+        
+        # Environment ID - match profile manager sizing
+        self.env_id_edit = QtWidgets.QLineEdit()
+        self.env_id_edit.setPlaceholderText("Environment ID (UUID)")
+        self.env_id_edit.setMaxLength(40)
+        self.env_id_edit.setMinimumWidth(scale_size(400, dpi_scale))
+        form.addRow("Environment ID:", self.env_id_edit)
+        
+        # Client ID - match profile manager sizing
+        self.client_id_edit = QtWidgets.QLineEdit()
+        self.client_id_edit.setPlaceholderText("Client ID (UUID)")
+        self.client_id_edit.setMaxLength(40)
+        self.client_id_edit.setMinimumWidth(scale_size(400, dpi_scale))
+        form.addRow("Client ID:", self.client_id_edit)
+        
+        # Client Secret with show/hide toggle - ensure proper alignment
+        secret_layout = QtWidgets.QHBoxLayout()
+        secret_layout.setContentsMargins(0, 0, 0, 0)
+        secret_layout.setSpacing(5)
+        
+        self.client_secret_edit = QtWidgets.QLineEdit()
+        self.client_secret_edit.setPlaceholderText("Client Secret")
+        self.client_secret_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.client_secret_edit.setMaxLength(100)
+        self.client_secret_edit.setMinimumWidth(scale_size(330, dpi_scale))
+        secret_layout.addWidget(self.client_secret_edit)
+        
+        self.show_secret_btn = QtWidgets.QPushButton("Show")
+        self.show_secret_btn.setCheckable(True)
+        self.show_secret_btn.setFixedWidth(scale_size(65, dpi_scale))
+        self.show_secret_btn.toggled.connect(self._toggle_secret_visibility)
+        secret_layout.addWidget(self.show_secret_btn)
+        
+        secret_widget = QtWidgets.QWidget()
+        secret_widget.setLayout(secret_layout)
+        form.addRow("Client Secret:", secret_widget)
+        
+        layout.addLayout(form)
+        
+        # Note about partial configuration
+        note = QtWidgets.QLabel(
+            "Note: You can leave connection details empty and configure them later "
+            "in the Configuration tab."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 10pt;")
+        layout.addWidget(note)
+        
+        # Buttons
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(self.validate_and_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # Focus on name field
+        self.name_edit.setFocus()
+    
+    def _toggle_secret_visibility(self, checked):
+        """Toggle client secret visibility."""
+        if checked:
+            self.client_secret_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
+            self.show_secret_btn.setText("Hide")
+        else:
+            self.client_secret_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+            self.show_secret_btn.setText("Show")
+    
+    def validate_and_accept(self):
+        """Validate inputs before accepting."""
+        name = self.name_edit.text().strip()
+        
+        # Validate profile name
+        if not name:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Name",
+                "Profile name cannot be empty."
+            )
+            self.name_edit.setFocus()
+            return
+        
+        if name == '__meta__':
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Name",
+                "Profile name '__meta__' is reserved."
+            )
+            self.name_edit.setFocus()
+            return
+        
+        if name in self.existing_profiles:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Profile Exists",
+                f"A profile named '{name}' already exists.\nPlease choose a different name."
+            )
+            self.name_edit.setFocus()
+            return
+        
+        # If any connection detail is provided, validate that we have at least env_id and client_id
+        env_id = self.env_id_edit.text().strip()
+        client_id = self.client_id_edit.text().strip()
+        secret = self.client_secret_edit.text().strip()
+        
+        # Partial validation: if any field is filled, recommend filling all
+        filled_fields = sum([bool(env_id), bool(client_id), bool(secret)])
+        if 0 < filled_fields < 3:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Incomplete Credentials",
+                "You have only partially filled the connection details.\n\n"
+                "For a complete configuration, all three fields (Environment ID, Client ID, and Client Secret) are needed.\n\n"
+                "Do you want to continue anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No
+            )
+            if reply == QtWidgets.QMessageBox.No:
+                return
+        
+        self.accept()
+    
+    def get_profile_data(self):
+        """Return the profile data as a tuple: (name, env_id, client_id, secret)."""
+        return (
+            self.name_edit.text().strip(),
+            self.env_id_edit.text().strip(),
+            self.client_id_edit.text().strip(),
+            self.client_secret_edit.text().strip()
+        )
+
+
+class ProfileManagerDialog(QtWidgets.QDialog):
+    """Dialog to view, select, and delete profiles.
+    
+    Provides a list view of all saved profiles with their environment IDs,
+    allowing users to see all configurations at a glance and delete unwanted ones.
+    """
+    def __init__(self, profiles_dict: dict, current_profile: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Manage Profiles')
+        self.setModal(True)
+        self.profiles_dict = profiles_dict
+        self.current_profile = current_profile
+        self.deleted_profiles = []
+        self.new_profile_name = None
+        self.new_profile_credentials = None  # Will hold (env_id, cl_id, secret) if provided
+        self.auto_connect_requested = False  # Track if user wants to auto-connect to new profile
+        self.connection_callback = None  # Callback to trigger connection test
+        
+        # Set reasonable dialog size based on DPI
+        dpi_scale = get_dpi_scale()
+        self.setMinimumSize(scale_size(700, dpi_scale), scale_size(500, dpi_scale))
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Info label
+        info_label = QtWidgets.QLabel(
+            "Select profiles to view details, create a new profile, or delete profiles. The current active profile is highlighted."
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # List widget for profiles
+        self.profile_list = QtWidgets.QListWidget()
+        self.profile_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.profile_list.itemSelectionChanged.connect(self.on_selection_changed)
+        layout.addWidget(self.profile_list)
+        
+        # Details area
+        details_group = QtWidgets.QGroupBox("Profile Details")
+        details_layout = QtWidgets.QFormLayout(details_group)
+        
+        # Environment ID field - wider to display full UUID
+        self.detail_env_id = QtWidgets.QLineEdit()
+        self.detail_env_id.setReadOnly(True)
+        self.detail_env_id.setMinimumWidth(scale_size(400, dpi_scale))
+        
+        # Client ID field - wider to display full UUID
+        self.detail_client_id = QtWidgets.QLineEdit()
+        self.detail_client_id.setReadOnly(True)
+        self.detail_client_id.setMinimumWidth(scale_size(400, dpi_scale))
+        
+        # Columns display - use QTextEdit with scrollbar for dynamic content
+        self.detail_columns = QtWidgets.QTextEdit()
+        self.detail_columns.setReadOnly(True)
+        self.detail_columns.setMaximumHeight(scale_size(80, dpi_scale))
+        self.detail_columns.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.detail_columns.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        
+        details_layout.addRow("Environment ID:", self.detail_env_id)
+        details_layout.addRow("Client ID:", self.detail_client_id)
+        details_layout.addRow("Custom Columns:", self.detail_columns)
+        layout.addWidget(details_group)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        
+        new_profile_btn = QtWidgets.QPushButton("New Profile...")
+        new_profile_btn.clicked.connect(self.create_new_profile)
+        button_layout.addWidget(new_profile_btn)
+        
+        self.delete_btn = QtWidgets.QPushButton("Delete Selected Profile")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self.delete_selected)
+        button_layout.addWidget(self.delete_btn)
+        button_layout.addStretch()
+        
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Populate the list
+        self.populate_profiles()
+    
+    def populate_profiles(self):
+        """Populate the profile list widget with all available profiles."""
+        self.profile_list.clear()
+        # Filter out __meta__ key
+        profile_names = [k for k in self.profiles_dict.keys() if k != '__meta__']
+        
+        for name in sorted(profile_names):
+            item = QtWidgets.QListWidgetItem(name)
+            # Highlight current profile
+            if name == self.current_profile:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setText(f"{name} (active)")
+            self.profile_list.addItem(item)
+        
+        # Select the first item if available
+        if self.profile_list.count() > 0:
+            self.profile_list.setCurrentRow(0)
+    
+    def on_selection_changed(self):
+        """Update details when selection changes."""
+        selected_items = self.profile_list.selectedItems()
+        if not selected_items:
+            self.delete_btn.setEnabled(False)
+            self.clear_details()
+            return
+        
+        item = selected_items[0]
+        profile_name = item.text().replace(" (active)", "")
+        
+        self.delete_btn.setEnabled(True)
+        self.show_profile_details(profile_name)
+    
+    def show_profile_details(self, profile_name: str):
+        """Display details for the selected profile."""
+        profile = self.profiles_dict.get(profile_name, {})
+        
+        self.detail_env_id.setText(profile.get('env_id', 'N/A'))
+        self.detail_client_id.setText(profile.get('cl_id', 'N/A'))
+        
+        columns = profile.get('columns', [])
+        if columns:
+            col_count = len(columns)
+            # Display all columns, wrapped to multiple lines
+            col_text = ', '.join(columns)
+            self.detail_columns.setPlainText(f"{col_count} columns:\n{col_text}")
+        else:
+            self.detail_columns.setPlainText("Default columns")
+    
+    def clear_details(self):
+        """Clear the details area."""
+        self.detail_env_id.clear()
+        self.detail_client_id.clear()
+        self.detail_columns.clear()
+    
+    def delete_selected(self):
+        """Delete the selected profile after confirmation."""
+        selected_items = self.profile_list.selectedItems()
+        if not selected_items:
+            return
+        
+        item = selected_items[0]
+        profile_name = item.text().replace(" (active)", "")
+        
+        # Prevent deleting the current active profile
+        if profile_name == self.current_profile:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cannot Delete Active Profile",
+                f"Profile '{profile_name}' is currently active. Please switch to a different profile before deleting it."
+            )
+            return
+        
+        # Confirm deletion
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Are you sure you want to delete profile '{profile_name}'?\n\nThis will remove saved credentials and settings.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.Yes:
+            # Remove from dict and track for cleanup
+            if profile_name in self.profiles_dict:
+                del self.profiles_dict[profile_name]
+                self.deleted_profiles.append(profile_name)
+            
+            # Remove from list widget
+            row = self.profile_list.currentRow()
+            self.profile_list.takeItem(row)
+            
+            # Clear details
+            self.clear_details()
+            
+            # Update status
+            if self.profile_list.count() == 0:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "No Profiles",
+                    "All profiles have been deleted. You can create a new profile in the Configuration tab."
+                )
+    
+    def create_new_profile(self):
+        """Prompt user to create a new profile with connection details."""
+        # Get list of existing profile names
+        existing_profiles = [k for k in self.profiles_dict.keys() if k != '__meta__']
+        
+        # Show the new profile dialog
+        dialog = NewProfileDialog(existing_profiles, self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        
+        # Get the profile data
+        profile_name, env_id, client_id, secret = dialog.get_profile_data()
+        
+        # Create new profile with provided details
+        self.profiles_dict[profile_name] = {
+            'env_id': env_id,
+            'cl_id': client_id,
+            'columns': []
+        }
+        self.new_profile_name = profile_name
+        
+        # Store credentials if provided (secret will be saved to keyring by main window)
+        if secret:
+            self.new_profile_credentials = (env_id, client_id, secret)
+        
+        # Refresh the list and select new profile
+        self.populate_profiles()
+        
+        # Find and select the new profile
+        for i in range(self.profile_list.count()):
+            item = self.profile_list.item(i)
+            if item.text() == profile_name:
+                self.profile_list.setCurrentRow(i)
+                break
+        
+        # Show success message and offer to connect if credentials are complete
+        if env_id and client_id and secret:
+            msg = f"Profile '{profile_name}' has been created with connection details.\n\nWould you like to test the connection now?"
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Profile Created",
+                msg,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes
+            )
+            if reply == QtWidgets.QMessageBox.Yes:
+                self.auto_connect_requested = True
+                # Trigger the connection test if callback is available
+                if self.connection_callback:
+                    QtCore.QTimer.singleShot(100, self.test_new_profile_connection)
+        elif env_id or client_id:
+            msg = f"Profile '{profile_name}' has been created.\n\nComplete the configuration in the Configuration tab."
+            QtWidgets.QMessageBox.information(
+                self,
+                "Profile Created",
+                msg
+            )
+        else:
+            msg = f"Profile '{profile_name}' has been created.\n\nConfigure connection details in the Configuration tab."
+            QtWidgets.QMessageBox.information(
+                self,
+                "Profile Created",
+                msg
+            )
+    
+    def get_deleted_profiles(self) -> list:
+        """Return the list of profile names that were deleted."""
+        return self.deleted_profiles
+    
+    def get_new_profile_name(self) -> str:
+        """Return the name of a newly created profile, if any."""
+        return self.new_profile_name
+    
+    def get_new_profile_credentials(self) -> tuple:
+        """Return credentials for newly created profile: (env_id, client_id, secret) or None."""
+        return self.new_profile_credentials
+    
+    def should_auto_connect(self) -> bool:
+        """Return True if user requested to auto-connect to the new profile."""
+        return self.auto_connect_requested
+    
+    def set_connection_callback(self, callback):
+        """Set callback function to test connection."""
+        self.connection_callback = callback
+    
+    def test_new_profile_connection(self):
+        """Test connection to newly created profile."""
+        if self.connection_callback:
+            success = self.connection_callback()
+            if success:
+                # Close the dialog after successful connection
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Connection Successful",
+                    f"Successfully connected to profile '{self.new_profile_name}'.\n\nYou can now manage users in the Users tab."
+                )
+                self.accept()  # Close the dialog

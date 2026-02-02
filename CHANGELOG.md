@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [v0.6] - 2026-02-02
+### Added
+- Dark Mode: Toggle between light and dark themes via Settings menu (Cmd/Ctrl+D).
+  - Theme preference is persisted in profiles.json and restored on startup.
+  - Dark mode applies a comfortable color scheme optimized for low-light environments.
+  - Delete button styling adapts to the selected theme.
+- Profile Manager: View and manage all saved profiles from File → Manage Profiles (Cmd/Ctrl+Shift+M).
+  - See a list of all profiles with their environment IDs, client IDs, and column counts.
+  - Delete unwanted profiles directly from the manager dialog.
+  - Active profile is highlighted and protected from deletion.
+  - Streamlined profile cleanup with batch deletion support.
+  - **New Profile creation with credentials**: Create new profiles and optionally enter connection details (Environment ID, Client ID, Client Secret) directly in the Profile Manager.
+  - Client Secret field includes show/hide toggle for security.
+  - Credentials are optional - can create profiles and configure later.
+  - Partial credential validation warns if only some fields are filled.
+  - New profiles are automatically selected and loaded in the Configuration tab.
+  - **Connection test from Profile Manager**: When a profile is created with complete credentials, the application offers to test the connection immediately. Profile Manager window remains open during the test and only closes after successful connection.
+  - **All input fields properly sized**: Profile name, Environment ID, Client ID, and Client Secret fields are all sized to comfortably display full values (matching Profile Manager field dimensions).
+  - **Optimized layout alignment**: Client Secret field and label are properly aligned with zero-margin layout and consistent spacing.
+  - **Enhanced details display**: Environment and Client ID fields are wider to show full UUIDs.
+  - **Scrollable columns list**: All columns are displayed in a scrollable text area (auto-scrolls when > 3 lines).
+- **Default columns updated**: When establishing a new connection, the default columns are now: UUID, First Name, Last Name, Email, and Population (in that order).
+- **Column selection enhancements**: 
+  - Column selection dialog includes "Select All", "Clear All", and "Reset to Defaults" buttons.
+  - Column configurations are saved per-profile, allowing different layouts for different environments.
+  - Refresh operations now respect saved column configurations instead of auto-discovering new columns.
+- **Status bar improvements**:
+  - Active profile name is displayed on the status bar for easy reference.
+  - Column layout save operations show confirmation notifications.
+  - Persistent profile indicator remains visible across all operations.
+
+### Changed
+- Menu bar reorganization: File menu is now first (standard convention), followed by Settings, Logs, and Help.
+
+### Fixed
+- Column configuration isolation: Fixed bug where column settings were shared between profiles due to list reference issues. Each profile now maintains independent column configurations.
+- Column order preservation: Fixed issue where "Reset to Defaults" button wasn't preserving the correct default column order.
+
 ## [v0.52] - 2026-01-29
 ### Added
 - Cross-platform UI optimizations for Windows, macOS, and Linux:

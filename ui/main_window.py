@@ -21,7 +21,8 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker
-from ui.dialogs import EditUserDialog, ColumnSelectDialog, JSONViewDialog, AttributeMappingDialog
+from ui.dialogs import EditUserDialog, ColumnSelectDialog, JSONViewDialog, AttributeMappingDialog, ProfileManagerDialog
+from ui.themes import ThemeManager
 
 # Platform detection for cross-platform UI optimization
 IS_MACOS = platform.system() == 'Darwin'
@@ -42,7 +43,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "UserManager"
-APP_VERSION = "0.53"
+APP_VERSION = "0.6"
 
 
 # Predefined help texts to avoid reallocating large strings on each call.
@@ -72,10 +73,21 @@ Profile Settings:
 - Import/export preferences are saved per-profile when "Remember" is checked.
 - The last active profile can auto-connect on startup (see Settings menu).
 
+Managing Profiles:
+- Use File → Manage Profiles (Cmd/Ctrl+Shift+M) to view all saved profiles.
+- The Profile Manager shows environment IDs, client IDs, and column counts.
+- Delete unwanted profiles from the Profile Manager dialog.
+- The currently active profile cannot be deleted; switch profiles first.
+
 Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
 - Displays connection status and recent operation results.
 - API call logging can be toggled from the Settings menu.
+
+Settings Menu:
+- Dark Mode: Toggle between light and dark themes (Cmd+D / Ctrl+D).
+- Theme preference is saved and restored on startup.
+- Dark mode applies a comfortable color scheme for low-light environments.
 
 See the User Management help for information about working with users.
 """
@@ -139,6 +151,9 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
         
+        # Initialize theme manager
+        self.theme_manager = ThemeManager()
+        
         # Set DPI-aware window size (not full screen) and center on screen
         try:
             screen = QtWidgets.QApplication.primaryScreen()
@@ -172,10 +187,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.threadpool = QtCore.QThreadPool()
         self.config_file, self.users_cache, self.pop_map = Path("profiles.json"), [], {}
         self.columns = []
-        # Default column order: UUID first, then username, first name,
-        # last name, and population. This matches the requested default
-        # and ensures the UUID is always visible as the left-most column.
-        self.default_columns = ['id', 'username', 'name.given', 'name.family', 'population.name']
+        # Default column order: UUID, first name, last name, email, population.
+        # This matches the requested default and ensures the UUID is always visible
+        # as the left-most column.
+        self.default_columns = ['id', 'name.given', 'name.family', 'email', 'population.name']
         self.selected_columns = self.default_columns.copy()
         self.all_columns = set()
         self.json_editing_enabled = False
@@ -194,6 +209,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         self.init_ui()
         self.load_profiles_from_disk()
+        self.load_theme_preference()
         # Don't restore geometry here - do it in showEvent after window is shown
 
     def showEvent(self, event):
@@ -215,6 +231,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # On macOS, use the native menu bar
         if IS_MACOS:
             menubar.setNativeMenuBar(True)
+        
+        # File menu first (standard on all platforms)
+        file_menu = menubar.addMenu("File")
+        manage_profiles_action = file_menu.addAction("Manage Profiles...")
+        manage_profiles_action.triggered.connect(self.show_profile_manager)
+        manage_profiles_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_M))
+        file_menu.addSeparator()
+        quit_action = file_menu.addAction("Quit")
+        quit_action.triggered.connect(self.close)
+        quit_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Q))
+        quit_action.setToolTip(f"Quit application ({'Cmd' if IS_MACOS else 'Ctrl'}+Q)")
+        if IS_MACOS:
+            # On macOS, the quit action should have the QuitRole to appear in app menu
+            quit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
         
         settings_menu = menubar.addMenu("Settings")
         self.enable_json_edit_action = settings_menu.addAction("Enable JSON Editing")
@@ -240,6 +270,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_local_schema_action.triggered.connect(self.toggle_local_schema)
         self.revert_columns_action = settings_menu.addAction("Revert to Default Columns")
         self.revert_columns_action.triggered.connect(self.revert_to_default_columns)
+        settings_menu.addSeparator()
+        # Theme toggle
+        self.dark_mode_action = settings_menu.addAction("Dark Mode")
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(False)
+        self.dark_mode_action.triggered.connect(self.toggle_theme)
+        self.dark_mode_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_D))
         settings_menu.addSeparator()
         # Credentials logging settings
         self.enable_credentials_logging_action = settings_menu.addAction("Enable Credentials Logging")
@@ -275,16 +312,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logs_clear_all.triggered.connect(self.clear_all_logs)
         self.logs_archive = logs_menu.addAction("Archive Logs...")
         self.logs_archive.triggered.connect(self.archive_logs)
-        
-        # File menu for quit action (standard on all platforms)
-        file_menu = menubar.addMenu("File")
-        quit_action = file_menu.addAction("Quit")
-        quit_action.triggered.connect(self.close)
-        quit_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Q))
-        quit_action.setToolTip(f"Quit application ({'Cmd' if IS_MACOS else 'Ctrl'}+Q)")
-        if IS_MACOS:
-            # On macOS, the quit action should have the QuitRole to appear in app menu
-            quit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
         
         help_menu = menubar.addMenu("Help")
         config_help_action = help_menu.addAction("Configuration Help")
@@ -386,7 +413,8 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_reload.setToolTip(f"Refresh user list ({'Cmd' if IS_MACOS else 'Ctrl'}+R)")
         
         btn_del = QtWidgets.QPushButton("🗑 Delete Selected")
-        btn_del.setStyleSheet("background-color: #d9534f; color: white;")
+        self.btn_del = btn_del  # Store reference for theme updates
+        btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
         btn_del.clicked.connect(self.delete_selected_users)
         # Delete key works on Windows/Linux, Backspace on macOS is more common
         if IS_MACOS:
@@ -459,13 +487,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Add a persistent status bar so messages are visible across tabs
         self.status_label = QtWidgets.QLabel("Ready")
         self.api_calls_label = QtWidgets.QLabel("")
+        self.profile_name_label = QtWidgets.QLabel("")
         user_lay.addWidget(self.status_label)
         user_lay.addWidget(self.api_calls_label)
         sb = QtWidgets.QStatusBar()
         self.setStatusBar(sb)
-        # Mirror initial status and add API calls label as a permanent widget
+        # Mirror initial status and add permanent widgets to status bar
         try:
             self.statusBar().showMessage(self.status_label.text())
+            self.statusBar().addPermanentWidget(self.profile_name_label)
             self.statusBar().addPermanentWidget(self.api_calls_label)
         except Exception:
             pass
@@ -710,8 +740,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.env_id.setText(p[name].get("env_id", ""))
             self.cl_id.setText(p[name].get("cl_id", ""))
             self.cl_sec.setText(keyring.get_password("PingOneUM", name) or "")
-            self.selected_columns = p[name].get("columns", self.default_columns.copy())
-            self.column_widths = p[name].get("column_widths", {})
+            # Create a copy of the columns list to avoid shared references
+            self.selected_columns = list(p[name].get("columns", self.default_columns.copy()))
+            self.column_widths = p[name].get("column_widths", {}).copy()
             # Per-profile option: show live API calls in status bar
             try:
                 checked = bool(p[name].get('status_show_api_calls', False))
@@ -727,6 +758,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.status_label.setText(msg)
                 try:
                     self.statusBar().showMessage(msg)
+                    self.profile_name_label.setText(f"Profile: {name}")
                 except Exception:
                     pass
             except Exception:
@@ -744,11 +776,12 @@ class MainWindow(QtWidgets.QMainWindow):
             keyring.set_password("PingOneUM", name, self.cl_sec.text()); self.load_profiles_from_disk()
 
     def save_app_settings(self):
-        """Persist app-level settings (auto-connect) to config file under __meta__."""
+        """Persist app-level settings (auto-connect, theme) to config file under __meta__."""
         try:
             cfg = self._read_config()
             meta = cfg.get('__meta__', {})
             meta['auto_connect_last'] = bool(self.auto_connect_cb.isChecked())
+            meta['theme'] = self.theme_manager.get_current_theme()
             cfg['__meta__'] = meta
             with open(self.config_file, 'w') as f:
                 json.dump(cfg, f, indent=4)
@@ -940,6 +973,138 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.information(self, "Delete Profile", "Profile not found.")
 
+    def show_profile_manager(self):
+        """Show the profile manager dialog to view and delete profiles."""
+        try:
+            cfg = self._read_config()
+            current_profile = self.profile_list.currentText()
+            
+            # Show dialog
+            dialog = ProfileManagerDialog(cfg, current_profile, self)
+            
+            # Provide a connection callback for testing new profiles
+            def test_connection():
+                """Test connection and return True if successful."""
+                new_profile = dialog.get_new_profile_name()
+                new_credentials = dialog.get_new_profile_credentials()
+                
+                if not new_profile or not new_credentials:
+                    return False
+                
+                # Save the config and credentials first
+                with open(self.config_file, 'w') as f:
+                    json.dump(cfg, f, indent=4)
+                
+                # Save credentials to keyring
+                import keyring
+                env_id, client_id, secret = new_credentials
+                try:
+                    if secret:
+                        keyring.set_password("PingOneUM", new_profile, secret)
+                except Exception:
+                    pass
+                
+                # Reload profiles and switch to new one
+                self.load_profiles_from_disk()
+                idx = self.profile_list.findText(new_profile)
+                if idx >= 0:
+                    self.profile_list.setCurrentIndex(idx)
+                    self.load_selected_profile()
+                
+                # Test the connection synchronously
+                client = api_client.PingOneClient(env_id, client_id, secret)
+                try:
+                    token = asyncio.run(client.get_token())
+                    if token:
+                        # Update status
+                        self.status_label.setText(f"Connected to profile '{new_profile}'")
+                        try:
+                            self.statusBar().showMessage(f"Connected to profile '{new_profile}'")
+                        except Exception:
+                            pass
+                        # Refresh users
+                        try:
+                            self.refresh_users()
+                        except Exception:
+                            pass
+                        return True
+                except Exception:
+                    pass
+                
+                QtWidgets.QMessageBox.critical(dialog, "Connection Failed", "Could not connect with provided credentials. Please check and try again.")
+                return False
+            
+            dialog.set_connection_callback(test_connection)
+            
+            # Execute the dialog (blocks until closed)
+            result = dialog.exec()
+            
+            # Check if a new profile was created (but not auto-connected)
+            new_profile = dialog.get_new_profile_name()
+            new_credentials = dialog.get_new_profile_credentials()
+            auto_connect = dialog.should_auto_connect()
+            
+            # Process any deletions
+            deleted = dialog.get_deleted_profiles()
+            
+            # Save if there were any changes (and connection wasn't already tested)
+            if (deleted or new_profile) and not auto_connect:
+                # Save updated config
+                with open(self.config_file, 'w') as f:
+                    json.dump(cfg, f, indent=4)
+                
+                # Save credentials to keyring if provided
+                if new_profile and new_credentials:
+                    import keyring
+                    env_id, client_id, secret = new_credentials
+                    try:
+                        if secret:
+                            keyring.set_password("PingOneUM", new_profile, secret)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Keyring Error",
+                            f"Failed to save client secret to keyring: {e}\n\nYou can enter it manually in the Configuration tab."
+                        )
+                
+                # Reload profiles in the UI
+                self.load_profiles_from_disk()
+                
+                # Switch to the new profile
+                if new_profile:
+                    try:
+                        idx = self.profile_list.findText(new_profile)
+                        if idx >= 0:
+                            self.profile_list.setCurrentIndex(idx)
+                            self.load_selected_profile()
+                    except Exception:
+                        pass
+                
+                # Build status message
+                msg_parts = []
+                if deleted:
+                    msg_parts.append(f"Deleted {len(deleted)} profile(s)")
+                if new_profile:
+                    msg_parts.append(f"Created profile '{new_profile}'")
+                
+                msg = "; ".join(msg_parts)
+                self.status_label.setText(msg)
+                try:
+                    self.statusBar().showMessage(msg)
+                except Exception:
+                    pass
+            
+            # Clean up keyring entries for deleted profiles
+            if deleted:
+                import keyring
+                for profile_name in deleted:
+                    try:
+                        keyring.delete_password("PingOneUM", profile_name)
+                    except Exception:
+                        pass
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Profile Manager", f"Error opening profile manager: {e}")
+
     def on_fetch_success(self, data):
         # Called when UserFetchWorker finishes; populate the table and
         # update UI state. Keep sorting temporarily disabled while
@@ -954,32 +1119,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pop_map, self.users_cache = data['pop_map'], data['users']
         
         self.all_columns = self._get_all_columns(self.users_cache)
-        # Discover all available columns from the fetched users.
+        # Use saved column configuration, filtering to only columns present in dataset
         self.columns = [c for c in self.selected_columns if c in self.all_columns]
-
-        # Append any newly discovered columns to the end of the
-        # selected list. This preserves the order of existing columns
-        # and places new attributes at the end by default.
-        for col in self.all_columns:
-            if col not in self.selected_columns:
-                self.selected_columns.append(col)
-
-        # Build the final displayed columns by keeping selected order
-        # but filtering out any columns that aren't present in this dataset.
-        self.columns = [c for c in self.selected_columns if c in self.all_columns]
-        # Persist the (possibly extended) selected order to the profile.
-        self.save_columns_to_config()
+        
+        # Disable sorting during table rebuild for better performance
+        self.u_table.setSortingEnabled(False)
         self.u_table.setColumnCount(len(self.columns))
         self.u_table.setHorizontalHeaderLabels(self._get_column_labels())
+        self.u_table.setRowCount(len(self.users_cache))
         
-        self.u_table.setRowCount(0)
-        for u in self.users_cache:
-            r = self.u_table.rowCount(); self.u_table.insertRow(r)
-            for c, col in enumerate(self.columns):
-                value = self._get_value(u, col)
+        # Populate table rows
+        for row_idx, user in enumerate(self.users_cache):
+            for col_idx, col in enumerate(self.columns):
+                value = self._get_value(user, col)
                 item = QtWidgets.QTableWidgetItem(str(value))
                 item.setData(QtCore.Qt.UserRole, value)
-                self.u_table.setItem(r, c, item)
+                self.u_table.setItem(row_idx, col_idx, item)
+        
         self.u_table.setSortingEnabled(True)
         msg = f"Loaded {data['user_count']} users, {data['pop_count']} populations"
         self.status_label.setText(msg)
@@ -1382,6 +1538,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_friendly_names = self.use_friendly_names_action.isChecked()
         self.refresh_table_headers()
 
+    def toggle_theme(self):
+        """Toggle between light and dark mode."""
+        enabled = self.dark_mode_action.isChecked()
+        theme = ThemeManager.DARK if enabled else ThemeManager.LIGHT
+        app = QtWidgets.QApplication.instance()
+        if app:
+            self.theme_manager.set_theme(theme, app)
+            # Update delete button style to match new theme
+            if hasattr(self, 'btn_del'):
+                self.btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
+            self.save_app_settings()
+            msg = "Dark mode enabled" if enabled else "Light mode enabled"
+            self.status_label.setText(msg)
+            try:
+                self.statusBar().showMessage(msg)
+            except Exception:
+                pass
+
+    def load_theme_preference(self):
+        """Load and apply saved theme preference from config."""
+        try:
+            cfg = self._read_config()
+            meta = cfg.get('__meta__', {})
+            theme = meta.get('theme', ThemeManager.LIGHT)
+            app = QtWidgets.QApplication.instance()
+            if app:
+                self.theme_manager.set_theme(theme, app)
+                self.dark_mode_action.setChecked(theme == ThemeManager.DARK)
+                # Update delete button style to match loaded theme
+                if hasattr(self, 'btn_del'):
+                    self.btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
+        except Exception:
+            pass
+
     def revert_to_default_columns(self):
         """Revert selected columns to default."""
         self.selected_columns = self.default_columns.copy()
@@ -1550,7 +1740,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         dialog = ColumnSelectDialog(self.all_columns, self.selected_columns, self)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             self.selected_columns = dialog.get_selected()
-            self.save_columns_to_config()
+            self.save_columns_to_config(show_notification=True)
             self.refresh_table()
             msg = "Column selection updated"
             self.status_label.setText(msg)
@@ -2600,7 +2790,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
-    def save_columns_to_config(self):
+    def save_columns_to_config(self, show_notification=False):
         """Save the selected columns to the current profile's configuration."""
         name = self.profile_list.currentText()
         if not name:
@@ -2610,6 +2800,13 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             p[name]["columns"] = self.selected_columns
             with open(self.config_file, 'w') as f:
                 json.dump(p, f, indent=4)
+            if show_notification:
+                msg = f"Column layout saved for profile '{name}'"
+                self.status_label.setText(msg)
+                try:
+                    self.statusBar().showMessage(msg, 3000)
+                except Exception:
+                    pass
 
     # --- Connection logging helpers ---
     @property
@@ -2654,20 +2851,24 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         """Refresh the user table with the currently selected columns."""
         if not self.users_cache:
             return
+        
+        # Filter columns to only those present in dataset
         self.columns = [c for c in self.selected_columns if c in self.all_columns]
-        self.selected_columns = self.columns.copy()
-        self.save_columns_to_config()
+        
+        # Disable sorting during table rebuild for better performance
+        self.u_table.setSortingEnabled(False)
         self.u_table.setColumnCount(len(self.columns))
         self.u_table.setHorizontalHeaderLabels(self._get_column_labels())
-        self.u_table.setRowCount(0)
-        for u in self.users_cache:
-            r = self.u_table.rowCount()
-            self.u_table.insertRow(r)
-            for c, col in enumerate(self.columns):
-                value = self._get_value(u, col)
+        self.u_table.setRowCount(len(self.users_cache))
+        
+        # Populate table rows
+        for row_idx, user in enumerate(self.users_cache):
+            for col_idx, col in enumerate(self.columns):
+                value = self._get_value(user, col)
                 item = QtWidgets.QTableWidgetItem(str(value))
                 item.setData(QtCore.Qt.UserRole, value)
-                self.u_table.setItem(r, c, item)
+                self.u_table.setItem(row_idx, col_idx, item)
+        
         self.u_table.setSortingEnabled(True)
         self._apply_column_widths()
 
