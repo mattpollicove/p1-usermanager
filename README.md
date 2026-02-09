@@ -31,25 +31,46 @@ A PingOne Environment ID
 A Worker App with Client Credentials grant type and sufficient Roles (e.g., Identity Admin).
 
 📥 Installation
+
+**Quick Setup (Recommended):**
+
+Use the automated setup scripts:
+- **macOS/Linux**: `./setup.sh`
+- **Windows**: `setup.bat`
+
+**Manual Installation:**
+
 Clone the repository:
 
-Bash
+```bash
 git clone https://github.com/your-org/pingone-usermanager.git
 cd pingone-usermanager
+```
+
 Create a virtual environment:
 
-Bash
+```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
 Install dependencies:
 
-Bash
+```bash
 pip install pyside6 httpx keyring
+```
+
 Optional (local JSON Schema validation):
 ```bash
 pip install jsonschema
 ```
 The project includes an example `user_schema.json` in the repository root. If `jsonschema` is installed and the schema file is present, the app can validate CSV/LDIF entries locally before attempting server-side creation.
+
+For detailed installation instructions including automated setup scripts, see [INSTALL.md](INSTALL.md).
+
+📦 Distribution
+To package the application as a standalone executable for Windows, macOS, or Linux, see [PACKAGING.md](PACKAGING.md) for comprehensive packaging and distribution instructions.
+
 🚦 Getting Started
 Launch the App:
 
