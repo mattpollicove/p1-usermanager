@@ -719,6 +719,9 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self._populate_tables()
         else:
             self.status_label.setText("Connection failed.")
+            # clear any previous table list so the user must retest
+            self.table_combo.clear()
+            self.table_combo.setEnabled(False)
             QtWidgets.QMessageBox.critical(self, "Test Connection", "Failed to connect. Check credentials and driver.")
 
     def get_connection_data(self) -> dict:
