@@ -994,7 +994,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not table:
                 return
             # test connection
-            from api import db_utils
+            try:
+                from api import db_utils
+            except ModuleNotFoundError:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Import DB",
+                    "SQLAlchemy is not installed. Please run `pip install -r requirements.txt`."
+                )
+                return
+
             if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
                 return
@@ -1061,7 +1070,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not table:
                 return
             # test connection
-            from api import db_utils
+            try:
+                from api import db_utils
+            except ModuleNotFoundError:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Export DB",
+                    "SQLAlchemy is not installed. Please run `pip install -r requirements.txt`."
+                )
+                return
+
             if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
                 QtWidgets.QMessageBox.critical(self, "Export DB", "Unable to connect with provided credentials.")
                 return

@@ -22,7 +22,8 @@ All notable changes to this project will be documented in this file.
   - Fix: avoid AttributeError by initializing host/port/db widgets before setting placeholders/tooltips.
   - Fix: ensure `jdbc_edit` is created before use and visible in the form.
   - **Handle missing SQLAlchemy gracefully** in the connection dialog; test button shows
-    an explicit error if the dependency is missing instead of crashing.
+    an explicit error if the dependency is missing instead of crashing.  Import
+    and export operations now include the same check and message.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*
