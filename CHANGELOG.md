@@ -31,6 +31,9 @@ All notable changes to this project will be documented in this file.
     "ODBC Driver 18 for SQL Server").  The previous browse button and
     misleading "path" label were removed; users may still type a custom
     name or path if necessary.
+- **Save connection option**: A "Save this connection" checkbox lets users
+    test or use credentials without persisting them.  Unchecking it in the
+    connections manager will prevent creation or delete an existing entry.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*

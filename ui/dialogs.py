@@ -584,6 +584,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("")
         layout.addWidget(self.status_label)
 
+        # allow user to choose whether this connection should be saved
+        self.save_cb = QtWidgets.QCheckBox("Save this connection")
+        self.save_cb.setChecked(True)
+        layout.addWidget(self.save_cb)
+
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -763,6 +768,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'user': self.user_edit.text().strip(),
             'password': self.pw_edit.text(),
             'driver': self.driver_combo.currentText().strip(),
+            'save': bool(self.save_cb.isChecked()),
         }
         # include table if user selected one
         if self.table_combo.count() and self.table_combo.currentText():
@@ -819,6 +825,10 @@ class DBConnectionsManager(QtWidgets.QDialog):
         dlg = DatabaseConnectionDialog(parent=self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             data = dlg.get_connection_data()
+            # save flag allows dialog users to request a non-persistent test
+            if not data.get('save', True):
+                # simply return without adding/updating profile
+                return
             name = data.get('name')
             if name:
                 if name in self.result:
@@ -841,6 +851,12 @@ class DBConnectionsManager(QtWidgets.QDialog):
         dlg = DatabaseConnectionDialog(initial=data, parent=self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             new_data = dlg.get_connection_data()
+            # if user unchecks save while editing, remove the connection
+            if not new_data.get('save', True):
+                if name in self.result:
+                    del self.result[name]
+                    self._populate(self.result)
+                return
             new_name = new_data.get('name')
             # handle rename
             if new_name and new_name != name:
