@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
     * shows a status line and uses a busy cursor while testing connections.
     * can list and remember a target table via a drop‑down populated after successful test.
     * builds and displays a JDBC connection string in real time as host/port/db/type are entered.
+  - Fix: database connection dialog now validates required fields (name, host, database) and warns when adding a duplicate-name profile.
 - Dark Mode: Toggle between light and dark themes via Settings menu (Cmd/Ctrl+D).
   - Theme preference is persisted in profiles.json and restored on startup.
   - Dark mode applies a comfortable color scheme optimized for low-light environments.
