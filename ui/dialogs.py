@@ -540,6 +540,9 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.driver_combo.setToolTip("Select or type a driver name (e.g. ODBC Driver 18 for SQL Server) or specify a path to a JDBC/ODBC driver library")
         # populate with sensible defaults (will be refreshed on type change)
         self._set_driver_options()
+        # label to display the currently selected driver for clarity
+        self.driver_label = QtWidgets.QLabel("")
+        self.driver_combo.currentTextChanged.connect(self._update_driver_label)
 
         # update port field whenever type changes
         self.type_combo.currentTextChanged.connect(self._update_port_default)
@@ -566,6 +569,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("User:", self.user_edit)
         form.addRow("Password:", self.pw_edit)
         form.addRow("Driver:", drv_layout)
+        # show the selected driver name below the driver field
+        form.addRow("", self.driver_label)
         # readonly JDBC URL preview placed at the bottom so it stretches
         form.addRow("JDBC URL:", self.jdbc_edit)
 
@@ -646,12 +651,21 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         # also refresh JDBC url whenever port default changes
         self._update_jdbc_string()
 
+    def _update_driver_label(self, text: str):
+        """Update the helper label to show the currently selected driver."""
+        if text:
+            self.driver_label.setText(f"Selected driver: {text}")
+        else:
+            self.driver_label.setText("")
+
     def _set_driver_options(self):
         """Populate the driver combo with sensible defaults for the selected DB.
 
         The combo is always editable so the user may enter a custom string or
         a path, but providing a dropdown helps when picking a recent ODBC
         driver name for SQL Server.
+
+        After repopulating we update the display label as well.
         """
         typ = self.type_combo.currentText()
         self.driver_combo.clear()
@@ -670,6 +684,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 "ODBC Driver 17 for SQL Server",
                 "ODBC Driver 13 for SQL Server",
             ])
+        # update label after changing options
+        self._update_driver_label(self.driver_combo.currentText())
 
     def _update_jdbc_string(self):
         """Build a JDBC connection string from the current fields.
