@@ -123,7 +123,7 @@ Exporting Users
 Importing Users
 
 - Import CSV: Use the `Import CSV` button in the User Management toolbar to create users from a CSV file. The CSV should include headers matching the exported column names (dot-notation for nested attributes, e.g. `name.given`). List-valued attributes are stored as JSON strings in the CSV and will be parsed during import.
-- Import/Export Database: Define database connections via **File → Manage DB Connections** or the button on the Configuration tab. Supported backends are MSSQL and MariaDB/MySQL; a JDBC/ODBC driver path may be required. Once a connection is configured, the `Import DB` / `Export DB` buttons on the User Management toolbar open a mapping dialog that lets you map table columns to PingOne attributes (or vice versa).
+- Import/Export Database: Define database connections via **File → Manage DB Connections** or the button on the Configuration tab. Supported backends are MSSQL and MariaDB/MySQL; an ODBC/JDBC driver name or path may be required. The connection dialog now provides a dropdown of standard driver names for convenience. Once a connection is configured, the `Import DB` / `Export DB` buttons on the User Management toolbar open a mapping dialog that lets you map table columns to PingOne attributes (or vice versa).
 - Import LDIF: Use the `Import LDIF` button to import simple LDIF files produced by this app. The importer accepts attribute names where dots may have been replaced by hyphens (e.g., `name-given`), and will attempt to convert them back to nested attributes.
 
 Developer Note

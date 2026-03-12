@@ -7,8 +7,9 @@ added later.
 
 We use SQLAlchemy for its unified URL syntax and lazy driver loading.  The
 user is responsible for installing the appropriate DBAPI (pymysql for
-MariaDB/MySQL, pymssql or pyodbc for SQL Server) and providing a valid
-JDBC/ODBC driver path if required.
+MariaDB/MySQL, pymssql or pyodbc for SQL Server) and, for ODBC
+connections, specifying a driver name or path.  The connection dialog now
+offers a dropdown of common driver names.
 """
 from typing import Tuple, List, Optional
 
@@ -22,7 +23,7 @@ def _make_url(db_type: str, host: str, port: int, database: str,
     """Construct a SQLAlchemy URL for the given parameters.
 
     driver_path is currently ignored for MariaDB/MySQL but may be used for
-    specifying an ODBC driver string for MSSQL.
+    specifying an ODBC driver string (name or path) for MSSQL.
     """
     if db_type.lower() in ('mssql', 'sqlserver'):
         # prefer pymssql if available; fall back to pyodbc with a driver

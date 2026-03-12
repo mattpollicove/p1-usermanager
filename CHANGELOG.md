@@ -26,6 +26,11 @@ All notable changes to this project will be documented in this file.
     and export operations now include the same check and message.
 - **Check SQLAlchemy on startup** by importing it in `app.py` so the program
     fails fast with a clear error if the requirement isn’t installed.
+- **Driver name dropdown** added to database connection dialog.  The input
+    is now an editable combo box offering the latest ODBC driver names (e.g.
+    "ODBC Driver 18 for SQL Server").  The previous browse button and
+    misleading "path" label were removed; users may still type a custom
+    name or path if necessary.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*

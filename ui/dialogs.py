@@ -533,13 +533,18 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.pw_edit = QtWidgets.QLineEdit()
         self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.pw_edit.setPlaceholderText("password")
-        self.driver_edit = QtWidgets.QLineEdit()
-        self.driver_edit.setPlaceholderText("path to JDBC/ODBC driver")
-        btn_browse = QtWidgets.QPushButton("Browse…")
-        btn_browse.clicked.connect(self._browse_driver)
+        # driver name (for pyodbc) or JDBC/ODBC path
+        self.driver_combo = QtWidgets.QComboBox()
+        self.driver_combo.setEditable(True)
+        self.driver_combo.setPlaceholderText("driver name or path")
+        self.driver_combo.setToolTip("Select or type a driver name (e.g. ODBC Driver 18 for SQL Server) or specify a path to a JDBC/ODBC driver library")
+        # populate with sensible defaults (will be refreshed on type change)
+        self._set_driver_options()
 
         # update port field whenever type changes
         self.type_combo.currentTextChanged.connect(self._update_port_default)
+        # refresh driver name suggestions when type changes
+        self.type_combo.currentTextChanged.connect(self._set_driver_options)
         # update JDBC string when type changes
         self.type_combo.currentTextChanged.connect(self._update_jdbc_string)
         # update JDBC string when host/db/port change
@@ -547,8 +552,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.port_edit.textChanged.connect(self._update_jdbc_string)
         self.db_edit.textChanged.connect(self._update_jdbc_string)
         drv_layout = QtWidgets.QHBoxLayout()
-        drv_layout.addWidget(self.driver_edit)
-        drv_layout.addWidget(btn_browse)
+        drv_layout.addWidget(self.driver_combo)
 
         form.addRow("Name:", self.name_edit)
         form.addRow("Type:", self.type_combo)
@@ -561,7 +565,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("Table:", self.table_combo)
         form.addRow("User:", self.user_edit)
         form.addRow("Password:", self.pw_edit)
-        form.addRow("Driver path:", drv_layout)
+        form.addRow("Driver:", drv_layout)
         # readonly JDBC URL preview placed at the bottom so it stretches
         form.addRow("JDBC URL:", self.jdbc_edit)
 
@@ -593,7 +597,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.db_edit.setText(initial.get('database', ''))
             self.user_edit.setText(initial.get('user', ''))
             self.pw_edit.setText(initial.get('password', ''))
-            self.driver_edit.setText(initial.get('driver', ''))
+            self.driver_combo.setCurrentText(initial.get('driver', ''))
             # do not prefill the table combo when editing; user must test
             # the connection in order to refresh and choose a table
             # rebuild JDBC string from loaded values
@@ -601,10 +605,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             # if editing an existing connection, focus name field for convenience
             self.name_edit.setFocus()
 
+    # browsing is no longer required since driver is entered via combo
+    # kept for historical reference but not used
     def _browse_driver(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JDBC/ODBC Driver")
-        if path:
-            self.driver_edit.setText(path)
+        pass
 
     def _validate_and_accept(self):
         """Ensure required fields are present before closing dialog."""
@@ -636,6 +640,31 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.port_edit.setText(default)
         # also refresh JDBC url whenever port default changes
         self._update_jdbc_string()
+
+    def _set_driver_options(self):
+        """Populate the driver combo with sensible defaults for the selected DB.
+
+        The combo is always editable so the user may enter a custom string or
+        a path, but providing a dropdown helps when picking a recent ODBC
+        driver name for SQL Server.
+        """
+        typ = self.type_combo.currentText()
+        self.driver_combo.clear()
+        if typ == "MariaDB/MySQL":
+            # MySQL doesn't actually use the driver string in our URL, but
+            # having some common ODBC names may help users who configure
+            # pyodbc manually.
+            self.driver_combo.addItems([
+                "MySQL ODBC 8.0 Driver",
+                "MySQL ODBC 8.0 Unicode Driver",
+            ])
+        else:
+            # SQL Server: recent ODBC drivers
+            self.driver_combo.addItems([
+                "ODBC Driver 18 for SQL Server",
+                "ODBC Driver 17 for SQL Server",
+                "ODBC Driver 13 for SQL Server",
+            ])
 
     def _update_jdbc_string(self):
         """Build a JDBC connection string from the current fields.
@@ -673,7 +702,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.db_edit.text(),
                 self.user_edit.text(),
                 self.pw_edit.text(),
-                self.driver_edit.text() or None,
+                self.driver_combo.currentText() or None,
             )
             self.table_combo.clear()
             self.table_combo.addItems(names)
@@ -711,7 +740,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.db_edit.text(),
             self.user_edit.text(),
             self.pw_edit.text(),
-            self.driver_edit.text() or None
+            self.driver_combo.currentText() or None
         )
         QtWidgets.QApplication.restoreOverrideCursor()
         if ok:
@@ -733,7 +762,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'database': self.db_edit.text().strip(),
             'user': self.user_edit.text().strip(),
             'password': self.pw_edit.text(),
-            'driver': self.driver_edit.text().strip(),
+            'driver': self.driver_combo.currentText().strip(),
         }
         # include table if user selected one
         if self.table_combo.count() and self.table_combo.currentText():
