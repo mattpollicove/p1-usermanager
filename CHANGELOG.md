@@ -17,10 +17,7 @@ All notable changes to this project will be documented in this file.
     * defaults to MariaDB/MySQL and automatically fills port numbers (3306/1433) when type is changed.
     * shows a status line and uses a busy cursor while testing connections.
     * can list and remember a target table via a drop‑down populated after successful test.
-
-
-## [v0.6] - 2026-02-02
-### Added
+    * builds and displays a JDBC connection string in real time as host/port/db/type are entered.
 - Dark Mode: Toggle between light and dark themes via Settings menu (Cmd/Ctrl+D).
   - Theme preference is persisted in profiles.json and restored on startup.
   - Dark mode applies a comfortable color scheme optimized for low-light environments.

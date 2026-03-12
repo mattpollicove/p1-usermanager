@@ -489,6 +489,12 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         # update port field whenever type changes
         self.type_combo.currentTextChanged.connect(self._update_port_default)
+        # update JDBC string when type changes
+        self.type_combo.currentTextChanged.connect(self._update_jdbc_string)
+        # update JDBC string when host/db/port change
+        self.host_edit.textChanged.connect(self._update_jdbc_string)
+        self.port_edit.textChanged.connect(self._update_jdbc_string)
+        self.db_edit.textChanged.connect(self._update_jdbc_string)
         drv_layout = QtWidgets.QHBoxLayout()
         drv_layout.addWidget(self.driver_edit)
         drv_layout.addWidget(btn_browse)
@@ -539,6 +545,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.table_combo.addItem(tbl)
                 self.table_combo.setCurrentText(tbl)
                 self.table_combo.setEnabled(True)
+            # rebuild JDBC string from loaded values
+            self._update_jdbc_string()
 
     def _browse_driver(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JDBC/ODBC Driver")
@@ -554,6 +562,28 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             default = "1433"
         if not self.port_edit.text():
             self.port_edit.setText(default)
+        # also refresh JDBC url whenever port default changes
+        self._update_jdbc_string()
+
+    def _update_jdbc_string(self):
+        """Build a JDBC connection string from the current fields.
+
+        The string is shown in the read‑only ``jdbc_edit`` so the user can
+        copy it or verify the syntax.  It updates whenever the type, host,
+        port or database fields change.
+        """
+        typ = self.type_combo.currentText()
+        host = self.host_edit.text().strip()
+        port = self.port_edit.text().strip() or ("3306" if typ == "MariaDB/MySQL" else "1433")
+        db = self.db_edit.text().strip()
+        url = ""
+        if host and db:
+            if typ == "MariaDB/MySQL":
+                url = f"jdbc:mysql://{host}:{port}/{db}"
+            else:
+                # MSSQL style
+                url = f"jdbc:sqlserver://{host}:{port};databaseName={db}"
+        self.jdbc_edit.setText(url)
 
     def _populate_tables(self):
         # attempt to list tables and fill combo - called after a successful test
