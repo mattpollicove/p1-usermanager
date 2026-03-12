@@ -45,6 +45,10 @@ All notable changes to this project will be documented in this file.
     exception message is now displayed (e.g., driver not found, network
     unreachable, authentication failed) instead of a generic "check credentials
     and driver" message.  This makes debugging connection issues much easier.
+- **Fix database type recognition**: Connection tests now correctly handle the
+    combo box display values "MariaDB/MySQL" and "MSSQL" instead of requiring
+    shorthand like "mysql" or "sqlserver".  Users can now test connections
+    without errors about unsupported database types.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*

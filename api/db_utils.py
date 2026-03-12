@@ -22,10 +22,13 @@ def _make_url(db_type: str, host: str, port: int, database: str,
               user: str, password: str, driver_path: Optional[str] = None) -> str:
     """Construct a SQLAlchemy URL for the given parameters.
 
+    Accepts database type as either the combo box display name ("MariaDB/MySQL",
+    "MSSQL") or the shorthand ("mariadb", "mysql", "mssql", "sqlserver").
     driver_path is currently ignored for MariaDB/MySQL but may be used for
     specifying an ODBC driver string (name or path) for MSSQL.
     """
-    if db_type.lower() in ('mssql', 'sqlserver'):
+    db_lower = db_type.lower()
+    if db_lower in ('mssql', 'sqlserver') or 'mssql' in db_lower:
         # prefer pymssql if available; fall back to pyodbc with a driver
         try:
             import pymssql  # type: ignore
@@ -36,7 +39,7 @@ def _make_url(db_type: str, host: str, port: int, database: str,
             # sqlalchemy expects the driver name percent-encoded
             drv_enc = drv.replace(' ', '+')
             return f"mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver={drv_enc}"
-    elif db_type.lower() in ('mariadb', 'mysql'):
+    elif db_lower in ('mariadb', 'mysql') or 'mariadb' in db_lower or 'mysql' in db_lower:
         # use pymysql driver
         return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
     else:
