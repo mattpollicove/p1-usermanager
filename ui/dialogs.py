@@ -519,6 +519,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.db_edit = QtWidgets.QLineEdit()
         self.db_edit.setPlaceholderText("database name")
         self.db_edit.setToolTip("Name of the target database")
+        # add JDBC URL display field before any signals use it
+        self.jdbc_edit = QtWidgets.QLineEdit()
+        self.jdbc_edit.setReadOnly(True)
+        self.jdbc_edit.setPlaceholderText("jdbc URL will appear here")
         self.user_edit = QtWidgets.QLineEdit()
         self.user_edit.setPlaceholderText("username")
         self.user_edit.setToolTip("Database user account")
@@ -547,6 +551,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Database:", self.db_edit)
+        # readonly JDBC URL preview
+        form.addRow("JDBC URL:", self.jdbc_edit)
         # table selector will be populated after a successful connection test
         self.table_combo = QtWidgets.QComboBox()
         self.table_combo.setEnabled(False)
@@ -559,6 +565,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         # initialize port based on current type (combo default may already be set)
         self._update_port_default()
+        # ensure JDBC string is populated as well
+        self._update_jdbc_string()
 
         test_btn = QtWidgets.QPushButton("Test Connection")
         test_btn.clicked.connect(self._on_test)
