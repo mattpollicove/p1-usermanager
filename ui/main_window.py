@@ -989,7 +989,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not name:
                 return
             conn = dbs[name]
-            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:")
+            default_tbl = conn.get('table', '')
+            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:", text=default_tbl)
             if not ok or not table:
                 return
             # test connection
@@ -1055,7 +1056,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not name:
                 return
             conn = dbs[name]
-            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to export to (will be created if it does not exist):")
+            default_tbl = conn.get('table', '')
+            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to export to (will be created if it does not exist):", text=default_tbl)
             if not ok or not table:
                 return
             # test connection

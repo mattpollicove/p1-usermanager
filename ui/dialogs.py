@@ -474,7 +474,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         self.name_edit = QtWidgets.QLineEdit()
         self.type_combo = QtWidgets.QComboBox()
-        self.type_combo.addItems(["MSSQL", "MariaDB/MySQL"])
+        # make MySQL/Maria the default entry
+        self.type_combo.addItems(["MariaDB/MySQL", "MSSQL"])
         self.host_edit = QtWidgets.QLineEdit()
         self.port_edit = QtWidgets.QLineEdit()
         self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
@@ -485,6 +486,9 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.driver_edit = QtWidgets.QLineEdit()
         btn_browse = QtWidgets.QPushButton("Browse…")
         btn_browse.clicked.connect(self._browse_driver)
+
+        # update port field whenever type changes
+        self.type_combo.currentTextChanged.connect(self._update_port_default)
         drv_layout = QtWidgets.QHBoxLayout()
         drv_layout.addWidget(self.driver_edit)
         drv_layout.addWidget(btn_browse)
@@ -494,15 +498,26 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Database:", self.db_edit)
+        # table selector will be populated after a successful connection test
+        self.table_combo = QtWidgets.QComboBox()
+        self.table_combo.setEnabled(False)
+        form.addRow("Table:", self.table_combo)
         form.addRow("User:", self.user_edit)
         form.addRow("Password:", self.pw_edit)
         form.addRow("Driver path:", drv_layout)
 
         layout.addLayout(form)
 
+        # initialize port based on current type (combo default may already be set)
+        self._update_port_default()
+
         test_btn = QtWidgets.QPushButton("Test Connection")
         test_btn.clicked.connect(self._on_test)
         layout.addWidget(test_btn)
+
+        # status label shows progress/result of connection test
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -511,20 +526,64 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         if initial:
             self.name_edit.setText(initial.get('name', ''))
-            self.type_combo.setCurrentText(initial.get('type', 'MSSQL'))
+            self.type_combo.setCurrentText(initial.get('type', 'MariaDB/MySQL'))
             self.host_edit.setText(initial.get('host', ''))
             self.port_edit.setText(str(initial.get('port', '')))
             self.db_edit.setText(initial.get('database', ''))
             self.user_edit.setText(initial.get('user', ''))
             self.pw_edit.setText(initial.get('password', ''))
             self.driver_edit.setText(initial.get('driver', ''))
+            # if a table was saved with the connection, restore it
+            tbl = initial.get('table')
+            if tbl:
+                self.table_combo.addItem(tbl)
+                self.table_combo.setCurrentText(tbl)
+                self.table_combo.setEnabled(True)
 
     def _browse_driver(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JDBC/ODBC Driver")
         if path:
             self.driver_edit.setText(path)
 
+    def _update_port_default(self):
+        # called when the type combo changes
+        typ = self.type_combo.currentText()
+        if typ == "MariaDB/MySQL":
+            default = "3306"
+        else:
+            default = "1433"
+        if not self.port_edit.text():
+            self.port_edit.setText(default)
+
+    def _populate_tables(self):
+        # attempt to list tables and fill combo - called after a successful test
+        try:
+            from api import db_utils
+            names = db_utils.get_table_names(
+                self.type_combo.currentText(),
+                self.host_edit.text(),
+                int(self.port_edit.text() or 0),
+                self.db_edit.text(),
+                self.user_edit.text(),
+                self.pw_edit.text(),
+                self.driver_edit.text() or None,
+            )
+            self.table_combo.clear()
+            self.table_combo.addItems(names)
+            self.table_combo.setEnabled(bool(names))
+            if names:
+                self.status_label.setText(f"Found {len(names)} table(s).")
+            else:
+                self.status_label.setText("No tables found.")
+        except Exception:
+            # silently ignore; tables remain as-is
+            pass
+
     def _on_test(self):
+        # show busy cursor and status while testing
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        self.status_label.setText("Testing connection...")
+        QtWidgets.QApplication.processEvents()
         from api import db_utils
         port = int(self.port_edit.text() or 0)
         ok = db_utils.test_connection(
@@ -536,13 +595,16 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.pw_edit.text(),
             self.driver_edit.text() or None
         )
+        QtWidgets.QApplication.restoreOverrideCursor()
         if ok:
-            QtWidgets.QMessageBox.information(self, "Test Connection", "Successfully connected to database.")
+            self.status_label.setText("Connection successful.")
+            self._populate_tables()
         else:
+            self.status_label.setText("Connection failed.")
             QtWidgets.QMessageBox.critical(self, "Test Connection", "Failed to connect. Check credentials and driver.")
 
     def get_connection_data(self) -> dict:
-        return {
+        data = {
             'name': self.name_edit.text().strip(),
             'type': self.type_combo.currentText(),
             'host': self.host_edit.text().strip(),
@@ -552,6 +614,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'password': self.pw_edit.text(),
             'driver': self.driver_edit.text().strip(),
         }
+        # include table if user selected one
+        if self.table_combo.count() and self.table_combo.currentText():
+            data['table'] = self.table_combo.currentText()
+        return data
 
 
 class DBConnectionsManager(QtWidgets.QDialog):

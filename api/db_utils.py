@@ -94,6 +94,20 @@ def get_table_sample(db_type: str, host: str, port: int, database: str,
     return None
 
 
+def get_table_names(db_type: str, host: str, port: int, database: str,
+                    user: str, password: str,
+                    driver_path: Optional[str] = None) -> List[str]:
+    """Return a list of table names in the specified database.
+
+    Raises SQLAlchemyError on failure.  Useful for populating a table selector
+    in the UI.
+    """
+    url = _make_url(db_type, host, port, database, user, password, driver_path)
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    return inspector.get_table_names()
+
+
 def get_table_rows(db_type: str, host: str, port: int, database: str,
                    user: str, password: str, table_name: str,
                    driver_path: Optional[str] = None,
