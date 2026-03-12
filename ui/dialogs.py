@@ -755,7 +755,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             return
 
         port = int(self.port_edit.text() or 0)
-        ok = db_utils.test_connection(
+        ok, err = db_utils.test_connection(
             self.type_combo.currentText(),
             self.host_edit.text(),
             port,
@@ -773,7 +773,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             # clear any previous table list so the user must retest
             self.table_combo.clear()
             self.table_combo.setEnabled(False)
-            QtWidgets.QMessageBox.critical(self, "Test Connection", "Failed to connect. Check credentials and driver.")
+            # show detailed error so user can debug
+            msg = "Failed to connect to database."
+            if err:
+                msg += f"\n\nError details:\n{err}"
+            QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
 
     def get_connection_data(self) -> dict:
         data = {

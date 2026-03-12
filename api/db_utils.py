@@ -44,11 +44,11 @@ def _make_url(db_type: str, host: str, port: int, database: str,
 
 
 def test_connection(db_type: str, host: str, port: int, database: str,
-                    user: str, password: str, driver_path: Optional[str] = None) -> bool:
-    """Attempt to connect to the database; return True if successful.
+                    user: str, password: str, driver_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """Attempt to connect to the database; return (success, error_message).
 
-    Any exceptions are caught and returned as False.  Callers may inspect the
-    exception message by wrapping this call themselves.
+    Returns (True, None) on success, or (False, error_string) on failure.
+    The error message includes exception details for debugging.
     """
     try:
         url = _make_url(db_type, host, port, database, user, password, driver_path)
@@ -56,9 +56,9 @@ def test_connection(db_type: str, host: str, port: int, database: str,
         with engine.connect() as conn:
             # execute a lightweight statement
             conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def get_table_columns(db_type: str, host: str, port: int, database: str,

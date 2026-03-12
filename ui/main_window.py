@@ -1012,7 +1012,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
+            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'))
+            if not ok:
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
                 return
             # fetch columns and sample row
@@ -1088,7 +1089,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
+            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'))
+            if not ok:
                 QtWidgets.QMessageBox.critical(self, "Export DB", "Unable to connect with provided credentials.")
                 return
             # fetch column names if table exists, otherwise use empty list

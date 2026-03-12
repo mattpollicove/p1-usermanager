@@ -41,6 +41,10 @@ All notable changes to this project will be documented in this file.
 - **Show selected driver name**: Connection dialog now displays the currently
     chosen driver string below the driver field, helping users verify what will
     be sent to the backend during connection tests.
+- **Improved connection error reporting**: When a test fails, the actual
+    exception message is now displayed (e.g., driver not found, network
+    unreachable, authentication failed) instead of a generic "check credentials
+    and driver" message.  This makes debugging connection issues much easier.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*
