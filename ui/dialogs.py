@@ -591,11 +591,32 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.table_combo.setEnabled(True)
             # rebuild JDBC string from loaded values
             self._update_jdbc_string()
+            # if editing an existing connection, focus name field for convenience
+            self.name_edit.setFocus()
 
     def _browse_driver(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JDBC/ODBC Driver")
         if path:
             self.driver_edit.setText(path)
+
+    def _validate_and_accept(self):
+        """Ensure required fields are present before closing dialog."""
+        name = self.name_edit.text().strip()
+        if not name:
+            QtWidgets.QMessageBox.warning(self, "Invalid Name", "Connection name cannot be empty.")
+            self.name_edit.setFocus()
+            return
+        host = self.host_edit.text().strip()
+        db = self.db_edit.text().strip()
+        if not host or not db:
+            QtWidgets.QMessageBox.warning(self, "Missing Details", "Host and database name are required.")
+            if not host:
+                self.host_edit.setFocus()
+            else:
+                self.db_edit.setFocus()
+            return
+        # everything seems fine
+        self.accept()
 
     def _update_port_default(self):
         # called when the type combo changes
@@ -745,6 +766,14 @@ class DBConnectionsManager(QtWidgets.QDialog):
             data = dlg.get_connection_data()
             name = data.get('name')
             if name:
+                if name in self.result:
+                    resp = QtWidgets.QMessageBox.question(
+                        self, "Replace Connection",
+                        f"A connection named '{name}' already exists. Replace it?",
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                    )
+                    if resp != QtWidgets.QMessageBox.Yes:
+                        return
                 self.result[name] = data
                 self._populate(self.result)
 
