@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Added
+- New "New Connection" toolbar button: clears environment ID, client ID, and client secret fields and prompts user to save after entering values.
+- Ability to skip automatic connection attempts when loading profiles from disk to avoid spurious "Auth Failed" messages.
+- Improved connection testing and error reporting when validating credentials (shows detailed error message).
+- Database import/export functionality:
+  - Toolbar buttons for importing from and exporting to a database table.
+  - `DatabaseConnectionDialog`, `DBConnectionsManager`, and `DatabaseMappingDialog` for managing connections and mapping between PingOne attributes and database columns.
+  - SQLAlchemy-based helpers in `api/db_utils.py` to test connections, fetch table schemas, and sample rows.
+  - Support for MySQL/MariaDB and SQL Server drivers via `pymysql` and `pymssql`.
+  - Prompted users to save connection profiles on first use.
+
 
 ## [v0.6] - 2026-02-02
 ### Added

@@ -1,3 +1,6 @@
 pyside6
 httpx
 keyring
+sqlalchemy
+pymysql
+# pymssql is optional for MSSQL support but may require additional system libraries.

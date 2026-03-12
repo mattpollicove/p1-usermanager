@@ -21,7 +21,16 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker
-from ui.dialogs import EditUserDialog, ColumnSelectDialog, JSONViewDialog, AttributeMappingDialog, ProfileManagerDialog
+from ui.dialogs import (
+    EditUserDialog,
+    ColumnSelectDialog,
+    JSONViewDialog,
+    AttributeMappingDialog,
+    ProfileManagerDialog,
+    DatabaseConnectionDialog,
+    DBConnectionsManager,
+    DatabaseMappingDialog,
+)
 from ui.themes import ThemeManager
 
 # Platform detection for cross-platform UI optimization
@@ -79,6 +88,11 @@ Managing Profiles:
 - Delete unwanted profiles from the Profile Manager dialog.
 - The currently active profile cannot be deleted; switch profiles first.
 
+Database Import/Export:
+- Use File → Manage DB Connections (or the button in Configuration tab) to define connections.
+- Supported types: MSSQL and MariaDB/MySQL. Provide JDBC/ODBC driver path if needed.
+- After defining a connection you can import or export data via the toolbar buttons on the User Management tab.
+
 Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
 - Displays connection status and recent operation results.
@@ -115,6 +129,7 @@ Importing Users:
   • The 'enabled' field is a dropdown (true/false)
   • You can assign a fixed population to all imported users
   • Check "Remember mapping for this profile" to save mappings
+- Database import: first define a connection via File → Manage DB Connections or the Configuration tab button, then click "Import DB" on the User Management toolbar and follow the prompts to select a table and map its columns.
 - Usernames are normalized (whitespace trimmed, case-insensitive comparison).
 - If a username already exists on the server, the import updates that user instead of creating a duplicate.
 - Local JSON Schema validation is performed if jsonschema is installed and user_schema.json exists.
@@ -124,6 +139,7 @@ Exporting Users:
 - Choose to export all users or selected rows only.
 - Choose to export all columns or only visible columns.
 - Check "Remember these choices" to save export preferences per-profile.
+- Database export: click "Export DB" on the toolbar (after defining a connection) to map PingOne attributes to target table columns; the table will be created if it does not already exist.
 
 Deleting Users:
 - Select one or more rows and click "Delete Selected" or use the context menu.
@@ -413,6 +429,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._view_conn_log_btn = QtWidgets.QPushButton("View Connection Log")
         self._view_conn_log_btn.clicked.connect(self.view_connection_log)
         cred_form.addRow(self._view_conn_log_btn)
+        # Button to manage database connections
+        self._manage_db_btn = QtWidgets.QPushButton("Manage DB Connections")
+        self._manage_db_btn.clicked.connect(self.manage_db_connections)
+        cred_form.addRow(self._manage_db_btn)
         # Per-profile option: show live API calls in status bar
         self.show_api_calls_cb = QtWidgets.QCheckBox('Show live API calls in status bar')
         self.show_api_calls_cb.setChecked(False)
@@ -469,8 +489,20 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_export_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_E))
         btn_export_ldif.setToolTip(f"Export to LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+E)")
         
+        # Database import/export buttons
+        btn_import_db = QtWidgets.QPushButton("Import DB")
+        btn_import_db.clicked.connect(self.import_from_database)
+        btn_import_db.setToolTip("Import users from a database table")
+        btn_import_db.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_I))
+        btn_export_db = QtWidgets.QPushButton("Export DB")
+        btn_export_db.clicked.connect(self.export_to_database)
+        btn_export_db.setToolTip("Export users to a database table")
+        btn_export_db.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_E))
+        
         toolbar.addWidget(btn_import_csv); toolbar.addWidget(btn_import_ldif)
+        toolbar.addWidget(btn_import_db)
         toolbar.addWidget(btn_export_csv); toolbar.addWidget(btn_export_ldif)
+        toolbar.addWidget(btn_export_db)
         btn_columns = QtWidgets.QPushButton("Columns")
         btn_columns.clicked.connect(self.select_columns)
         btn_columns.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_K))
@@ -925,6 +957,177 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.signals.finished.connect(self.on_fetch_success)
         worker.signals.error.connect(self.on_connection_error)
         QtCore.QThreadPool.globalInstance().start(worker)
+
+    def manage_db_connections(self):
+        """Show the DB connections manager and persist any changes."""
+        try:
+            cfg = self._read_config()
+            dbs = cfg.get('db_connections', {})
+            dlg = DBConnectionsManager(dbs.copy(), self)
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                new = dlg.get_connections()
+                cfg['db_connections'] = new
+                with open(self.config_file, 'w') as f:
+                    json.dump(cfg, f, indent=4)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "DB Connections", f"Failed to manage DB connections: {e}")
+
+    def import_from_database(self):
+        """Initiate import flow from a database table."""
+        try:
+            cfg = self._read_config()
+            dbs = cfg.get('db_connections', {})
+            if not dbs:
+                QtWidgets.QMessageBox.information(self, "Import DB", "No database connections defined. Please create one first.")
+                self.manage_db_connections()
+                cfg = self._read_config(); dbs = cfg.get('db_connections', {})
+                if not dbs:
+                    return
+            # let user select connection
+            names = list(dbs.keys())
+            name, ok = QtWidgets.QInputDialog.getItem(self, "Select Connection", "Connection:", names, editable=False)
+            if not ok or not name:
+                return
+            conn = dbs[name]
+            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:")
+            if not ok or not table:
+                return
+            # test connection
+            from api import db_utils
+            if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
+                QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
+                return
+            # fetch columns and sample row
+            try:
+                cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
+                sample = db_utils.get_table_sample(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
+                return
+            ping_attrs = self._get_pingone_attributes()
+            dlg = DatabaseMappingDialog(cols, ping_attrs, direction='import', sample_row=sample, parent=self)
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                mapping = dlg.get_mapping()
+                if not mapping:
+                    QtWidgets.QMessageBox.information(self, "Import DB", "No columns were mapped; import cancelled.")
+                    return
+                # retrieve rows from the selected table
+                try:
+                    rows = db_utils.get_table_rows(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, conn.get('driver')
+                    )
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table rows: {e}")
+                    return
+                if not rows:
+                    QtWidgets.QMessageBox.information(self, "Import DB", "No rows found in table.")
+                    return
+                # prepare API client and optional population cache
+                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+                pops = {}
+                try:
+                    token = asyncio.run(client.get_token())
+                    if token:
+                        pops = asyncio.run(client.get_populations())
+                except Exception:
+                    pass
+                # convert DB rows to PingOne users
+                users = self._convert_rows_to_users(rows, mapping, client, pops)
+                # run common import sequence
+                self._perform_import_sequence(users, client, pops)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import DB", str(e))
+
+    def export_to_database(self):
+        """Initiate export flow to a database table."""
+        try:
+            cfg = self._read_config()
+            dbs = cfg.get('db_connections', {})
+            if not dbs:
+                QtWidgets.QMessageBox.information(self, "Export DB", "No database connections defined. Please create one first.")
+                self.manage_db_connections()
+                cfg = self._read_config(); dbs = cfg.get('db_connections', {})
+                if not dbs:
+                    return
+            names = list(dbs.keys())
+            name, ok = QtWidgets.QInputDialog.getItem(self, "Select Connection", "Connection:", names, editable=False)
+            if not ok or not name:
+                return
+            conn = dbs[name]
+            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to export to (will be created if it does not exist):")
+            if not ok or not table:
+                return
+            # test connection
+            from api import db_utils
+            if not db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver')):
+                QtWidgets.QMessageBox.critical(self, "Export DB", "Unable to connect with provided credentials.")
+                return
+            # fetch column names if table exists, otherwise use empty list
+            cols = []
+            try:
+                cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
+            except Exception:
+                cols = []
+            ping_attrs = self._get_pingone_attributes()
+            dlg = DatabaseMappingDialog(cols or ping_attrs, ping_attrs, direction='export', parent=self)
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                mapping = dlg.get_mapping()
+                if not mapping:
+                    QtWidgets.QMessageBox.information(self, "Export DB", "No attributes were mapped; export cancelled.")
+                    return
+                # compute list of users to export
+                if not self.users_cache:
+                    QtWidgets.QMessageBox.information(self, "Export DB", "No users to export.")
+                    return
+                selected = self.u_table.selectionModel().selectedRows()
+                if selected:
+                    id_col = self.columns.index('id') if 'id' in self.columns else -1
+                    if id_col != -1:
+                        ids = [self.u_table.item(r.row(), id_col).text() for r in selected]
+                        export_users = [u for u in self.users_cache if u.get('id') in ids]
+                    else:
+                        export_users = list(self.users_cache)
+                else:
+                    export_users = list(self.users_cache)
+                # build rows for insertion based on mapping
+                rows = []
+                for u in export_users:
+                    flat = self._flatten_user(u)
+                    row = {}
+                    for ping_attr, col in mapping.items():
+                        val = flat.get(ping_attr)
+                        if isinstance(val, (dict, list)):
+                            try:
+                                val = json.dumps(val)
+                            except Exception:
+                                pass
+                        row[col] = val
+                    rows.append(row)
+                # ensure table exists and insert
+                try:
+                    db_utils.create_table_if_not_exists(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, list(mapping.values()), conn.get('driver')
+                    )
+                    db_utils.insert_rows(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, rows, conn.get('driver')
+                    )
+                    QtWidgets.QMessageBox.information(self, "Export DB", f"Exported {len(rows)} users to table {table}.")
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Export DB", f"Export failed: {e}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export DB", str(e))
+
+    def _get_pingone_attributes(self) -> list:
+        """Return a list of PingOne attribute names for mapping dialogs."""
+        # for now, return a hardcoded common set; could be extended to
+        # query the API schema or derive from cached users
+        return [
+            'username', 'email', 'name.given', 'name.family',
+            'population.id', 'population.name', 'id'
+        ]
 
     def connect_only(self):
         """Attempt to obtain a token using the UI credentials and log success/failure."""
@@ -1691,6 +1894,325 @@ class MainWindow(QtWidgets.QMainWindow):
             row = [flat.get(col, '') for col in columns]
             yield row
 
+    # --- shared import helpers ------------------------------------------------
+    def _convert_rows_to_users(self, rows: list, mapping: dict,
+                               client, pops: dict = None,
+                               fixed_pop_id=None, fixed_enabled=None) -> list:
+        """Apply a column-to-attribute mapping to a list of row dicts.
+
+        Returns a list of PingOne user dicts suitable for import.  This logic is
+        essentially the same as the CSV import path but operates on an already-
+        populated ``rows`` list instead of reading from a file.
+        ``mapping`` should map source column names to PingOne attribute names.
+        """
+        users = []
+        for row in rows:
+            flat = {}
+            for k, v in row.items():
+                if v is None or v == '':
+                    continue
+                target = mapping.get(k, k)
+                # Skip any mapping that resolves to an empty/blank target
+                if not target or (isinstance(target, str) and not target.strip()):
+                    continue
+                # Treat any 'uid' mapping as username (avoid importing as system id)
+                try:
+                    if isinstance(target, str) and target.lower() == 'uid':
+                        target = 'username'
+                except Exception:
+                    pass
+                # Show ID columns in the mapping UI but do NOT import ID values.
+                if target == 'id':
+                    continue
+                # convert enabled values to booleans when mapped
+                if target == 'enabled':
+                    try:
+                        low = str(v).strip().lower()
+                        if low in ('true', '1', 'yes', 'y', 't'):
+                            flat[target] = True
+                        elif low in ('false', '0', 'no', 'n', 'f'):
+                            flat[target] = False
+                        else:
+                            flat[target] = v
+                    except Exception:
+                        flat[target] = v
+                else:
+                    flat[target] = v
+            user = self._unflatten_user(flat)
+            # normalize username whitespace
+            try:
+                if isinstance(user.get('username'), str):
+                    user['username'] = user['username'].strip()
+            except Exception:
+                pass
+            # apply fixed enabled setting if provided
+            if fixed_enabled is not None:
+                user['enabled'] = bool(fixed_enabled)
+            users.append(user)
+        # Normalize population values: convert names to IDs where possible
+        try:
+            if not pops:
+                pops = asyncio.run(client.get_populations())
+            for u in users:
+                if fixed_pop_id:
+                    u['population'] = {'id': fixed_pop_id}
+                    continue
+                pop = u.get('population')
+                if isinstance(pop, dict):
+                    # If population provided as { 'name': 'X' }
+                    name = pop.get('name')
+                    if name and name in pops:
+                        u['population'] = {'id': pops[name]}
+                        continue
+                    # If population provided as { 'id': 'maybe-name-or-id' }
+                    val = pop.get('id')
+                    if val:
+                        # If it's already a known id, keep it
+                        if val in pops.values():
+                            u['population'] = {'id': val}
+                        # If it's a population name, map to id
+                        elif val in pops:
+                            u['population'] = {'id': pops[val]}
+        except Exception:
+            pass
+        return users
+
+    def _perform_import_sequence(self, users: list, client, pops: dict = None,
+                                 fixed_pop_id=None, fixed_enabled=None):
+        """Common logic used by both CSV and database import flows.
+
+        ``users`` should be a list of pre-processed user dicts (i.e. the output
+        of ``_convert_rows_to_users`` or the CSV reader loop).  This method
+        handles credential validation, pre-checks, local validation, and kicking
+        off the background worker.
+        """
+        if not users:
+            QtWidgets.QMessageBox.information(self, "Import", "No users to import.")
+            return
+        # Validate credentials by obtaining a token before starting the worker
+        try:
+            token = asyncio.run(client.get_token())
+        except Exception:
+            token = None
+        if not token:
+            QtWidgets.QMessageBox.critical(self, "Auth Failed", "Auth Failed. Check credentials.")
+            return
+        # Pre-check for username collisions against existing users and within the import set
+        existing_user_map = {}
+        try:
+            token = asyncio.run(client.get_token())
+            if token:
+                import httpx as _httpx
+                async def _fetch_usernames():
+                    headers = client._get_auth_headers(token)
+                    async with _httpx.AsyncClient(timeout=10.0) as session:
+                        url = f"{client.base_url}/users"
+                        while url:
+                            resp = await session.get(url, headers=headers)
+                            data = resp.json()
+                            for uu in data.get("_embedded", {}).get("users", []):
+                                if uu.get('username') and uu.get('id'):
+                                    try:
+                                        existing_user_map[uu.get('username').strip().lower()] = uu.get('id')
+                                    except Exception:
+                                        existing_user_map[uu.get('username')] = uu.get('id')
+                            url = data.get("_links", {}).get("next", {}).get("href")
+                try:
+                    asyncio.run(_fetch_usernames())
+                except Exception:
+                    pass
+        except Exception:
+            # fall back to local cache if network fetch fails; build name->id map
+            existing_user_map = {}
+            for uu in (u for u in self.users_cache if u.get('username') and u.get('id')):
+                try:
+                    existing_user_map[uu.get('username').strip().lower()] = uu.get('id')
+                except Exception:
+                    existing_user_map[uu.get('username')] = uu.get('id')
+        # Log a short snapshot of existing usernames for debugging
+        try:
+            import api.client as _api_client
+            sample = list(existing_user_map.items())[:200]
+            _api_client.write_connection_log(f"Pre-check existing_user_map (sample {len(sample)}): {sample}")
+        except Exception:
+            pass
+        # Split users into creates and updates based on existing username map
+        seen_usernames = set()
+        pre_errors = []
+        create_users = []
+        update_pairs = []
+        for u in users:
+            uname = u.get('username')
+            if not uname:
+                continue
+            try:
+                uname_norm = uname.strip().lower()
+            except Exception:
+                uname_norm = uname
+            if uname_norm in seen_usernames:
+                pre_errors.append(f"Duplicate username in import: {uname}")
+                continue
+            seen_usernames.add(uname_norm)
+            if uname_norm in existing_user_map:
+                uid = existing_user_map.get(uname_norm)
+                update_pairs.append((uid, u))
+            else:
+                create_users.append(u)
+        if pre_errors:
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle("Validation Failed")
+            lay = QtWidgets.QVBoxLayout(dlg)
+            lab = QtWidgets.QLabel(f"{len(pre_errors)} validation errors detected. Import aborted.")
+            te = QtWidgets.QTextEdit()
+            te.setReadOnly(True)
+            te.setPlainText('\n'.join(pre_errors))
+            te.setMinimumHeight(200)
+            lay.addWidget(lab)
+            lay.addWidget(te)
+            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+            btns.accepted.connect(dlg.accept)
+            lay.addWidget(btns)
+            try:
+                screen = QtWidgets.QApplication.primaryScreen()
+                geom = screen.availableGeometry()
+                w = min(int(geom.width() * 0.6), 900)
+                h = min(int(geom.height() * 0.4), 400)
+                dlg.resize(max(500, w), max(200, h))
+            except Exception:
+                dlg.resize(600, 240)
+            dlg.exec()
+            return
+
+        # Validate create-users with server-side dry-run and validate updates locally
+        val_errors = []
+        # Clean users of any accidental empty-string keys before validation
+        for uu in users:
+            try:
+                self._remove_empty_keys(uu)
+            except Exception:
+                pass
+
+        # Validate creates locally (removed server dry-run validation)
+        if create_users:
+            for u in create_users:
+                try:
+                    if self.use_local_schema_action.isChecked():
+                        try:
+                            client.local_validate_user(u)
+                        except Exception as le:
+                            val_errors.append(f"User {u.get('username') or u.get('id')}: local validation error: {le}")
+                            continue
+                except Exception as e:
+                    val_errors.append(f"User {u.get('username') or u.get('id')}: unexpected validation error: {e}")
+
+        # Validate updates locally if requested (server dry-run not available for updates)
+        if update_pairs:
+            for uid, u in update_pairs:
+                try:
+                    if self.use_local_schema_action.isChecked():
+                        try:
+                            client.local_validate_user(u)
+                        except Exception as le:
+                            val_errors.append(f"User {u.get('username') or uid}: local validation error: {le}")
+                except Exception as e:
+                    val_errors.append(f"User {u.get('username') or uid}: unexpected validation error: {e}")
+
+        if val_errors:
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle("Validation Failed")
+            lay = QtWidgets.QVBoxLayout(dlg)
+            lab = QtWidgets.QLabel(f"{len(val_errors)} validation errors detected. Import aborted.")
+            te = QtWidgets.QTextEdit()
+            te.setReadOnly(True)
+            te.setPlainText('\n'.join(val_errors))
+            te.setMinimumHeight(300)
+            lay.addWidget(lab)
+            lay.addWidget(te)
+            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+            btns.accepted.connect(dlg.accept)
+            lay.addWidget(btns)
+            try:
+                screen = QtWidgets.QApplication.primaryScreen()
+                geom = screen.availableGeometry()
+                w = min(int(geom.width() * 0.75), 1100)
+                h = min(int(geom.height() * 0.6), 800)
+                dlg.resize(max(700, w), max(400, h))
+            except Exception:
+                dlg.resize(900, 500)
+            dlg.exec()
+            return
+
+        # Start create worker (if any) and then update worker (if any)
+        self.prog.show(); self.prog.setRange(0, len(create_users) if create_users else (len(update_pairs) or 0))
+        # Map population names to IDs if provided in CSV or apply fixed population
+        try:
+            if not pops:
+                pops = asyncio.run(client.get_populations())
+            # convert any user with population.name -> population.id
+            for u in users:
+                if fixed_pop_id:
+                    u['population'] = {'id': fixed_pop_id}
+                    continue
+                pop = u.get('population')
+                if isinstance(pop, dict):
+                    # support population.name -> id
+                    name = pop.get('name')
+                    if name and name in pops:
+                        u['population'] = {'id': pops[name]}
+                        continue
+                    # support population.id coming from CSV; if value looks
+                    # like a name, map it to id; if it is already an id, leave it
+                    val = pop.get('id')
+                    if val:
+                        if val in pops.values():
+                            u['population'] = {'id': val}
+                        elif val in pops:
+                            u['population'] = {'id': pops[val]}
+        except Exception:
+            pass
+        w = BulkCreateWorker(client, users)
+        w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
+        def on_done(res):
+            self.prog.hide()
+            created = res.get('created', 0)
+            total = res.get('total', 0)
+            errors = res.get('errors', []) or []
+            if created == 0 and errors:
+                dlg = QtWidgets.QDialog(self)
+                dlg.setWindowTitle("Import Result")
+                lay = QtWidgets.QVBoxLayout(dlg)
+                lab = QtWidgets.QLabel(f"Created {created}/{total} users. No users were created.")
+                te = QtWidgets.QTextEdit()
+                te.setReadOnly(True)
+                te.setPlainText('\n'.join(errors))
+                te.setMinimumHeight(300)
+                lay.addWidget(lab)
+                lay.addWidget(te)
+                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+                btns.accepted.connect(dlg.accept)
+                lay.addWidget(btns)
+                try:
+                    screen = QtWidgets.QApplication.primaryScreen()
+                    geom = screen.availableGeometry()
+                    w = min(int(geom.width() * 0.75), 1100)
+                    h = min(int(geom.height() * 0.6), 800)
+                    dlg.resize(max(700, w), max(400, h))
+                except Exception:
+                    dlg.resize(900, 500)
+                dlg.exec()
+            else:
+                QtWidgets.QMessageBox.information(self, "Import Complete", f"Created {created}/{total} users")
+            self.refresh_users()
+        w.signals.finished.connect(on_done)
+        w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
+        self.threadpool.start(w)
+        msg = f"Import started: {len(users)} users"
+        self.status_label.setText(msg)
+        try:
+            self.statusBar().showMessage(msg)
+        except Exception:
+            pass
+
     def _apply_column_widths(self):
         """Apply saved column widths to the table."""
         for c, col in enumerate(self.columns):
@@ -2077,353 +2599,67 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             return
         try:
             import csv as _csv
-            users = []
+            # read all rows first so we can re-use them after showing mapping dialog
             with open(path, 'r', encoding='utf-8') as f:
                 reader = _csv.DictReader(f)
                 headers = reader.fieldnames or []
-                # Create a client early so we can fetch populations for the mapping UI
-                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
-                pops = {}
-                try:
-                    token = asyncio.run(client.get_token())
-                    if token:
-                        pops = asyncio.run(client.get_populations())
-                except Exception:
-                    token = None
-                # Show attribute mapping dialog (passes population map and any saved mappings for this profile)
-                initial_mapping = None
-                initial_fixed = None
-                prof_name = self.profile_list.currentText()
-                try:
-                    cfg = self._read_config()
-                    if prof_name and prof_name in cfg:
-                        initial_mapping = cfg[prof_name].get('mappings')
-                        initial_fixed = cfg[prof_name].get('fixed_population_id')
-                except Exception:
-                    initial_mapping = None
-                    initial_fixed = None
-                initial_enabled = None
-                try:
-                    if prof_name and prof_name in cfg:
-                        initial_enabled = cfg[prof_name].get('fixed_enabled')
-                except Exception:
-                    initial_enabled = None
-                map_dialog = AttributeMappingDialog(headers, self, pop_map=pops, initial_mapping=initial_mapping, initial_fixed_pop_id=initial_fixed, initial_fixed_enabled=initial_enabled)
-                if map_dialog.exec() != QtWidgets.QDialog.Accepted:
-                    return
-                mapping, fixed_pop_id, fixed_enabled, remember = map_dialog.get_mapping()
-                # Persist mapping into the active profile only if user chose to remember it
-                try:
-                    if prof_name and remember:
-                        cfg = self._read_config()
-                        if prof_name not in cfg:
-                            cfg[prof_name] = {}
-                        cfg[prof_name]['mappings'] = mapping
-                        cfg[prof_name]['fixed_population_id'] = fixed_pop_id
-                        cfg[prof_name]['fixed_enabled'] = fixed_enabled
-                        with open(self.config_file, 'w') as f:
-                            json.dump(cfg, f, indent=4)
-                except Exception:
-                    pass
-                for row in reader:
-                    # Apply mapping to keys and build nested object
-                    flat = {}
-                    for k, v in row.items():
-                        if v is None or v == '':
-                            continue
-                        target = mapping.get(k, k)
-                        # Skip any mapping that resolves to an empty/blank target
-                        if not target or (isinstance(target, str) and not target.strip()):
-                            continue
-                        # Treat any 'uid' mapping as username (avoid importing as system id)
-                        try:
-                            if isinstance(target, str) and target.lower() == 'uid':
-                                target = 'username'
-                        except Exception:
-                            pass
-                        # Show ID columns in the mapping UI but do NOT import ID values.
-                        if target == 'id':
-                            # skip any id column provided in CSV — system generated
-                            continue
-                        # convert enabled values to booleans when mapped
-                        if target == 'enabled':
-                            try:
-                                low = str(v).strip().lower()
-                                if low in ('true', '1', 'yes', 'y', 't'):
-                                    flat[target] = True
-                                elif low in ('false', '0', 'no', 'n', 'f'):
-                                    flat[target] = False
-                                else:
-                                    flat[target] = v
-                            except Exception:
-                                flat[target] = v
-                        else:
-                            flat[target] = v
-                    user = self._unflatten_user(flat)
-                    # normalize username whitespace
-                    try:
-                        if isinstance(user.get('username'), str):
-                            user['username'] = user['username'].strip()
-                    except Exception:
-                        pass
-                    # apply fixed enabled setting if provided
-                    if fixed_enabled is not None:
-                        user['enabled'] = bool(fixed_enabled)
-                    users.append(user)
-                # Normalize population values: convert names to IDs where possible
-                try:
-                    if not pops:
-                        pops = asyncio.run(client.get_populations())
-                    for u in users:
-                        if fixed_pop_id:
-                            u['population'] = {'id': fixed_pop_id}
-                            continue
-                        pop = u.get('population')
-                        if isinstance(pop, dict):
-                            # If population provided as { 'name': 'X' }
-                            name = pop.get('name')
-                            if name and name in pops:
-                                u['population'] = {'id': pops[name]}
-                                continue
-                            # If population provided as { 'id': 'maybe-name-or-id' }
-                            val = pop.get('id')
-                            if val:
-                                # If it's already a known id, keep it
-                                if val in pops.values():
-                                    u['population'] = {'id': val}
-                                # If it's a population name, map to id
-                                elif val in pops:
-                                    u['population'] = {'id': pops[val]}
-                except Exception:
-                    pass
-            if not users:
-                QtWidgets.QMessageBox.information(self, "Import", "No users found in CSV.")
-                return
-            # Validate credentials by obtaining a token before starting the worker
-            try:
-                token = asyncio.run(client.get_token())
-            except Exception:
-                token = None
-            if not token:
-                QtWidgets.QMessageBox.critical(self, "Auth Failed", "Auth Failed. Check credentials.")
-                return
-            # Pre-check for username collisions against existing users and within the import set
-            # Refresh existing usernames from the server to avoid stale cache
-            existing_user_map = {}
+                raw_rows = list(reader)
+
+            # prepare client & populate list for mapping UI
+            client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+            pops = {}
             try:
                 token = asyncio.run(client.get_token())
                 if token:
-                    import httpx as _httpx
-                    async def _fetch_usernames():
-                        headers = client._get_auth_headers(token)
-                        async with _httpx.AsyncClient(timeout=10.0) as session:
-                            url = f"{client.base_url}/users"
-                            while url:
-                                resp = await session.get(url, headers=headers)
-                                data = resp.json()
-                                for uu in data.get("_embedded", {}).get("users", []):
-                                        if uu.get('username') and uu.get('id'):
-                                            try:
-                                                existing_user_map[uu.get('username').strip().lower()] = uu.get('id')
-                                            except Exception:
-                                                existing_user_map[uu.get('username')] = uu.get('id')
-                                url = data.get("_links", {}).get("next", {}).get("href")
-                    try:
-                        asyncio.run(_fetch_usernames())
-                    except Exception:
-                        pass
-            except Exception:
-                # fall back to local cache if network fetch fails; build name->id map
-                existing_user_map = {}
-                for uu in (u for u in self.users_cache if u.get('username') and u.get('id')):
-                    try:
-                        existing_user_map[uu.get('username').strip().lower()] = uu.get('id')
-                    except Exception:
-                        existing_user_map[uu.get('username')] = uu.get('id')
-            # Log a short snapshot of existing usernames for debugging
-            try:
-                import api.client as _api_client
-                sample = list(existing_user_map.items())[:200]
-                _api_client.write_connection_log(f"Pre-check existing_user_map (sample {len(sample)}): {sample}")
-            except Exception:
-                pass
-            # Split users into creates and updates based on existing username map
-            seen_usernames = set()
-            pre_errors = []
-            create_users = []
-            update_pairs = []
-            for u in users:
-                uname = u.get('username')
-                if not uname:
-                    continue
-                try:
-                    uname_norm = uname.strip().lower()
-                except Exception:
-                    uname_norm = uname
-                if uname_norm in seen_usernames:
-                    pre_errors.append(f"Duplicate username in import: {uname}")
-                    continue
-                seen_usernames.add(uname_norm)
-                if uname_norm in existing_user_map:
-                    # update existing user
-                    uid = existing_user_map.get(uname_norm)
-                    update_pairs.append((uid, u))
-                else:
-                    create_users.append(u)
-            if pre_errors:
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle("Validation Failed")
-                lay = QtWidgets.QVBoxLayout(dlg)
-                lab = QtWidgets.QLabel(f"{len(pre_errors)} validation errors detected. Import aborted.")
-                te = QtWidgets.QTextEdit()
-                te.setReadOnly(True)
-                te.setPlainText('\n'.join(pre_errors))
-                te.setMinimumHeight(200)
-                lay.addWidget(lab)
-                lay.addWidget(te)
-                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                btns.accepted.connect(dlg.accept)
-                lay.addWidget(btns)
-                try:
-                    screen = QtWidgets.QApplication.primaryScreen()
-                    geom = screen.availableGeometry()
-                    w = min(int(geom.width() * 0.6), 900)
-                    h = min(int(geom.height() * 0.4), 400)
-                    dlg.resize(max(500, w), max(200, h))
-                except Exception:
-                    dlg.resize(600, 240)
-                dlg.exec()
-                return
-
-            # Validate create-users with server-side dry-run and validate updates locally
-            val_errors = []
-            # Clean users of any accidental empty-string keys before validation
-            for uu in users:
-                try:
-                    self._remove_empty_keys(uu)
-                except Exception:
-                    pass
-
-            # Validate creates locally (removed server dry-run validation)
-            if create_users:
-                for u in create_users:
-                    try:
-                        if self.use_local_schema_action.isChecked():
-                            try:
-                                client.local_validate_user(u)
-                            except Exception as le:
-                                val_errors.append(f"User {u.get('username') or u.get('id')}: local validation error: {le}")
-                                continue
-                    except Exception as e:
-                        val_errors.append(f"User {u.get('username') or u.get('id')}: unexpected validation error: {e}")
-
-            # Validate updates locally if requested (server dry-run not available for updates)
-            if update_pairs:
-                for uid, u in update_pairs:
-                    try:
-                        if self.use_local_schema_action.isChecked():
-                            try:
-                                client.local_validate_user(u)
-                            except Exception as le:
-                                val_errors.append(f"User {u.get('username') or uid}: local validation error: {le}")
-                    except Exception as e:
-                        val_errors.append(f"User {u.get('username') or uid}: unexpected validation error: {e}")
-
-            if val_errors:
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle("Validation Failed")
-                lay = QtWidgets.QVBoxLayout(dlg)
-                lab = QtWidgets.QLabel(f"{len(val_errors)} validation errors detected. Import aborted.")
-                te = QtWidgets.QTextEdit()
-                te.setReadOnly(True)
-                te.setPlainText('\n'.join(val_errors))
-                te.setMinimumHeight(300)
-                lay.addWidget(lab)
-                lay.addWidget(te)
-                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                btns.accepted.connect(dlg.accept)
-                lay.addWidget(btns)
-                try:
-                    screen = QtWidgets.QApplication.primaryScreen()
-                    geom = screen.availableGeometry()
-                    w = min(int(geom.width() * 0.75), 1100)
-                    h = min(int(geom.height() * 0.6), 800)
-                    dlg.resize(max(700, w), max(400, h))
-                except Exception:
-                    dlg.resize(900, 500)
-                dlg.exec()
-                return
-
-            # Start create worker (if any) and then update worker (if any)
-            self.prog.show(); self.prog.setRange(0, len(create_users) if create_users else (len(update_pairs) or 0))
-            # Map population names to IDs if provided in CSV or apply fixed population
-            try:
-                if not pops:
                     pops = asyncio.run(client.get_populations())
-                # convert any user with population.name -> population.id
-                for u in users:
-                    if fixed_pop_id:
-                        u['population'] = {'id': fixed_pop_id}
-                        continue
-                    pop = u.get('population')
-                    if isinstance(pop, dict):
-                        # support population.name -> id
-                        name = pop.get('name')
-                        if name and name in pops:
-                            u['population'] = {'id': pops[name]}
-                            continue
-                        # support population.id coming from CSV; if value looks
-                        # like a name, map it to id; if it is already an id, leave it
-                        val = pop.get('id')
-                        if val:
-                            if val in pops.values():
-                                u['population'] = {'id': val}
-                            elif val in pops:
-                                u['population'] = {'id': pops[val]}
             except Exception:
-                pass
-            w = BulkCreateWorker(client, users)
-            w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
-            def on_done(res):
-                self.prog.hide()
-                created = res.get('created', 0)
-                total = res.get('total', 0)
-                errors = res.get('errors', []) or []
-                if created == 0 and errors:
-                    dlg = QtWidgets.QDialog(self)
-                    dlg.setWindowTitle("Import Result")
-                    lay = QtWidgets.QVBoxLayout(dlg)
-                    lab = QtWidgets.QLabel(f"Created {created}/{total} users. No users were created.")
-                    te = QtWidgets.QTextEdit()
-                    te.setReadOnly(True)
-                    te.setPlainText('\n'.join(errors))
-                    te.setMinimumHeight(300)
-                    lay.addWidget(lab)
-                    lay.addWidget(te)
-                    btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-                    btns.accepted.connect(dlg.accept)
-                    lay.addWidget(btns)
-                    try:
-                        screen = QtWidgets.QApplication.primaryScreen()
-                        geom = screen.availableGeometry()
-                        w = min(int(geom.width() * 0.75), 1100)
-                        h = min(int(geom.height() * 0.6), 800)
-                        dlg.resize(max(700, w), max(400, h))
-                    except Exception:
-                        dlg.resize(900, 500)
-                    dlg.exec()
-                else:
-                    QtWidgets.QMessageBox.information(self, "Import Complete", f"Created {created}/{total} users")
-                self.refresh_users()
-            w.signals.finished.connect(on_done)
-            w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
-            self.threadpool.start(w)
-            msg = f"Import started: {len(users)} users"
-            self.status_label.setText(msg)
+                token = None
+
+            # show mapping dialog
+            prof_name = self.profile_list.currentText()
+            initial_mapping = None
+            initial_fixed = None
             try:
-                self.statusBar().showMessage(msg)
+                cfg = self._read_config()
+                if prof_name and prof_name in cfg:
+                    initial_mapping = cfg[prof_name].get('mappings')
+                    initial_fixed = cfg[prof_name].get('fixed_population_id')
             except Exception:
                 pass
+            initial_enabled = None
+            try:
+                if prof_name and prof_name in cfg:
+                    initial_enabled = cfg[prof_name].get('fixed_enabled')
+            except Exception:
+                pass
+
+            map_dialog = AttributeMappingDialog(headers, self, pop_map=pops,
+                                               initial_mapping=initial_mapping,
+                                               initial_fixed_pop_id=initial_fixed,
+                                               initial_fixed_enabled=initial_enabled)
+            if map_dialog.exec() != QtWidgets.QDialog.Accepted:
+                return
+            mapping, fixed_pop_id, fixed_enabled, remember = map_dialog.get_mapping()
+
+            # persist mapping if requested
+            try:
+                if prof_name and remember:
+                    cfg = self._read_config()
+                    if prof_name not in cfg:
+                        cfg[prof_name] = {}
+                    cfg[prof_name]['mappings'] = mapping
+                    cfg[prof_name]['fixed_population_id'] = fixed_pop_id
+                    cfg[prof_name]['fixed_enabled'] = fixed_enabled
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+            except Exception:
+                pass
+
+            # convert rows into users via shared helper
+            users = self._convert_rows_to_users(raw_rows, mapping, client, pops,
+                                                fixed_pop_id, fixed_enabled)
+            # hand off to common import logic
+            self._perform_import_sequence(users, client, pops, fixed_pop_id, fixed_enabled)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 

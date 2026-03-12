@@ -448,302 +448,245 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         note = QtWidgets.QLabel("Note: any 'ID' column is system-generated and read-only; ID values will be shown but ignored during import.")
         note.setWordWrap(True)
         note.setStyleSheet('color: #555; font-style: italic;')
-        layout.addWidget(note)
 
-        # Table of all headers with suggested mappings (editable)
-        # Add a third column which shows the mapping "type" (id/name) compactly
-        self.table = QtWidgets.QTableWidget(len(self.headers), 3)
-        self.table.setHorizontalHeaderLabels(["File Header", "Mapped Attribute", "Type"])
-        self.table.horizontalHeader().setStretchLastSection(True)
 
-        def _suggest_attr(hdr: str) -> str:
-            if not hdr:
-                return hdr
-            s = hdr.strip()
-            low = s.lower()
-            # Common explicit mappings
-            commons = {
-                'first name': 'name.given', 'first_name': 'name.given', 'firstname': 'name.given', 'given': 'name.given',
-                'last name': 'name.family', 'last_name': 'name.family', 'lastname': 'name.family', 'family': 'name.family',
-                'email': 'email', 'e-mail': 'email',
-                'username': 'username', 'user name': 'username', 'user': 'username',
-                'phone': 'phoneNumbers', 'phone number': 'phoneNumbers', 'phone_number': 'phoneNumbers', 'phonenumber': 'phoneNumbers',
-                'population': 'population.id', 'population.name': 'population.id',
-                'id': 'id', 'uuid': 'id',
-                'street': 'address.street', 'address.street': 'address.street',
-                'city': 'address.city', 'state': 'address.region', 'zip': 'address.postalCode', 'postalcode': 'address.postalCode', 'country': 'address.country'
-            }
-            if low in commons:
-                return commons[low]
-            # Try dot-notation heuristics
-            key = low.replace(' ', '.').replace('_', '.')
-            if key in ('first', 'given'):
-                return 'name.given'
-            if key in ('last', 'family', 'surname'):
-                return 'name.family'
-            if key.startswith('name.'):
-                return key
-            return key
+# -- database connection/dialog classes -------------------------------------------------
 
-        def _make_type_icon(kind: str) -> QtGui.QPixmap:
-            """Return a small circular pixmap for the given kind ('id'|'name')."""
-            pix = QtGui.QPixmap(14, 14)
-            pix.fill(QtCore.Qt.transparent)
-            painter = QtGui.QPainter(pix)
-            try:
-                painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-                if kind == 'id':
-                    color = QtGui.QColor('#d9534f')
-                elif kind == 'name':
-                    color = QtGui.QColor('#007bff')
-                else:
-                    color = QtGui.QColor('#cccccc')
-                brush = QtGui.QBrush(color)
-                painter.setBrush(brush)
-                pen = QtGui.QPen(QtCore.Qt.transparent)
-                painter.setPen(pen)
-                painter.drawEllipse(1, 1, 12, 12)
-            finally:
-                painter.end()
-            return pix
+class DatabaseConnectionDialog(QtWidgets.QDialog):
+    """Dialog for creating or editing a database connection definition.
 
-        for r, h in enumerate(self.headers):
-            item_h = QtWidgets.QTableWidgetItem(h)
-            item_h.setFlags(item_h.flags() & ~QtCore.Qt.ItemIsEditable)
-            self.table.setItem(r, 0, item_h)
-            suggested = _suggest_attr(h)
-            # If an explicit initial mapping exists for this header use it
-            mapped_val = None
-            try:
-                if initial_mapping and h in initial_mapping:
-                    mapped_val = initial_mapping.get(h)
-            except Exception:
-                mapped_val = None
-            item_m = QtWidgets.QTableWidgetItem(mapped_val if mapped_val is not None else suggested)
-            # If this header is mapped to the system `id`, mark it read-only and clarify tooltip
-            try:
-                mapped_target = mapped_val if mapped_val is not None else suggested
-                if mapped_target == 'id':
-                    item_m.setFlags(item_m.flags() & ~QtCore.Qt.ItemIsEditable)
-                    item_m.setToolTip('System-generated ID (read-only) — values will be ignored on import')
-                    type_item = QtWidgets.QTableWidgetItem()
-                    type_item.setFlags(type_item.flags() & ~QtCore.Qt.ItemIsEditable)
-                    type_item.setIcon(QtGui.QIcon(_make_type_icon('id')))
-                    type_item.setToolTip('population.id (read-only)')
-                    self.table.setItem(r, 2, type_item)
-                else:
-                    item_m.setToolTip('Suggested mapping; edit if needed')
-                    # If the suggested mapping is population.name or population.id, show icon type
-                    if mapped_target.startswith('population'):
-                        kind = 'id' if mapped_target.endswith('.id') else 'name'
-                        type_item = QtWidgets.QTableWidgetItem()
-                        type_item.setFlags(type_item.flags() & ~QtCore.Qt.ItemIsEditable)
-                        type_item.setIcon(QtGui.QIcon(_make_type_icon(kind)))
-                        type_item.setToolTip(f'population.{kind}')
-                        self.table.setItem(r, 2, type_item)
-            except Exception:
-                item_m.setToolTip('Suggested mapping; edit if needed')
-            self.table.setItem(r, 1, item_m)
-            # ensure Type column has an item for rows without population mapping
-            if not self.table.item(r, 2):
-                empty = QtWidgets.QTableWidgetItem('')
-                empty.setFlags(empty.flags() & ~QtCore.Qt.ItemIsEditable)
-                self.table.setItem(r, 2, empty)
-        # Improve column sizing: left column content-sized, mapping column stretches, type column content-sized
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        # Add tooltip to Type column header explaining the icons
-        try:
-            hi = self.table.horizontalHeaderItem(2)
-            if hi:
-                hi.setToolTip('Icon indicates whether the population mapping will pass an id or a name (population.id / population.name)')
-        except Exception:
-            pass
-        # Add a subtle bottom border to header row for visual separation
-        try:
-            self.table.horizontalHeader().setStyleSheet('QHeaderView::section { border-bottom: 1px solid #999; padding: 4px; }')
-        except Exception:
-            pass
+    Fields include connection name, type (MSSQL or MariaDB), host/port/db,
+    credentials, and optional JDBC/ODBC driver path.  Provides a "Test
+    Connection" button that calls :func:`api.db_utils.test_connection`.
+
+    The ``get_connection_data`` method returns a dict suitable for storing in
+    the config under ``db_connections``.
+    """
+    def __init__(self, initial: dict = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Database Connection")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(500, dpi), scale_size(400, dpi))
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+
+        self.name_edit = QtWidgets.QLineEdit()
+        self.type_combo = QtWidgets.QComboBox()
+        self.type_combo.addItems(["MSSQL", "MariaDB/MySQL"])
+        self.host_edit = QtWidgets.QLineEdit()
+        self.port_edit = QtWidgets.QLineEdit()
+        self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
+        self.db_edit = QtWidgets.QLineEdit()
+        self.user_edit = QtWidgets.QLineEdit()
+        self.pw_edit = QtWidgets.QLineEdit()
+        self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.driver_edit = QtWidgets.QLineEdit()
+        btn_browse = QtWidgets.QPushButton("Browse…")
+        btn_browse.clicked.connect(self._browse_driver)
+        drv_layout = QtWidgets.QHBoxLayout()
+        drv_layout.addWidget(self.driver_edit)
+        drv_layout.addWidget(btn_browse)
+
+        form.addRow("Name:", self.name_edit)
+        form.addRow("Type:", self.type_combo)
+        form.addRow("Host:", self.host_edit)
+        form.addRow("Port:", self.port_edit)
+        form.addRow("Database:", self.db_edit)
+        form.addRow("User:", self.user_edit)
+        form.addRow("Password:", self.pw_edit)
+        form.addRow("Driver path:", drv_layout)
+
+        layout.addLayout(form)
+
+        test_btn = QtWidgets.QPushButton("Test Connection")
+        test_btn.clicked.connect(self._on_test)
+        layout.addWidget(test_btn)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        if initial:
+            self.name_edit.setText(initial.get('name', ''))
+            self.type_combo.setCurrentText(initial.get('type', 'MSSQL'))
+            self.host_edit.setText(initial.get('host', ''))
+            self.port_edit.setText(str(initial.get('port', '')))
+            self.db_edit.setText(initial.get('database', ''))
+            self.user_edit.setText(initial.get('user', ''))
+            self.pw_edit.setText(initial.get('password', ''))
+            self.driver_edit.setText(initial.get('driver', ''))
+
+    def _browse_driver(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select JDBC/ODBC Driver")
+        if path:
+            self.driver_edit.setText(path)
+
+    def _on_test(self):
+        from api import db_utils
+        port = int(self.port_edit.text() or 0)
+        ok = db_utils.test_connection(
+            self.type_combo.currentText(),
+            self.host_edit.text(),
+            port,
+            self.db_edit.text(),
+            self.user_edit.text(),
+            self.pw_edit.text(),
+            self.driver_edit.text() or None
+        )
+        if ok:
+            QtWidgets.QMessageBox.information(self, "Test Connection", "Successfully connected to database.")
+        else:
+            QtWidgets.QMessageBox.critical(self, "Test Connection", "Failed to connect. Check credentials and driver.")
+
+    def get_connection_data(self) -> dict:
+        return {
+            'name': self.name_edit.text().strip(),
+            'type': self.type_combo.currentText(),
+            'host': self.host_edit.text().strip(),
+            'port': int(self.port_edit.text() or 0),
+            'database': self.db_edit.text().strip(),
+            'user': self.user_edit.text().strip(),
+            'password': self.pw_edit.text(),
+            'driver': self.driver_edit.text().strip(),
+        }
+
+
+class DBConnectionsManager(QtWidgets.QDialog):
+    """List, create, edit, and delete saved database connections."""
+    def __init__(self, connections: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Database Connections")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(600, dpi), scale_size(400, dpi))
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self.list_widget = QtWidgets.QListWidget()
+        self._populate(connections)
+        layout.addWidget(self.list_widget)
+
+        btn_layout = QtWidgets.QHBoxLayout()
+        add_btn = QtWidgets.QPushButton("Add")
+        edit_btn = QtWidgets.QPushButton("Edit")
+        del_btn = QtWidgets.QPushButton("Delete")
+        btn_layout.addWidget(add_btn); btn_layout.addWidget(edit_btn); btn_layout.addWidget(del_btn);
+        layout.addLayout(btn_layout)
+
+        add_btn.clicked.connect(self.add)
+        edit_btn.clicked.connect(self.edit)
+        del_btn.clicked.connect(self.delete)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self.connections = connections
+        self.result = connections.copy()
+
+    def _populate(self, connections):
+        self.list_widget.clear()
+        for name in sorted(connections.keys()):
+            self.list_widget.addItem(name)
+
+    def add(self):
+        dlg = DatabaseConnectionDialog(parent=self)
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            data = dlg.get_connection_data()
+            name = data.get('name')
+            if name:
+                self.result[name] = data
+                self._populate(self.result)
+
+    def edit(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        name = item.text()
+        data = self.result.get(name, {})
+        dlg = DatabaseConnectionDialog(initial=data, parent=self)
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            new_data = dlg.get_connection_data()
+            new_name = new_data.get('name')
+            # handle rename
+            if new_name and new_name != name:
+                del self.result[name]
+            self.result[new_name] = new_data
+            self._populate(self.result)
+
+    def delete(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        name = item.text()
+        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
+            del self.result[name]
+            self._populate(self.result)
+
+    def get_connections(self) -> dict:
+        return self.result
+
+
+class DatabaseMappingDialog(QtWidgets.QDialog):
+    """Mapping dialog for database table columns and PingOne attributes.
+
+    The behaviour differs depending on ``direction``:
+    - ``'import'``: columns -> PingOne attributes
+    - ``'export'``: PingOne attributes -> columns
+
+    ``pingone_attrs`` should be a list of available PingOne attribute names.
+    ``table_cols`` is a list of column names read from the database.
+    Optionally, ``sample_row`` may provide a dict of a single row for preview
+    values (used only in import direction).
+    """
+    def __init__(self, table_cols: List[str], pingone_attrs: List[str], direction: str = 'import', sample_row: Optional[dict] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Database Mapping")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(800, dpi), scale_size(600, dpi))
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        if direction == 'import':
+            headers = ["Column Name", "Sample Value", "PingOne Attribute"]
+        else:
+            headers = ["PingOne Attribute", "Example Value", "Target Column"]
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(table_cols))
+
+        for i, col in enumerate(table_cols):
+            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(col))
+            # sample value
+            val = ''
+            if sample_row and col in sample_row:
+                val = str(sample_row[col])
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(val))
+            combo = QtWidgets.QComboBox()
+            combo.addItem("<None>")
+            for attr in pingone_attrs:
+                combo.addItem(attr)
+            self.table.setCellWidget(i, 2, combo)
+
         layout.addWidget(self.table)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
 
-        # Update Type column when the mapping cell is edited by the user
-        self._suppress_item_changed = False
-        self.table.itemChanged.connect(self._on_table_item_changed)
+    def get_mapping(self) -> dict:
+        result = {}
+        for row in range(self.table.rowCount()):
+            left = self.table.item(row, 0).text()
+            combo: QtWidgets.QComboBox = self.table.cellWidget(row, 2)
+            tgt = combo.currentText()
+            if tgt and tgt != "<None>":
+                result[left] = tgt
+        return result
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        # Option to remember/save this mapping for the active profile
-        self.remember_cb = QtWidgets.QCheckBox('Remember mapping for this profile')
-        # Default to checked when an initial mapping was provided for this profile
-        try:
-            self.remember_cb.setChecked(bool(initial_mapping))
-        except Exception:
-            self.remember_cb.setChecked(False)
-        layout.addWidget(self.remember_cb)
-        layout.addWidget(buttons)
-
-    def _validate_mappings(self, mapping: dict) -> (bool, str):
-        """Validate mapping rules. Returns (True, '') if valid, otherwise (False, message).
-
-        Rule: any mapping that begins with 'population' must be exactly
-        'population.id' or 'population.name'. This prevents accidental
-        arbitrary population attributes from being passed through import.
-        """
-        for hdr, mapped in mapping.items():
-            if not mapped:
-                continue
-            low = mapped.strip()
-            if low.startswith('population'):
-                if low not in ('population.id', 'population.name'):
-                    return False, f"Invalid mapping for '{hdr}': '{mapped}'. Population mappings must be 'population.id' or 'population.name'."
-        return True, ''
-
-    def _on_accept(self):
-        # Build a tentative mapping and validate before accepting.
-        mapping, fixed_pop_id, fixed_enabled, _remember = self.get_mapping()
-        ok, msg = self._validate_mappings(mapping)
-        if not ok:
-            # Show a small resizable dialog with an inline help link to README
-            # Reminder: When changing mapping behavior or UI text, also update
-            # the README and `show_*_help` strings so users see accurate help.
-            # See DEVELOPMENT_RULES.md for the project rule about help docs.
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle('Invalid Mapping')
-            lay = QtWidgets.QVBoxLayout(dlg)
-            lab = QtWidgets.QLabel(msg + "\nSee the <a href='file://" + str((Path(__file__).resolve().parent.parent / 'README.md').resolve()) + "'>README</a> for mapping help.")
-            lab.setOpenExternalLinks(True)
-            lab.setWordWrap(True)
-            lay.addWidget(lab)
-            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
-            btns.accepted.connect(dlg.accept)
-            lay.addWidget(btns)
-            try:
-                dlg.resize(700, 200)
-            except Exception:
-                pass
-            dlg.exec()
-            return
-        # All good — accept the dialog
-        self.accept()
-
-    def _on_table_item_changed(self, item: QtWidgets.QTableWidgetItem):
-        # Keep updates idempotent and avoid recursion when programmatically changing items
-        if self._suppress_item_changed:
-            return
-        try:
-            row = item.row()
-            col = item.column()
-            # Only react to changes in the Mapped Attribute column
-            if col != 1:
-                return
-            text = item.text().strip()
-            # Determine type for population mappings
-            if text.startswith('population'):
-                kind = 'id' if text.endswith('.id') else 'name' if text.endswith('.name') else ''
-            else:
-                kind = ''
-            self._suppress_item_changed = True
-            try:
-                type_item = self.table.item(row, 2)
-                if not type_item:
-                    type_item = QtWidgets.QTableWidgetItem('')
-                    self.table.setItem(row, 2, type_item)
-                # set icon for kind or clear icon
-                if kind:
-                    type_item.setIcon(QtGui.QIcon(_make_type_icon(kind)))
-                    type_item.setToolTip(f'population.{kind}')
-                else:
-                    type_item.setIcon(QtGui.QIcon())
-                    type_item.setToolTip('')
-            finally:
-                self._suppress_item_changed = False
-        except Exception:
-            pass
-
-    def get_mapping(self):
-        """Return a tuple `(mapping_dict, fixed_population_id)`.
-
-        The mapping dict maps file-header -> attribute name. If the user
-        selected a fixed population in the dropdown, `fixed_population_id`
-        will be that id (string). If the user chose to use the CSV field
-        for population, `fixed_population_id` will be None and the mapping
-        should contain the header -> population.id or population.name entry as appropriate.
-        """
-        mapping = {}
-        # First, incorporate selections from the required fields (if any)
-        def _apply_field(cb: QtWidgets.QComboBox, target_attr: str):
-            if cb.currentText() and cb.currentText() != '<None>':
-                mapping[cb.currentText()] = target_attr
-
-        _apply_field(self.username_field, 'username')
-        _apply_field(self.email_field, 'email')
-        _apply_field(self.given_field, 'name.given')
-        _apply_field(self.family_field, 'name.family')
-
-        # population: if a CSV header was chosen, map that header to population.id
-        if self.population_field.currentText() and self.population_field.currentText() != '<None>':
-            mapping[self.population_field.currentText()] = 'population.id'
-
-        # Table entries override/augment the above
-        for r in range(self.table.rowCount()):
-            header = self.table.item(r, 0).text()
-            mapped = self.table.item(r, 1).text().strip()
-            if mapped:
-                mapping[header] = mapped
-
-        # Determine fixed population id (if chosen)
-        fixed_pop_id = None
-        if self.population_fixed.currentIndex() > 0:
-            fixed_pop_id = self.population_fixed.currentData()
-
-        # Determine fixed enabled value or mapping
-        fixed_enabled = None
-        try:
-            en_data = self.enabled_field.currentData()
-            en_text = self.enabled_field.currentText()
-            if isinstance(en_data, bool):
-                fixed_enabled = bool(en_data)
-            else:
-                if en_text and en_text != '<None>':
-                    # a header was chosen to map to enabled
-                    mapping[en_text] = 'enabled'
-        except Exception:
-            fixed_enabled = None
-
-        # If an initial fixed population id was provided, prefer that when
-        # nothing was chosen in the fixed dropdown by the user.
-        try:
-            if not fixed_pop_id and getattr(self, 'initial_fixed_pop_id', None):
-                # find the index that has this data
-                for i in range(self.population_fixed.count()):
-                    if self.population_fixed.itemData(i) == self.initial_fixed_pop_id:
-                        self.population_fixed.setCurrentIndex(i)
-                        fixed_pop_id = self.initial_fixed_pop_id
-                        break
-        except Exception:
-            pass
-
-        # Resize dialog sensibly based on available screen space so mappings
-        # and mapped attributes are visible without manual resizing.
-        try:
-            screen = QtWidgets.QApplication.primaryScreen()
-            geom = screen.availableGeometry()
-            w = max(800, int(geom.width() * 0.6))
-            h = max(400, int(geom.height() * 0.5))
-            # Keep some margins from screen edges
-            w = min(w, geom.width() - 120)
-            h = min(h, geom.height() - 120)
-            self.resize(w, h)
-        except Exception:
-            try:
-                self.resize(900, 500)
-            except Exception:
-                pass
-
-        return mapping, fixed_pop_id, fixed_enabled, bool(getattr(self, 'remember_cb', QtWidgets.QCheckBox()).isChecked())
 
 
 class ExportOptionsDialog(QtWidgets.QDialog):
