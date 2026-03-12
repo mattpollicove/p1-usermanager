@@ -56,18 +56,30 @@ class EditUserDialog(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout(self)
         
         self.username = QtWidgets.QLineEdit(user_data.get('username', ''))
+        self.username.setPlaceholderText("e.g. jsmith")
+        self.username.setToolTip("Unique username used in PingOne")
         self.email = QtWidgets.QLineEdit(user_data.get('email', ''))
+        self.email.setPlaceholderText("user@example.com")
+        self.email.setToolTip("Primary email address")
         self.first_name = QtWidgets.QLineEdit(user_data.get('name', {}).get('given', ''))
+        self.first_name.setPlaceholderText("First name")
         self.last_name = QtWidgets.QLineEdit(user_data.get('name', {}).get('family', ''))
+        self.last_name.setPlaceholderText("Last name")
         self.phone = QtWidgets.QLineEdit()
+        self.phone.setPlaceholderText("Optional mobile number")
         phones = user_data.get('phoneNumbers', [])
         if phones:
             self.phone.setText(phones[0].get('number', ''))
         self.street = QtWidgets.QLineEdit(user_data.get('address', {}).get('streetAddress', ''))
+        self.street.setPlaceholderText("Street address")
         self.city = QtWidgets.QLineEdit(user_data.get('address', {}).get('locality', ''))
+        self.city.setPlaceholderText("City")
         self.state = QtWidgets.QLineEdit(user_data.get('address', {}).get('region', ''))
+        self.state.setPlaceholderText("State or region")
         self.zip = QtWidgets.QLineEdit(user_data.get('address', {}).get('postalCode', ''))
+        self.zip.setPlaceholderText("ZIP/postal code")
         self.country = QtWidgets.QLineEdit(user_data.get('address', {}).get('country', ''))
+        self.country.setPlaceholderText("Country")
         self.population = QtWidgets.QComboBox()
         self.population.addItems(list(pop_map.values()))
         current_pop_id = user_data.get('population', {}).get('id', '')
@@ -88,6 +100,13 @@ class EditUserDialog(QtWidgets.QDialog):
         layout.addRow("Population:", self.population)
         
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        # default/escape roles for keyboard accessibility
+        ok_btn = buttons.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = buttons.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -131,6 +150,7 @@ class ColumnSelectDialog(QtWidgets.QDialog):
     def __init__(self, all_columns, selected, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Columns")
+        self.setModal(True)
         self.parent_window = parent
         self.defaults_applied = False  # Track if user clicked Reset to Defaults
         
@@ -164,20 +184,29 @@ class ColumnSelectDialog(QtWidgets.QDialog):
         buttons_layout = QtWidgets.QHBoxLayout()
         
         select_all_btn = QtWidgets.QPushButton("Select All")
+        select_all_btn.setToolTip("Check every column")
         select_all_btn.clicked.connect(self.select_all)
         buttons_layout.addWidget(select_all_btn)
         
         clear_all_btn = QtWidgets.QPushButton("Clear All")
+        clear_all_btn.setToolTip("Uncheck every column except ID")
         clear_all_btn.clicked.connect(self.clear_all)
         buttons_layout.addWidget(clear_all_btn)
         
         reset_btn = QtWidgets.QPushButton("Reset to Defaults")
+        reset_btn.setToolTip("Restore the application's recommended column set")
         reset_btn.clicked.connect(self.reset_to_defaults)
         buttons_layout.addWidget(reset_btn)
         
         buttons_layout.addStretch()
         
         button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok_btn = button_box.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = button_box.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         buttons_layout.addWidget(button_box)
@@ -234,6 +263,7 @@ class JSONViewDialog(QtWidgets.QDialog):
     """Dialog for viewing and optionally editing JSON content."""
     def __init__(self, data, editable, parent, user_id, col_name):
         super().__init__(parent)
+        self.setModal(True)
         self.setWindowTitle("JSON Content")
         self.user_id = user_id
         self.col_name = col_name
@@ -252,6 +282,7 @@ class JSONViewDialog(QtWidgets.QDialog):
         buttons = QtWidgets.QHBoxLayout()
         if editable:
             save_btn = QtWidgets.QPushButton("Save")
+            save_btn.setDefault(True)
             save_btn.clicked.connect(self.save_changes)
             buttons.addWidget(save_btn)
         close_btn = QtWidgets.QPushButton("Close")
@@ -282,8 +313,8 @@ class TextViewDialog(QtWidgets.QDialog):
     """
     def __init__(self, text: str, title: str = "Content", parent=None, editable: bool = False, user_id: str = None, col_name: str = None):
         super().__init__(parent)
-        self.setWindowTitle(title)
         self.setModal(True)
+        self.setWindowTitle(title)
         
         # Set minimum size based on DPI
         dpi_scale = get_dpi_scale()
@@ -297,6 +328,7 @@ class TextViewDialog(QtWidgets.QDialog):
         btns = QtWidgets.QDialogButtonBox()
         if editable:
             save_btn = QtWidgets.QPushButton("Save")
+            save_btn.setDefault(True)
             save_btn.clicked.connect(self._on_save)
             btns.addButton(save_btn, QtWidgets.QDialogButtonBox.ActionRole)
         close_btn = QtWidgets.QPushButton("Close")
@@ -468,6 +500,18 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.setModal(True)
         dpi = get_dpi_scale()
         self.setMinimumSize(scale_size(500, dpi), scale_size(400, dpi))
+        # tooltips and placeholders for clarity
+        self.host_edit.setPlaceholderText("hostname or IP")
+        self.host_edit.setToolTip("Database server host")
+        self.port_edit.setPlaceholderText("port number")
+        self.port_edit.setToolTip("TCP port for the database service")
+        self.db_edit.setPlaceholderText("database name")
+        self.db_edit.setToolTip("Name of the target database")
+        self.user_edit.setPlaceholderText("username")
+        self.user_edit.setToolTip("Database user account")
+        self.pw_edit.setPlaceholderText("password")
+        self.driver_edit.setPlaceholderText("path to JDBC/ODBC driver")
+
 
         layout = QtWidgets.QVBoxLayout(self)
         form = QtWidgets.QFormLayout()
@@ -659,6 +703,9 @@ class DBConnectionsManager(QtWidgets.QDialog):
         dpi = get_dpi_scale()
         self.setMinimumSize(scale_size(600, dpi), scale_size(400, dpi))
         layout = QtWidgets.QVBoxLayout(self)
+        # ensure Enter triggers edit when a connection is selected
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.itemActivated.connect(self.edit)
 
         self.list_widget = QtWidgets.QListWidget()
         self._populate(connections)
@@ -666,14 +713,19 @@ class DBConnectionsManager(QtWidgets.QDialog):
 
         btn_layout = QtWidgets.QHBoxLayout()
         add_btn = QtWidgets.QPushButton("Add")
+        add_btn.setToolTip("Create a new connection profile")
         edit_btn = QtWidgets.QPushButton("Edit")
+        edit_btn.setToolTip("Modify the selected connection")
         del_btn = QtWidgets.QPushButton("Delete")
+        del_btn.setToolTip("Remove the selected connection")
         btn_layout.addWidget(add_btn); btn_layout.addWidget(edit_btn); btn_layout.addWidget(del_btn);
         layout.addLayout(btn_layout)
 
         add_btn.clicked.connect(self.add)
         edit_btn.clicked.connect(self.edit)
         del_btn.clicked.connect(self.delete)
+        # make Add the default button so Enter adds when no selection
+        add_btn.setDefault(True)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
@@ -769,6 +821,12 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
 
         layout.addWidget(self.table)
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = btns.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -828,6 +886,12 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         layout.addWidget(self.remember_cb)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = btns.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -885,6 +949,7 @@ class NewProfileDialog(QtWidgets.QDialog):
         # Environment ID - match profile manager sizing
         self.env_id_edit = QtWidgets.QLineEdit()
         self.env_id_edit.setPlaceholderText("Environment ID (UUID)")
+        self.env_id_edit.setToolTip("PingOne environment identifier")
         self.env_id_edit.setMaxLength(40)
         self.env_id_edit.setMinimumWidth(scale_size(400, dpi_scale))
         form.addRow("Environment ID:", self.env_id_edit)
@@ -933,6 +998,12 @@ class NewProfileDialog(QtWidgets.QDialog):
         button_box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
+        ok_btn = button_box.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = button_box.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
         button_box.accepted.connect(self.validate_and_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
