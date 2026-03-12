@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   - SQLAlchemy-based helpers in `api/db_utils.py` to test connections, fetch table schemas, and sample rows.
   - Support for MySQL/MariaDB and SQL Server drivers via `pymysql` and `pymssql`.
   - Prompted users to save connection profiles on first use.
+  - Database connection dialog now:
+    * defaults to MariaDB/MySQL and automatically fills port numbers (3306/1433) when type is changed.
+    * shows a status line and uses a busy cursor while testing connections.
+    * can list and remember a target table via a drop‑down populated after successful test.
 
 
 ## [v0.6] - 2026-02-02
