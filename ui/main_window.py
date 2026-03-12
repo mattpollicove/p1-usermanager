@@ -20,7 +20,7 @@ import keyring
 from PySide6 import QtWidgets, QtCore, QtGui
 
 import api.client as api_client
-from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker
+from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker, BulkUpdateWorker
 from ui.dialogs import (
     EditUserDialog,
     ColumnSelectDialog,
