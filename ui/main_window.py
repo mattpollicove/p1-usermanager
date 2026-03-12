@@ -42,7 +42,7 @@ methods used by dialogs to perform updates and to surface connection
 logs/errors to the user.
 """
 
-APP_NAME = "UserManager"
+APP_NAME = "PingOne UserManager"
 APP_VERSION = "0.6"
 
 
@@ -63,7 +63,7 @@ Connecting to PingOne:
 3. Enter the Environment ID, Client ID, and Client Secret in the respective fields. 
    The Client Secret is stored securely in your system's keyring.
 
-4. Click "Save Profile" to persist the credentials and settings.
+4. Click "Save Profile" to persist the credentials and settings.  (Alternatively, use the new "New Connection" button to clear the boxes and enter a fresh set of credentials.)
 
 5. Click "Connect & Sync" to authenticate and fetch users from PingOne.
 
@@ -139,7 +139,7 @@ Logs Menu:
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    """Main application window for UserManager.
+    """Main application window for PingOne UserManager.
 
     Responsibilities:
     - Build and manage the configuration and user-management tabs
@@ -372,6 +372,14 @@ class MainWindow(QtWidgets.QMainWindow):
         secret_widget = QtWidgets.QWidget()
         secret_widget.setLayout(secret_layout)
 
+        # previous implementation attached editingFinished handlers that
+        # automatically prompted to save/test once all three fields were
+        # populated.  this behavior has been removed per user request; the
+        # user may manually save or test using the corresponding buttons.
+        # (handlers remain connected but perform no action.)
+        for le in (self.env_id, self.cl_id, self.cl_sec):
+            le.editingFinished.connect(self._new_conn_field_edited)
+
         btn_save = QtWidgets.QPushButton("Save Profile")
         btn_save.clicked.connect(self.save_current_profile)
         btn_save.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_P))
@@ -387,11 +395,20 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_test.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_T))
         btn_test.setToolTip(f"Test credentials ({'Cmd' if IS_MACOS else 'Ctrl'}+T)")
         
+        btn_new_conn = QtWidgets.QPushButton("New Connection")
+        btn_new_conn.clicked.connect(self.new_connection)
+        btn_new_conn.setToolTip("Clear fields and begin entry of a new environment/client pair")
+
         btn_delete = QtWidgets.QPushButton("Delete Profile")
         btn_delete.clicked.connect(self.delete_current_profile)
         # Swap Test Credentials and Save Profile positions per request
         cred_form.addRow("Env ID:", self.env_id); cred_form.addRow("Client ID:", self.cl_id)
-        cred_form.addRow("Secret:", secret_widget); cred_form.addRow(btn_test); cred_form.addRow(btn_save); cred_form.addRow(btn_sync); cred_form.addRow(btn_delete)
+        cred_form.addRow("Secret:", secret_widget);
+        cred_form.addRow(btn_test);
+        cred_form.addRow(btn_new_conn);
+        cred_form.addRow(btn_save);
+        cred_form.addRow(btn_sync);
+        cred_form.addRow(btn_delete)
         # Button to view connection log
         self._view_conn_log_btn = QtWidgets.QPushButton("View Connection Log")
         self._view_conn_log_btn.clicked.connect(self.view_connection_log)
@@ -639,7 +656,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_window_geometry()
         super().closeEvent(event)
 
-    def load_profiles_from_disk(self):
+    def load_profiles_from_disk(self, skip_connect: bool = False):
         # Load profiles.json, migrate column definitions if needed,
         # and populate the profile selector.
         cfg = self._read_config()
@@ -669,7 +686,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 meta = cfg.get('__meta__', {})
                 last = meta.get('last_working_profile')
-                if last and last in profile_names and self.auto_connect_cb.isChecked():
+                if last and last in profile_names and self.auto_connect_cb.isChecked() and not skip_connect:
                     idx = profile_names.index(last)
                     self.profile_list.setCurrentIndex(idx)
                     # Ensure profile fields are loaded before attempting connect
@@ -680,6 +697,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Delay connect slightly to allow UI to settle
                     QtCore.QTimer.singleShot(250, self.connect_only)
                 else:
+                    # simply load whichever profile is currently selected (first item)
                     self.load_selected_profile()
             except Exception:
                 self.load_selected_profile()
@@ -739,7 +757,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if name in p:
             self.env_id.setText(p[name].get("env_id", ""))
             self.cl_id.setText(p[name].get("cl_id", ""))
-            self.cl_sec.setText(keyring.get_password("PingOneUM", name) or "")
+            try:
+                self.cl_sec.setText(keyring.get_password("pingone_usermanager", name) or "")
+            except Exception:
+                # If keyring backend fails, leave secret blank and continue
+                self.cl_sec.setText("")
             # Create a copy of the columns list to avoid shared references
             self.selected_columns = list(p[name].get("columns", self.default_columns.copy()))
             self.column_widths = p[name].get("column_widths", {}).copy()
@@ -767,13 +789,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def save_current_profile(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "Save Profile", "Name:")
         if ok and name:
-            p = self._read_config(); p[name] = {"env_id": self.env_id.text(), "cl_id": self.cl_id.text()}
+            p = self._read_config()
+            p[name] = {"env_id": self.env_id.text(), "cl_id": self.cl_id.text()}
             p[name]["columns"] = self.selected_columns
             p[name]["column_widths"] = self.column_widths
             # Save per-profile UI options
             p[name]['status_show_api_calls'] = bool(getattr(self, 'show_api_calls_cb', QtWidgets.QCheckBox()).isChecked())
-            with open(self.config_file, 'w') as f: json.dump(p, f, indent=4)
-            keyring.set_password("PingOneUM", name, self.cl_sec.text()); self.load_profiles_from_disk()
+            # also update last working profile so auto-connect will remember this one
+            meta = p.get('__meta__', {})
+            meta['last_working_profile'] = name
+            p['__meta__'] = meta
+            with open(self.config_file, 'w') as f:
+                json.dump(p, f, indent=4)
+            try:
+                keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Keyring Error", f"Failed to save client secret to keyring: {e}\n\nCredentials will not be stored persistently.")
+            # reload profiles without triggering another connection attempt
+            # (saving shouldn't pop up an "Auth Failed" dialog unexpectedly)
+            self.load_profiles_from_disk(skip_connect=True)
 
     def save_app_settings(self):
         """Persist app-level settings (auto-connect, theme) to config file under __meta__."""
@@ -963,7 +997,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 with open(self.config_file, 'w') as f:
                     json.dump(p, f, indent=4)
                 try:
-                    keyring.delete_password("PingOneUM", name)
+                    keyring.delete_password("pingone_usermanager", name)
                 except Exception:
                     pass
                 self.load_profiles_from_disk()
@@ -1000,12 +1034,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 env_id, client_id, secret = new_credentials
                 try:
                     if secret:
-                        keyring.set_password("PingOneUM", new_profile, secret)
-                except Exception:
-                    pass
+                        keyring.set_password("pingone_usermanager", new_profile, secret)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Keyring Error",
+                        f"Failed to save client secret to keyring: {e}\n\nYou can enter it manually in the Configuration tab."
+                    )
                 
-                # Reload profiles and switch to new one
-                self.load_profiles_from_disk()
+                # Reload profiles and switch to new one (don't trigger an auto-connect
+                # while we're still inside the profile manager dialog)
+                self.load_profiles_from_disk(skip_connect=True)
                 idx = self.profile_list.findText(new_profile)
                 if idx >= 0:
                     self.profile_list.setCurrentIndex(idx)
@@ -1013,6 +1052,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 # Test the connection synchronously
                 client = api_client.PingOneClient(env_id, client_id, secret)
+                err = None
                 try:
                     token = asyncio.run(client.get_token())
                     if token:
@@ -1028,10 +1068,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         except Exception:
                             pass
                         return True
-                except Exception:
-                    pass
+                except Exception as e:
+                    err = str(e)
                 
-                QtWidgets.QMessageBox.critical(dialog, "Connection Failed", "Could not connect with provided credentials. Please check and try again.")
+                # report failure with details to the dialog so user can troubleshoot
+                msg = "Could not connect with provided credentials. Please check and try again."
+                if err:
+                    msg += f"\n\n{err.splitlines()[0]}"
+                QtWidgets.QMessageBox.critical(dialog, "Connection Failed", msg)
                 return False
             
             dialog.set_connection_callback(test_connection)
@@ -1059,7 +1103,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     env_id, client_id, secret = new_credentials
                     try:
                         if secret:
-                            keyring.set_password("PingOneUM", new_profile, secret)
+                            keyring.set_password("pingone_usermanager", new_profile, secret)
                     except Exception as e:
                         QtWidgets.QMessageBox.warning(
                             self,
@@ -1067,8 +1111,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             f"Failed to save client secret to keyring: {e}\n\nYou can enter it manually in the Configuration tab."
                         )
                 
-                # Reload profiles in the UI
-                self.load_profiles_from_disk()
+                # Reload profiles in the UI (skip any automatic connection attempt)
+                self.load_profiles_from_disk(skip_connect=True)
                 
                 # Switch to the new profile
                 if new_profile:
@@ -1099,7 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 import keyring
                 for profile_name in deleted:
                     try:
-                        keyring.delete_password("PingOneUM", profile_name)
+                        keyring.delete_password("pingone_usermanager", profile_name)
                     except Exception:
                         pass
         except Exception as e:
@@ -1481,8 +1525,17 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Archive Logs", f"Failed to archive logs: {e}")
 
     def test_credentials(self):
-        """Attempt to obtain a token using provided credentials and report result."""
+        """Attempt to obtain a token using provided credentials and report result.
+
+        The user flow frequently runs into failures that are not strictly
+        "bad client ID/secret" (network errors, mis‑typed environment ID, etc.);
+        the original implementation swallowed the exception message and always
+        displayed the generic
+        "Auth Failed. Check credentials." dialog.  That's confusing during
+        debugging, so we now append the underlying error text when available.
+        """
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        err = None
         try:
             token = asyncio.run(client.get_token())
         except Exception as e:
@@ -1500,9 +1553,14 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         else:
-            QtWidgets.QMessageBox.critical(self, "Test Credentials", "Auth Failed. Check credentials.")
+            msg = "Auth Failed. Check credentials."
+            if err:
+                # include just the first line of the error to avoid huge dialogs
+                first_line = err.splitlines()[0]
+                msg += f"\n\nDetails: {first_line}"
+            QtWidgets.QMessageBox.critical(self, "Test Credentials", msg)
             try:
-                api_client.credential_logger.error(f"Test credentials failed: env={client.env_id}, client_id={client.client_id}")
+                api_client.credential_logger.error(f"Test credentials failed: env={client.env_id}, client_id={client.client_id} - {err}")
             except Exception:
                 pass
             self.status_label.setText("Credentials invalid")
@@ -1510,6 +1568,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("Credentials invalid")
             except Exception:
                 pass
+
+    def new_connection(self):
+        """Clear credential fields and prepare to save a profile once entry is complete."""
+        self.env_id.clear()
+        self.cl_id.clear()
+        self.cl_sec.clear()
+        self.env_id.setFocus()
+        # track that we should prompt when all three fields are filled
+        self._new_conn_mode = True
+
+    def _new_conn_field_edited(self):
+        # previously this method prompted to save/test once all three credential
+        # fields were populated. that behaviour has been explicitly removed
+        # per user's latest request; the method now simply resets the mode flag
+        # so that accidental future edits don't re-trigger logic.
+        if getattr(self, '_new_conn_mode', False):
+            self._new_conn_mode = False
 
     def toggle_server_dryrun(self):
         enabled = self.use_server_dryrun_action.isChecked()

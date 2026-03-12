@@ -1,4 +1,4 @@
-"""Reusable Qt dialogs used by the UserManager UI.
+"""Reusable Qt dialogs used by the PingOne UserManager UI.
 
 Contains small, focused dialogs for editing user fields, selecting
 table columns, and viewing/editing JSON payloads.

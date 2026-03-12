@@ -1,4 +1,4 @@
-"""Theme management for UserManager application.
+"""Theme management for PingOne UserManager application.
 
 Provides light and dark mode themes with appropriate color schemes
 for the application UI.

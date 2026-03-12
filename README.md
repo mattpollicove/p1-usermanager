@@ -3,7 +3,7 @@ I went for a basic UI with nothing too flashy just to establish the project. The
 people would like to do with this application. The sky's the limit to be sure!
 
 PingOne UserManager (v0.6)
-UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
+PingOne UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
 🚀 Key Features
 Multi-Profile Support: Manage multiple PingOne environments (Dev, Staging, Prod) with easy switching. Use the Profile Manager (File → Manage Profiles) to view all configurations and delete unwanted profiles.
