@@ -523,6 +523,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.jdbc_edit = QtWidgets.QLineEdit()
         self.jdbc_edit.setReadOnly(True)
         self.jdbc_edit.setPlaceholderText("jdbc URL will appear here")
+        # make the preview wide so long URLs are easier to read/copy
+        self.jdbc_edit.setMinimumWidth(400)
+        self.jdbc_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+
         self.user_edit = QtWidgets.QLineEdit()
         self.user_edit.setPlaceholderText("username")
         self.user_edit.setToolTip("Database user account")
@@ -551,8 +555,6 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Database:", self.db_edit)
-        # readonly JDBC URL preview
-        form.addRow("JDBC URL:", self.jdbc_edit)
         # table selector will be populated after a successful connection test
         self.table_combo = QtWidgets.QComboBox()
         self.table_combo.setEnabled(False)
@@ -560,6 +562,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("User:", self.user_edit)
         form.addRow("Password:", self.pw_edit)
         form.addRow("Driver path:", drv_layout)
+        # readonly JDBC URL preview placed at the bottom so it stretches
+        form.addRow("JDBC URL:", self.jdbc_edit)
 
         layout.addLayout(form)
 
@@ -590,12 +594,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.user_edit.setText(initial.get('user', ''))
             self.pw_edit.setText(initial.get('password', ''))
             self.driver_edit.setText(initial.get('driver', ''))
-            # if a table was saved with the connection, restore it
-            tbl = initial.get('table')
-            if tbl:
-                self.table_combo.addItem(tbl)
-                self.table_combo.setCurrentText(tbl)
-                self.table_combo.setEnabled(True)
+            # do not prefill the table combo when editing; user must test
+            # the connection in order to refresh and choose a table
             # rebuild JDBC string from loaded values
             self._update_jdbc_string()
             # if editing an existing connection, focus name field for convenience
@@ -661,6 +661,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         # attempt to list tables and fill combo - called after a successful test
         try:
             from api import db_utils
+        except ModuleNotFoundError:
+            # if sqlalchemy isn't installed there's nothing to do
+            return
+
+        try:
             names = db_utils.get_table_names(
                 self.type_combo.currentText(),
                 self.host_edit.text(),
@@ -686,7 +691,18 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         self.status_label.setText("Testing connection...")
         QtWidgets.QApplication.processEvents()
-        from api import db_utils
+        try:
+            from api import db_utils
+        except ModuleNotFoundError:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Missing Dependency",
+                "SQLAlchemy is not installed. Please install the requirements and restart (e.g. `pip install -r requirements.txt`)."
+            )
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.status_label.setText("Dependency missing.")
+            return
+
         port = int(self.port_edit.text() or 0)
         ok = db_utils.test_connection(
             self.type_combo.currentText(),
