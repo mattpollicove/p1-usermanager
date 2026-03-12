@@ -7,6 +7,15 @@ or other scripts without side-effects.
 import sys
 from pathlib import Path
 
+# ensure SQLAlchemy is importable at startup; most database helpers rely on it
+# this import is intentionally at the top so a missing dependency raises early
+try:
+    import sqlalchemy  # noqa: F401
+except ModuleNotFoundError:
+    # if someone runs the app without installing requirements, provide a clear
+    # message rather than letting the first database operation crash.
+    raise
+
 # Ensure project root is on sys.path when running app.py directly from the editor
 _THIS_FILE = Path(__file__).resolve()
 _PROJECT_ROOT = _THIS_FILE.parent

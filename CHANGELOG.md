@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file.
   - **Handle missing SQLAlchemy gracefully** in the connection dialog; test button shows
     an explicit error if the dependency is missing instead of crashing.  Import
     and export operations now include the same check and message.
+- **Check SQLAlchemy on startup** by importing it in `app.py` so the program
+    fails fast with a clear error if the requirement isn’t installed.
   - **Reorder and resize JDBC URL field** to the bottom of the form and widen
     it for improved readability.
   - **Table selector starts empty** and will only be populated after a *successful*
