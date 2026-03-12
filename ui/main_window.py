@@ -959,16 +959,24 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QThreadPool.globalInstance().start(worker)
 
     def manage_db_connections(self):
-        """Show the DB connections manager and persist any changes."""
+        """Show the DB connections manager and persist any changes.
+
+        The dialog itself does not expose Accept/Reject semantics (it merely has
+        a Close button), so we write the updated connections regardless of the
+        return value.  The caller can treat changes as authoritative because
+        "save" flags and removal logic are handled by the manager itself.
+        """
         try:
             cfg = self._read_config()
             dbs = cfg.get('db_connections', {})
             dlg = DBConnectionsManager(dbs.copy(), self)
-            if dlg.exec() == QtWidgets.QDialog.Accepted:
-                new = dlg.get_connections()
-                cfg['db_connections'] = new
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+            dlg.exec()
+            # always persist whatever the manager reports (it filters out
+            # connections marked not to be saved)
+            new = dlg.get_connections()
+            cfg['db_connections'] = new
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "DB Connections", f"Failed to manage DB connections: {e}")
 
