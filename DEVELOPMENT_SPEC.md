@@ -1,8 +1,11 @@
 # PingOne UserManager - Development Specification
 
-**Version:** 0.6  
-**Last Updated:** February 3, 2026  
-**Status:** Active Development
+**Version:** 0.6 (Alpha)  
+**Last Updated:** March 12, 2026  
+**Status:** Active Development  
+**Focus Area:** Database Connectivity Features
+
+⚠️ **Alpha Release Notice**: This version is under active development with emphasis on database import/export functionality. Core user management features are stable, but database connectivity is being refined based on user feedback.
 
 ---
 

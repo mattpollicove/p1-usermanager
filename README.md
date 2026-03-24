@@ -2,7 +2,10 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.6)
+PingOne UserManager (v0.6 - Alpha)
+
+⚠️ **Alpha Release**: Version 0.6 is in active development and focuses on database connectivity features. While core user management functionality is stable, the database import/export capabilities are still being refined. Please report issues and provide feedback.
+
 PingOne UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
 🚀 Key Features

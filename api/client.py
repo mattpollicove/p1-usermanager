@@ -184,6 +184,7 @@ class PingOneClient:
         self.base_url = f"https://api.pingone.com/v1/environments/{env_id}"
         self._token: Optional[str] = None
         self._token_expires = 0
+        self.last_error: Optional[str] = None
 
     def _get_auth_headers(self, token: str) -> dict:
         """Helper method to create authorization headers."""
@@ -200,6 +201,7 @@ class PingOneClient:
         auth_url = f"https://auth.pingone.com/{self.env_id}/as/token"
         # Execute the HTTP token request; callers rely on `None` return
         # value to indicate that authentication failed.
+        self.last_error = None
         try:
             append_live_event(f"TOKEN POST {auth_url}")
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -230,16 +232,25 @@ class PingOneClient:
 
             return self._token
         except Exception as e:
+            error_message = str(e)
+            if isinstance(e, httpx.HTTPStatusError):
+                try:
+                    response_text = e.response.text.strip()
+                    if response_text:
+                        error_message = f"{error_message} - {response_text}"
+                except Exception:
+                    pass
+            self.last_error = error_message
             # Log the exception to credential logger and API logger/connection log
             try:
                 if CREDENTIALS_LOGGING_ENABLED:
-                    credential_logger.error(f"Token request failed for env={self.env_id}, client_id={self.client_id} - {str(e)}")
+                    credential_logger.error(f"Token request failed for env={self.env_id}, client_id={self.client_id} - {error_message}")
             except Exception:
                 pass
             if API_LOGGING_ENABLED:
-                api_logger.error(f"Token request failed: {str(e)}")
+                api_logger.error(f"Token request failed: {error_message}")
                 try:
-                    write_connection_log(f"POST {auth_url} - ERROR - {str(e)}")
+                    write_connection_log(f"POST {auth_url} - ERROR - {error_message}")
                 except Exception:
                     pass
             return None

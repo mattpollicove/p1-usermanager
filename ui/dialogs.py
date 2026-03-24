@@ -8,6 +8,7 @@ import json
 import sys
 import platform
 from pathlib import Path
+from typing import List, Optional
 
 # Add project root to sys.path when running this file directly so
 # `from ui.dialogs` and other absolute imports resolve in editor-run mode.
@@ -42,6 +43,210 @@ def scale_size(base_size, dpi_scale=None):
     return int(base_size * max(1.0, dpi_scale * 0.8))
 
 
+def apply_screen_relative_size(
+    dialog: QtWidgets.QDialog,
+    min_w: int,
+    min_h: int,
+    default_w: int,
+    default_h: int,
+    max_w_ratio: float = 0.72,
+    max_h_ratio: float = 0.70,
+):
+    """Apply min/default sizing while capping footprint to screen-relative bounds."""
+    screen = dialog.screen() or QtWidgets.QApplication.primaryScreen()
+    if not screen:
+        dialog.setMinimumSize(min_w, min_h)
+        dialog.resize(default_w, default_h)
+        return
+
+    geom = screen.availableGeometry()
+    max_w = max(min_w, int(geom.width() * max_w_ratio))
+    max_h = max(min_h, int(geom.height() * max_h_ratio))
+    target_w = max(min_w, min(default_w, max_w))
+    target_h = max(min_h, min(default_h, max_h))
+
+    dialog.setMinimumSize(min_w, min_h)
+    dialog.resize(target_w, target_h)
+
+
+def apply_combo_typeahead(combo: QtWidgets.QComboBox, options: List[str]):
+    """Attach case-insensitive contains-based type-ahead completion to a combo."""
+    if not combo.isEditable():
+        return
+    uniq = sorted({str(o) for o in (options or []) if str(o).strip()})
+    completer = QtWidgets.QCompleter(uniq, combo)
+    completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+    completer.setFilterMode(QtCore.Qt.MatchContains)
+    combo.setCompleter(completer)
+
+
+class _ClearNoneComboFilter(QtCore.QObject):
+    """Clear editable combo text when interacting with a '<None>' placeholder."""
+
+    def __init__(self, combo: QtWidgets.QComboBox):
+        super().__init__(combo)
+        self.combo = combo
+        self.clearing = False
+
+    def eventFilter(self, watched, event):
+        # Clear <None> on focus/click
+        if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.MouseButtonPress):
+            if (self.combo.currentText() or "").strip().lower() == "<none>":
+                self.clearing = True
+                self.combo.setCurrentIndex(-1)
+                self.combo.setEditText("")
+                self.clearing = False
+        # Clear <None> when user starts typing
+        elif event.type() == QtCore.QEvent.KeyPress and not self.clearing:
+            if (self.combo.currentText() or "").strip().lower() == "<none>":
+                key = event.key()
+                text = event.text() or ""
+                # Allow printable characters to auto-clear
+                if (key >= QtCore.Qt.Key_A and key <= QtCore.Qt.Key_Z) or \
+                   (key >= QtCore.Qt.Key_0 and key <= QtCore.Qt.Key_9) or \
+                   key in (QtCore.Qt.Key_Period, QtCore.Qt.Key_Underscore, QtCore.Qt.Key_Minus, QtCore.Qt.Key_Space) or \
+                   text.isprintable():
+                    self.clearing = True
+                    self.combo.setCurrentIndex(-1)
+                    self.combo.setEditText("")
+                    self.clearing = False
+        return False
+
+
+def clear_none_on_interact(combo: QtWidgets.QComboBox):
+    """Make '<None>' placeholders disappear when user clicks/focuses the editor."""
+    if not combo.isEditable():
+        return
+    line_edit = combo.lineEdit()
+    if not line_edit:
+        return
+    filt = _ClearNoneComboFilter(combo)
+    combo.installEventFilter(filt)
+    line_edit.installEventFilter(filt)
+    combo._clear_none_filter = filt
+
+
+class _MappingTableKeyFilter(QtCore.QObject):
+    """Handle Enter (move down) and Tab (autocomplete) in mapping tables."""
+
+    def __init__(self, table: QtWidgets.QTableWidget, mapping_col: int = 2):
+        super().__init__(table)
+        self.table = table
+        self.mapping_col = mapping_col
+
+    def _apply_top_completion(self, row: int, column: int) -> bool:
+        combo = self.table.cellWidget(row, column)
+        if not isinstance(combo, QtWidgets.QComboBox) or not combo.isEditable():
+            return False
+
+        completer = combo.completer()
+        if not completer:
+            return False
+
+        model = completer.completionModel()
+        if model is None:
+            return False
+
+        idx = model.index(0, 0)
+        if not idx.isValid():
+            return False
+
+        text = model.data(idx)
+        if not text:
+            return False
+
+        combo.setEditText(str(text))
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.KeyPress:
+            key = event.key()
+            if key == QtCore.Qt.Key_Return or key == QtCore.Qt.Key_Enter:
+                current_col = self.table.currentColumn()
+                current = self.table.currentRow()
+                if current >= 0 and current_col == self.mapping_col:
+                    self._apply_top_completion(current, current_col)
+                # Move focus to same column in next row
+                if current >= 0 and current < self.table.rowCount() - 1:
+                    self.table.setCurrentCell(current + 1, self.mapping_col)
+                return True
+            elif key == QtCore.Qt.Key_Tab:
+                current = self.table.currentColumn()
+                row = self.table.currentRow()
+                if row >= 0 and current == self.mapping_col:
+                    self._apply_top_completion(row, current)
+                    return True
+        return False
+
+
+def apply_mapping_table_keys(table: QtWidgets.QTableWidget, mapping_col: int = 2):
+    """Install key event filter for Enter/Tab navigation in mapping columns."""
+    filt = _MappingTableKeyFilter(table, mapping_col)
+    table.installEventFilter(filt)
+    table._key_filter = filt
+
+
+class _MappingComboKeyFilter(QtCore.QObject):
+    """Handle Enter/Tab directly on editable mapping combo editors."""
+
+    def __init__(self, table: QtWidgets.QTableWidget, combo: QtWidgets.QComboBox, mapping_col: int):
+        super().__init__(combo)
+        self.table = table
+        self.combo = combo
+        self.mapping_col = mapping_col
+
+    def _find_combo_row(self) -> int:
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, self.mapping_col) is self.combo:
+                return row
+        return -1
+
+    def _apply_top_completion(self) -> bool:
+        completer = self.combo.completer()
+        if not completer:
+            return False
+        model = completer.completionModel()
+        if model is None:
+            return False
+        idx = model.index(0, 0)
+        if not idx.isValid():
+            return False
+        text = model.data(idx)
+        if not text:
+            return False
+        self.combo.setEditText(str(text))
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() != QtCore.QEvent.KeyPress:
+            return False
+
+        key = event.key()
+        if key not in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Tab):
+            return False
+
+        row = self._find_combo_row()
+        if row < 0:
+            return False
+
+        self._apply_top_completion()
+
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and row < self.table.rowCount() - 1:
+            self.table.setCurrentCell(row + 1, self.mapping_col)
+
+        return True
+
+
+def apply_mapping_combo_keys(table: QtWidgets.QTableWidget, combo: QtWidgets.QComboBox, mapping_col: int):
+    """Install Enter/Tab completion handling on an editable mapping combo."""
+    if not combo.isEditable() or not combo.lineEdit():
+        return
+    filt = _MappingComboKeyFilter(table, combo, mapping_col)
+    combo.installEventFilter(filt)
+    combo.lineEdit().installEventFilter(filt)
+    combo._mapping_key_filter = filt
+
+
 class EditUserDialog(QtWidgets.QDialog):
     """Dialog for editing user information."""
     def __init__(self, user_data, pop_map, parent=None):
@@ -51,9 +256,12 @@ class EditUserDialog(QtWidgets.QDialog):
         
         # Set minimum size based on DPI
         dpi_scale = get_dpi_scale()
-        self.setMinimumSize(scale_size(450, dpi_scale), scale_size(400, dpi_scale))
+        self.setMinimumSize(scale_size(450, dpi_scale), scale_size(500, dpi_scale))
         
-        layout = QtWidgets.QFormLayout(self)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        
+        # Editable fields section
+        layout = QtWidgets.QFormLayout()
         
         self.username = QtWidgets.QLineEdit(user_data.get('username', ''))
         self.username.setPlaceholderText("e.g. jsmith")
@@ -99,6 +307,23 @@ class EditUserDialog(QtWidgets.QDialog):
         layout.addRow("Country:", self.country)
         layout.addRow("Population:", self.population)
         
+        main_layout.addLayout(layout)
+        
+        # Show all populated attributes section
+        all_attrs = self._get_all_populated_attributes(user_data)
+        if all_attrs:
+            separator = QtWidgets.QLabel("All User Attributes:")
+            separator.setStyleSheet("font-weight: bold; margin-top: 10px;")
+            main_layout.addWidget(separator)
+            
+            # Create scrollable text area with all attributes
+            attrs_display = QtWidgets.QTextEdit()
+            attrs_display.setReadOnly(True)
+            attrs_display.setMaximumHeight(120)
+            attrs_text = "\n".join(all_attrs)
+            attrs_display.setPlainText(attrs_text)
+            main_layout.addWidget(attrs_display)
+        
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         # default/escape roles for keyboard accessibility
         ok_btn = buttons.button(QtWidgets.QDialogButtonBox.Ok)
@@ -109,10 +334,34 @@ class EditUserDialog(QtWidgets.QDialog):
             cancel_btn.setAutoDefault(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        main_layout.addWidget(buttons)
         
         self.user_data = user_data
         self.pop_map = pop_map
+    
+    def _get_all_populated_attributes(self, user_data):
+        """Return a formatted list of all populated attributes in user data."""
+        def format_dict(d, prefix="", indent=0):
+            """Recursively format dict/list attributes."""
+            result = []
+            for key, value in sorted(d.items()):
+                full_key = f"{prefix}.{key}" if prefix else key
+                if isinstance(value, dict):
+                    if value:  # Only show non-empty dicts
+                        result.extend(format_dict(value, full_key, indent + 2))
+                elif isinstance(value, list):
+                    if value:  # Only show non-empty lists
+                        for i, item in enumerate(value):
+                            item_key = f"{full_key}[{i}]"
+                            if isinstance(item, dict):
+                                result.extend(format_dict(item, item_key, indent + 2))
+                            else:
+                                result.append(f"{'  ' * (indent + 1)}{item_key}: {item}")
+                elif value is not None and value != "":  # Only show populated values
+                    result.append(f"{'  ' * indent}{full_key}: {value}")
+            return result
+        
+        return format_dict(user_data)
     
     def get_data(self):
         """Return the updated user data from the dialog."""
@@ -368,118 +617,240 @@ class TextViewDialog(QtWidgets.QDialog):
 
 
 class AttributeMappingDialog(QtWidgets.QDialog):
-    """Dialog to review and edit mapping from file headers to API attribute names.
+    """CSV/LDIF mapping dialog aligned with the database mapping experience.
 
-    Presents a small form for required fields (username, email, given/family names,
-    and population selection) followed by a two-column table: the original file
-    header (read-only) and an editable mapped attribute (defaulting to a
-    suggested mapping). Returns a tuple `(mapping_dict, fixed_population_id)` where
-    `fixed_population_id` is a population id chosen from the dropdown or `None`.
+    Presents a table-first mapper with source columns, sample values, and a
+    target PingOne attribute combo. Returns
+    ``(mapping, fixed_population_id, fixed_enabled, remember_mapping)``.
     """
-    def __init__(self, headers, parent=None, pop_map: dict = None, initial_mapping: dict = None, initial_fixed_pop_id: str = None, initial_fixed_enabled=None):
+
+    def __init__(
+        self,
+        headers,
+        parent=None,
+        pop_map: dict = None,
+        initial_mapping: dict = None,
+        initial_fixed_pop_id: str = None,
+        initial_fixed_enabled=None,
+        pingone_attrs: Optional[List[str]] = None,
+        sample_row: Optional[dict] = None,
+    ):
         super().__init__(parent)
-        self.setWindowTitle("Attribute Mapping")
+        self.setWindowTitle("CSV Mapping")
         self.setModal(True)
-        
-        # Set minimum size based on DPI
+
         dpi_scale = get_dpi_scale()
-        self.setMinimumSize(scale_size(700, dpi_scale), scale_size(500, dpi_scale))
-        
+        apply_screen_relative_size(
+            self,
+            scale_size(760, dpi_scale),
+            scale_size(360, dpi_scale),
+            scale_size(900, dpi_scale),
+            scale_size(540, dpi_scale),
+            max_w_ratio=0.76,
+            max_h_ratio=0.68,
+        )
+
         layout = QtWidgets.QVBoxLayout(self)
+        direction_label = QtWidgets.QLabel("File column -> PingOne attribute")
+        direction_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(direction_label)
 
-        # Keep a local copy of headers for dropdowns
         self.headers = list(headers or [])
-        # population map: name -> id
         self.pop_map = pop_map or {}
-        # persist initial fixed population id for use during mapping retrieval
-        self.initial_fixed_pop_id = initial_fixed_pop_id
+        self.sample_row = sample_row or {}
 
-        # Top form for required / commonly-used attributes so users can
-        # explicitly choose which file header maps to them.
-        form = QtWidgets.QFormLayout()
-        self.username_field = QtWidgets.QComboBox()
-        self.email_field = QtWidgets.QComboBox()
-        self.given_field = QtWidgets.QComboBox()
-        self.family_field = QtWidgets.QComboBox()
-        # population source: choose CSV field or select fixed population
-        self.population_field = QtWidgets.QComboBox()
-        self.population_fixed = QtWidgets.QComboBox()
-        # enabled mapping: allow mapping from CSV header or fixed True/False
-        self.enabled_field = QtWidgets.QComboBox()
+        base_attrs = [
+            'username', 'email', 'name.given', 'name.family',
+            'population.id', 'population.name', 'enabled',
+            'phoneNumbers.mobile', 'phoneNumbers.work', 'phoneNumbers.home',
+            'title', 'organization', 'id',
+        ]
+        self.pingone_attrs = sorted({*(pingone_attrs or []), *base_attrs})
 
-        # Helper to populate header-selection combos (allow empty selection)
-        def _populate_hdr_combo(cb: QtWidgets.QComboBox, default_suggest: str = None):
-            cb.addItem("<None>")
-            for h in self.headers:
-                cb.addItem(h)
-            # Try to auto-select a suggested header if present
-            if default_suggest:
-                for i in range(cb.count()):
-                    if cb.itemText(i).lower() == default_suggest.lower():
-                        cb.setCurrentIndex(i)
-                        break
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Column Name", "Sample Value", "PingOne Attribute"])
+        self.table.setRowCount(len(self.headers))
 
-        _populate_hdr_combo(self.username_field, 'username')
-        _populate_hdr_combo(self.email_field, 'email')
-        _populate_hdr_combo(self.given_field, 'first name')
-        _populate_hdr_combo(self.family_field, 'last name')
-        _populate_hdr_combo(self.population_field, 'population')
-        # populate enabled_field: only fixed true/false options per request
-        self.enabled_field.addItem("<None>", None)
-        self.enabled_field.addItem("<Fixed: true>", True)
-        self.enabled_field.addItem("<Fixed: false>", False)
-        # If an initial fixed enabled value was provided, pre-select it
-        try:
-            if initial_fixed_enabled is True:
-                idx = self.enabled_field.findData(True)
-                if idx != -1:
-                    self.enabled_field.setCurrentIndex(idx)
-            elif initial_fixed_enabled is False:
-                idx = self.enabled_field.findData(False)
-                if idx != -1:
-                    self.enabled_field.setCurrentIndex(idx)
-        except Exception:
-            pass
+        for i, hdr in enumerate(self.headers):
+            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(hdr))
 
-        # If an initial mapping was provided, pre-select choices where possible
-        try:
+            val = self.sample_row.get(hdr, "") if isinstance(self.sample_row, dict) else ""
+            if isinstance(val, (dict, list)):
+                try:
+                    val = json.dumps(val)
+                except Exception:
+                    val = str(val)
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(val) if val is not None else ""))
+
+            combo = QtWidgets.QComboBox()
+            combo.setEditable(True)
+            combo.addItem("<None>")
+            combo.addItems(self.pingone_attrs)
+            combo.setPlaceholderText("Select or type attribute name")
+            apply_combo_typeahead(combo, self.pingone_attrs)
+            clear_none_on_interact(combo)
+            apply_mapping_combo_keys(self.table, combo, 2)
+
             if initial_mapping and isinstance(initial_mapping, dict):
-                def _select_header_for(target_attr, combo):
-                    for hdr, mapped in initial_mapping.items():
-                        if mapped == target_attr:
-                            idx = combo.findText(hdr)
-                            if idx != -1:
-                                combo.setCurrentIndex(idx)
-                                return
-                _select_header_for('username', self.username_field)
-                _select_header_for('email', self.email_field)
-                _select_header_for('name.given', self.given_field)
-                _select_header_for('name.family', self.family_field)
-                # population may have been stored as population.id mapping
-                _select_header_for('population.id', self.population_field)
-                # initial_fixed_enabled handled above; ignore header-mapped enabled values
-        except Exception:
-            pass
+                mapped = initial_mapping.get(hdr)
+                if mapped:
+                    idx = combo.findText(mapped)
+                    if idx != -1:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setEditText(str(mapped))
+            else:
+                suggested = self._suggest_pingone_attr(hdr)
+                if suggested:
+                    idx = combo.findText(suggested)
+                    if idx != -1:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setEditText(suggested)
 
-        # Populate population_fixed dropdown with a default <Use CSV Field> option
-        self.population_fixed.addItem("<Use CSV Field>")
+            self.table.setCellWidget(i, 2, combo)
+
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+
+        apply_mapping_table_keys(self.table, mapping_col=2)
+        layout.addWidget(self.table)
+
+        row_actions = QtWidgets.QHBoxLayout()
+        add_row_btn = QtWidgets.QPushButton("Add Row")
+        add_row_btn.setToolTip("Add a manual mapping row")
+        add_row_btn.clicked.connect(self._add_manual_row)
+        del_row_btn = QtWidgets.QPushButton("Delete Row")
+        del_row_btn.setToolTip("Delete selected mapping row(s)")
+        del_row_btn.clicked.connect(self._delete_selected_rows)
+        row_actions.addWidget(add_row_btn)
+        row_actions.addWidget(del_row_btn)
+        row_actions.addStretch()
+        layout.addLayout(row_actions)
+
+        options_group = QtWidgets.QGroupBox("Import Options")
+        options_form = QtWidgets.QFormLayout(options_group)
+
+        self.population_fixed = QtWidgets.QComboBox()
+        self.population_fixed.addItem("<Use mapped CSV column>", None)
         for name, pid in sorted(self.pop_map.items(), key=lambda x: x[0].lower()):
             self.population_fixed.addItem(f"{name} ({pid})", pid)
+        if initial_fixed_pop_id:
+            idx = self.population_fixed.findData(initial_fixed_pop_id)
+            if idx != -1:
+                self.population_fixed.setCurrentIndex(idx)
 
-        form.addRow("Username field:", self.username_field)
-        form.addRow("Email field:", self.email_field)
-        form.addRow("Given name field:", self.given_field)
-        form.addRow("Family name field:", self.family_field)
-        hbox = QtWidgets.QHBoxLayout()
-        hbox.addWidget(self.population_field)
-        hbox.addWidget(self.population_fixed)
-        form.addRow("Population:", hbox)
-        form.addRow("Enabled field:", self.enabled_field)
-        layout.addLayout(form)
-        # Note about ID columns: show them but they are system-generated
-        note = QtWidgets.QLabel("Note: any 'ID' column is system-generated and read-only; ID values will be shown but ignored during import.")
+        self.enabled_field = QtWidgets.QComboBox()
+        self.enabled_field.addItem("<Use mapped CSV column>", None)
+        self.enabled_field.addItem("<Fixed: true>", True)
+        self.enabled_field.addItem("<Fixed: false>", False)
+        if initial_fixed_enabled is True:
+            idx = self.enabled_field.findData(True)
+            if idx != -1:
+                self.enabled_field.setCurrentIndex(idx)
+        elif initial_fixed_enabled is False:
+            idx = self.enabled_field.findData(False)
+            if idx != -1:
+                self.enabled_field.setCurrentIndex(idx)
+
+        options_form.addRow("Fixed population:", self.population_fixed)
+        options_form.addRow("Fixed enabled:", self.enabled_field)
+        layout.addWidget(options_group)
+
+        self.remember_cb = QtWidgets.QCheckBox("Remember mapping for this profile")
+        self.remember_cb.setChecked(False)
+        layout.addWidget(self.remember_cb)
+
+        note = QtWidgets.QLabel("Note: ID values are system-generated and ignored during import.")
         note.setWordWrap(True)
         note.setStyleSheet('color: #555; font-style: italic;')
+        layout.addWidget(note)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setDefault(True)
+        cancel_btn = btns.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setAutoDefault(False)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _normalize_mapping_token(self, value: str) -> str:
+        token = str(value or '').strip().lower()
+        return ''.join(ch for ch in token if ch.isalnum())
+
+    def _suggest_pingone_attr(self, source_name: str) -> str:
+        """Suggest a target attribute using exact token matching and aliases."""
+        source = str(source_name or '').strip()
+        normalized_source = self._normalize_mapping_token(source)
+        if not normalized_source:
+            return ''
+
+        alias_map = {
+            'firstname': 'name.given',
+            'givenname': 'name.given',
+            'lastname': 'name.family',
+            'familyname': 'name.family',
+            'uid': 'username',
+            'mobilenumber': 'phoneNumbers.mobile',
+            'worknumber': 'phoneNumbers.work',
+            'homenumber': 'phoneNumbers.home',
+            'mobilephone': 'phoneNumbers.mobile',
+            'workphone': 'phoneNumbers.work',
+            'homephone': 'phoneNumbers.home',
+            'population': 'population.id',
+        }
+        if normalized_source in alias_map:
+            return alias_map[normalized_source]
+
+        for attr in self.pingone_attrs:
+            if self._normalize_mapping_token(attr) == normalized_source:
+                return attr
+        return ''
+
+    def get_mapping(self):
+        mapping = {}
+        for row in range(self.table.rowCount()):
+            src_item = self.table.item(row, 0)
+            combo = self.table.cellWidget(row, 2)
+            if not src_item or combo is None:
+                continue
+            src = src_item.text().strip()
+            dst = combo.currentText().strip()
+            if src and dst and dst != "<None>":
+                mapping[src] = dst
+
+        fixed_pop_id = self.population_fixed.currentData()
+        fixed_enabled = self.enabled_field.currentData()
+        remember = bool(self.remember_cb.isChecked())
+        return mapping, fixed_pop_id, fixed_enabled, remember
+
+    def _add_manual_row(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(""))
+        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+        combo = QtWidgets.QComboBox()
+        combo.setEditable(True)
+        combo.addItem("<None>")
+        combo.addItems(self.pingone_attrs)
+        combo.setPlaceholderText("Select or type attribute name")
+        apply_combo_typeahead(combo, self.pingone_attrs)
+        clear_none_on_interact(combo)
+        apply_mapping_combo_keys(self.table, combo, 2)
+        self.table.setCellWidget(row, 2, combo)
+
+    def _delete_selected_rows(self):
+        rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        for row in rows:
+            self.table.removeRow(row)
 
 
 # -- database connection/dialog classes -------------------------------------------------
@@ -589,15 +960,33 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("")
         layout.addWidget(self.status_label)
 
+        # sample data display (shown after successful test with table selected)
+        self.sample_label = QtWidgets.QLabel("")
+        self.sample_label.setWordWrap(True)
+        self.sample_label.setStyleSheet("background-color: #f0f0f0; padding: 8px; border-radius: 4px; font-family: Monaco; font-size: 10px;")
+        self.sample_label.setVisible(False)
+        layout.addWidget(self.sample_label)
+
         # allow user to choose whether this connection should be saved
         self.save_cb = QtWidgets.QCheckBox("Save this connection")
         self.save_cb.setChecked(True)
         layout.addWidget(self.save_cb)
 
+        # button layout with OK, Cancel, and Use This Connection
+        btn_layout = QtWidgets.QHBoxLayout()
+        use_btn = QtWidgets.QPushButton("Use This Connection")
+        use_btn.setToolTip("Use this connection and close the dialog")
+        use_btn.clicked.connect(self._on_use)
+        self.use_btn = use_btn
+        
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        
+        btn_layout.addWidget(use_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btns)
+        layout.addLayout(btn_layout)
 
         if initial:
             self.name_edit.setText(initial.get('name', ''))
@@ -741,6 +1130,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         # show busy cursor and status while testing
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         self.status_label.setText("Testing connection...")
+        self.sample_label.setVisible(False)
         QtWidgets.QApplication.processEvents()
         try:
             from api import db_utils
@@ -768,6 +1158,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         if ok:
             self.status_label.setText("Connection successful.")
             self._populate_tables()
+            # If a table is selected, fetch and display the first record
+            self._show_sample_data(db_utils)
         else:
             self.status_label.setText("Connection failed.")
             # clear any previous table list so the user must retest
@@ -778,6 +1170,51 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             if err:
                 msg += f"\n\nError details:\n{err}"
             QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
+
+    def _show_sample_data(self, db_utils):
+        """Fetch and display the first record from the selected table."""
+        if not self.table_combo.currentText():
+            self.sample_label.setVisible(False)
+            return
+        
+        try:
+            sample = db_utils.get_table_sample(
+                self.type_combo.currentText(),
+                self.host_edit.text(),
+                int(self.port_edit.text() or 0),
+                self.db_edit.text(),
+                self.user_edit.text(),
+                self.pw_edit.text(),
+                self.table_combo.currentText(),
+                self.driver_combo.currentText() or None,
+            )
+            if sample:
+                # Format the sample row in horizontal layout
+                parts = ["<b>First Record:</b>"]
+                for key, value in sample.items():
+                    parts.append(f"<b>{key}:</b> {value}")
+                self.sample_label.setText(" | ".join(parts))
+                self.sample_label.setVisible(True)
+            else:
+                self.sample_label.setText("<i>Table is empty.</i>")
+                self.sample_label.setVisible(True)
+        except Exception as e:
+            self.sample_label.setText(f"<i>Could not fetch sample: {str(e)}</i>")
+            self.sample_label.setVisible(True)
+
+    def _on_use(self):
+        """Accept the dialog and mark that this connection should be used immediately."""
+        # Validate required fields
+        if not self.name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Invalid Name", "Connection name cannot be empty.")
+            self.name_edit.setFocus()
+            return
+        if not self.host_edit.text().strip() or not self.db_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Missing Details", "Host and database name are required.")
+            return
+        # Mark that we should use this connection
+        self.use_connection = True
+        self.accept()
 
     def get_connection_data(self) -> dict:
         data = {
@@ -790,6 +1227,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'password': self.pw_edit.text(),
             'driver': self.driver_combo.currentText().strip(),
             'save': bool(self.save_cb.isChecked()),
+            'use': getattr(self, 'use_connection', False),
         }
         # include table if user selected one
         if self.table_combo.count() and self.table_combo.currentText():
@@ -809,26 +1247,32 @@ class DBConnectionsManager(QtWidgets.QDialog):
         # ensure Enter triggers edit when a connection is selected
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.itemActivated.connect(self.edit)
-
-        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.itemSelectionChanged.connect(self._update_button_state)
         self._populate(connections)
         layout.addWidget(self.list_widget)
 
         btn_layout = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add")
-        add_btn.setToolTip("Create a new connection profile")
-        edit_btn = QtWidgets.QPushButton("Edit")
-        edit_btn.setToolTip("Modify the selected connection")
-        del_btn = QtWidgets.QPushButton("Delete")
-        del_btn.setToolTip("Remove the selected connection")
-        btn_layout.addWidget(add_btn); btn_layout.addWidget(edit_btn); btn_layout.addWidget(del_btn);
+        self.add_btn = QtWidgets.QPushButton("Add")
+        self.add_btn.setToolTip("Create a new connection profile")
+        self.edit_btn = QtWidgets.QPushButton("Edit")
+        self.edit_btn.setToolTip("Modify the selected connection")
+        self.del_btn = QtWidgets.QPushButton("Delete")
+        self.del_btn.setToolTip("Remove the selected connection")
+        btn_layout.addWidget(self.add_btn); btn_layout.addWidget(self.edit_btn); btn_layout.addWidget(self.del_btn);
         layout.addLayout(btn_layout)
 
-        add_btn.clicked.connect(self.add)
-        edit_btn.clicked.connect(self.edit)
-        del_btn.clicked.connect(self.delete)
+        self.add_btn.clicked.connect(self.add)
+        self.edit_btn.clicked.connect(self.edit)
+        self.del_btn.clicked.connect(self.delete)
         # make Add the default button so Enter adds when no selection
-        add_btn.setDefault(True)
+        self.add_btn.setDefault(True)
+        
+        # If no connections, set focus to Add button
+        if not connections:
+            self.add_btn.setFocus()
+            
+        # Update button state based on selection
+        self._update_button_state()
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
@@ -836,11 +1280,21 @@ class DBConnectionsManager(QtWidgets.QDialog):
 
         self.connections = connections
         self.result = connections.copy()
+    
+    def _update_button_state(self):
+        """Enable/disable edit and delete buttons based on selection."""
+        has_selection = self.list_widget.currentItem() is not None
+        self.edit_btn.setEnabled(has_selection)
+        self.del_btn.setEnabled(has_selection)
 
     def _populate(self, connections):
         self.list_widget.clear()
         for name in sorted(connections.keys()):
             self.list_widget.addItem(name)
+        # Focus on most recent entry (last in sorted list) or Add button if empty
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(self.list_widget.count() - 1)
+            self.list_widget.setFocus()
 
     def add(self):
         dlg = DatabaseConnectionDialog(parent=self)
@@ -915,9 +1369,29 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         self.setWindowTitle("Database Mapping")
         self.setModal(True)
         dpi = get_dpi_scale()
-        self.setMinimumSize(scale_size(800, dpi), scale_size(600, dpi))
+        apply_screen_relative_size(
+            self,
+            scale_size(760, dpi),
+            scale_size(360, dpi),
+            scale_size(880, dpi),
+            scale_size(500, dpi),
+            max_w_ratio=0.76,
+            max_h_ratio=0.64,
+        )
+        self.direction = direction
+        self.table_cols = list(table_cols or [])
+        self.pingone_attrs = list(pingone_attrs or [])
+        self.sample_row = sample_row or {}
 
         layout = QtWidgets.QVBoxLayout(self)
+        direction_label = QtWidgets.QLabel(
+            "Database column -> PingOne attribute"
+            if direction == 'import'
+            else "PingOne attribute -> Database column"
+        )
+        direction_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(direction_label)
+
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(3)
         if direction == 'import':
@@ -925,22 +1399,34 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         else:
             headers = ["PingOne Attribute", "Example Value", "Target Column"]
         self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(len(table_cols))
 
-        for i, col in enumerate(table_cols):
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(col))
-            # sample value
-            val = ''
-            if sample_row and col in sample_row:
-                val = str(sample_row[col])
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(val))
-            combo = QtWidgets.QComboBox()
-            combo.addItem("<None>")
-            for attr in pingone_attrs:
-                combo.addItem(attr)
-            self.table.setCellWidget(i, 2, combo)
+        if direction == 'import':
+            self._build_import_rows()
+        else:
+            self._build_export_rows()
+
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        
+        # Install key event handling for Enter/Tab navigation
+        apply_mapping_table_keys(self.table, mapping_col=2)
 
         layout.addWidget(self.table)
+
+        row_actions = QtWidgets.QHBoxLayout()
+        add_row_btn = QtWidgets.QPushButton("Add Row")
+        add_row_btn.setToolTip("Add a manual mapping row")
+        add_row_btn.clicked.connect(self._add_manual_row)
+        del_row_btn = QtWidgets.QPushButton("Delete Row")
+        del_row_btn.setToolTip("Delete selected mapping row(s)")
+        del_row_btn.clicked.connect(self._delete_selected_rows)
+        row_actions.addWidget(add_row_btn)
+        row_actions.addWidget(del_row_btn)
+        row_actions.addStretch()
+        layout.addLayout(row_actions)
+
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
         if ok_btn:
@@ -952,14 +1438,174 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
+    def _normalize_mapping_token(self, value: str) -> str:
+        token = str(value or '').strip().lower()
+        return ''.join(ch for ch in token if ch.isalnum())
+
+    def _suggest_pingone_attr(self, column_name: str, phone_type: str = '') -> str:
+        """Suggest the best PingOne attribute for a database import column."""
+        if phone_type:
+            typed = f"phoneNumbers.{phone_type}"
+            if typed in self.pingone_attrs:
+                return typed
+
+        normalized_source = self._normalize_mapping_token(column_name)
+        if not normalized_source:
+            return ''
+
+        for attr in self.pingone_attrs:
+            if self._normalize_mapping_token(attr) == normalized_source:
+                return attr
+        return ''
+
+    def _suggest_db_column(self, pingone_attr: str) -> str:
+        """Suggest the best database column for a PingOne export attribute."""
+        normalized_attr = self._normalize_mapping_token(pingone_attr)
+        if not normalized_attr:
+            return ''
+
+        for col in self.table_cols:
+            if self._normalize_mapping_token(col) == normalized_attr:
+                return col
+        return ''
+
+    def _build_import_rows(self):
+        # If sample_row has phoneNumbers with multiple types, expand them for clarity.
+        expanded_cols = self._expand_phone_numbers(self.table_cols, self.sample_row)
+        self.table.setRowCount(len(expanded_cols))
+        for i, col_info in enumerate(expanded_cols):
+            col = col_info['name']
+            is_phone = col_info.get('is_phone', False)
+            phone_type = col_info.get('phone_type', '')
+            source_key = f"{col}::{phone_type}" if is_phone and phone_type else col
+            display_name = f"{col} ({phone_type})" if is_phone and phone_type else col
+
+            src_item = QtWidgets.QTableWidgetItem(display_name)
+            src_item.setData(QtCore.Qt.UserRole, source_key)
+            self.table.setItem(i, 0, src_item)
+
+            val = ''
+            if col in self.sample_row:
+                val = str(self.sample_row[col])
+                if is_phone and phone_type:
+                    phones = self.sample_row.get(col, [])
+                    if isinstance(phones, list):
+                        for phone_obj in phones:
+                            if isinstance(phone_obj, dict) and phone_obj.get('type') == phone_type:
+                                val = phone_obj.get('number', '')
+                                break
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(val))
+
+            combo = QtWidgets.QComboBox()
+            combo.setEditable(True)
+            combo.addItem("<None>")
+            if is_phone and phone_type:
+                combo.addItem(f"phoneNumbers.{phone_type}")
+            combo.addItems(self.pingone_attrs)
+            combo.setPlaceholderText("Select or type attribute name")
+            apply_combo_typeahead(combo, self.pingone_attrs)
+            clear_none_on_interact(combo)
+            suggested = self._suggest_pingone_attr(col, phone_type)
+            if suggested:
+                combo.setCurrentText(suggested)
+            apply_mapping_combo_keys(self.table, combo, 2)
+            self.table.setCellWidget(i, 2, combo)
+
+    def _build_export_rows(self):
+        attrs = self.pingone_attrs or self.table_cols
+        self.table.setRowCount(len(attrs))
+        for i, attr in enumerate(attrs):
+            left_item = QtWidgets.QTableWidgetItem(attr)
+            left_item.setData(QtCore.Qt.UserRole, attr)
+            self.table.setItem(i, 0, left_item)
+
+            val = self.sample_row.get(attr, '')
+            if isinstance(val, (dict, list)):
+                try:
+                    val = json.dumps(val)
+                except Exception:
+                    val = str(val)
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(val) if val is not None else ''))
+
+            combo = QtWidgets.QComboBox()
+            combo.setEditable(True)
+            combo.addItem("<None>")
+            combo.addItems(self.table_cols)
+            suggested = self._suggest_db_column(attr)
+            if suggested:
+                combo.setCurrentText(suggested)
+            else:
+                combo.setEditText(attr)
+            combo.setPlaceholderText("Select or type target column")
+            apply_combo_typeahead(combo, list(self.table_cols) + [attr])
+            clear_none_on_interact(combo)
+            apply_mapping_combo_keys(self.table, combo, 2)
+            self.table.setCellWidget(i, 2, combo)
+    
+    def _expand_phone_numbers(self, table_cols: List[str], sample_row: Optional[dict]) -> List[dict]:
+        """Expand phoneNumbers column to show individual phone types if present."""
+        expanded = []
+        for col in table_cols:
+            if col.lower() == 'phonenumbers' and sample_row and col in sample_row:
+                phones = sample_row.get(col, [])
+                if isinstance(phones, list) and phones:
+                    # Expand each phone with its type
+                    phone_types_seen = set()
+                    for phone_obj in phones:
+                        if isinstance(phone_obj, dict):
+                            phone_type = phone_obj.get('type', 'unknown')
+                            if phone_type not in phone_types_seen:
+                                phone_types_seen.add(phone_type)
+                                expanded.append({
+                                    'name': col,
+                                    'is_phone': True,
+                                    'phone_type': phone_type
+                                })
+                    if expanded and expanded[-1].get('name') == col:
+                        continue  # Already added phone entries
+                expanded.append({'name': col, 'is_phone': False})
+            else:
+                expanded.append({'name': col, 'is_phone': False})
+        return expanded
+
+    def _add_manual_row(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(""))
+        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(""))
+
+        combo = QtWidgets.QComboBox()
+        combo.setEditable(True)
+        combo.addItem("<None>")
+        if self.direction == 'import':
+            combo.addItems(self.pingone_attrs)
+            combo.setPlaceholderText("Select or type attribute name")
+            apply_combo_typeahead(combo, self.pingone_attrs)
+        else:
+            combo.addItems(self.table_cols)
+            combo.setPlaceholderText("Select or type target column")
+            apply_combo_typeahead(combo, self.table_cols)
+        clear_none_on_interact(combo)
+        apply_mapping_combo_keys(self.table, combo, 2)
+        self.table.setCellWidget(row, 2, combo)
+
+    def _delete_selected_rows(self):
+        rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        for row in rows:
+            self.table.removeRow(row)
+
     def get_mapping(self) -> dict:
         result = {}
         for row in range(self.table.rowCount()):
-            left = self.table.item(row, 0).text()
-            combo: QtWidgets.QComboBox = self.table.cellWidget(row, 2)
-            tgt = combo.currentText()
-            if tgt and tgt != "<None>":
-                result[left] = tgt
+            left_item = self.table.item(row, 0)
+            if left_item:
+                left = left_item.data(QtCore.Qt.UserRole) or left_item.text()
+                combo: QtWidgets.QComboBox = self.table.cellWidget(row, 2)
+                tgt = combo.currentText()
+                if tgt and tgt != "<None>":
+                    result[left] = tgt
         return result
 
 
@@ -1491,3 +2137,163 @@ class ProfileManagerDialog(QtWidgets.QDialog):
                     f"Successfully connected to profile '{self.new_profile_name}'.\n\nYou can now manage users in the Users tab."
                 )
                 self.accept()  # Close the dialog
+
+
+class ImportWizardDialog(QtWidgets.QDialog):
+    """Wizard-style dialog for import with back/forward navigation and radio buttons."""
+    
+    def __init__(self, parent=None, db_connections: dict = None):
+        super().__init__(parent)
+        self.setWindowTitle("Import Data - Wizard")
+        self.setModal(True)
+        self.setMinimumSize(500, 300)
+        
+        self.db_connections = db_connections or {}
+        self.current_step = 0
+        self.selected_connection = None
+        self.result = {}
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Title
+        title = QtWidgets.QLabel("Select Import Source")
+        title_font = title.font()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+        
+        layout.addSpacing(10)
+        
+        # Content area
+        self.content_layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(self.content_layout)
+        
+        layout.addSpacing(10)
+        
+        # Navigation buttons
+        nav_layout = QtWidgets.QHBoxLayout()
+        self.back_btn = QtWidgets.QPushButton("Back")
+        self.back_btn.clicked.connect(self.go_back)
+        self.back_btn.setEnabled(False)
+        nav_layout.addWidget(self.back_btn)
+        
+        nav_layout.addStretch()
+        
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        nav_layout.addWidget(cancel_btn)
+        
+        self.next_btn = QtWidgets.QPushButton("Next")
+        self.next_btn.clicked.connect(self.go_next)
+        nav_layout.addWidget(self.next_btn)
+        
+        layout.addLayout(nav_layout)
+        
+        self.show_step(0)
+    
+    def show_step(self, step: int):
+        """Show the appropriate step of the wizard."""
+        # Clear content layout safely (widgets, nested layouts, spacers).
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+                continue
+            nested = item.layout()
+            if nested is not None:
+                while nested.count():
+                    nitem = nested.takeAt(0)
+                    nw = nitem.widget()
+                    if nw is not None:
+                        nw.deleteLater()
+        
+        if step == 0:
+            self.show_import_type_selection()
+        elif step == 1:
+            self.show_connection_selection()
+        elif step == 2:
+            self.show_query_mode_selection()
+        
+        self.current_step = step
+        self.next_btn.setEnabled(True)
+        self.back_btn.setEnabled(step > 0)
+        self.next_btn.setText("Next" if step < 2 else "Finish")
+    
+    def show_import_type_selection(self):
+        """Step 0: Select import type (CSV, LDIF, Database)."""
+        label = QtWidgets.QLabel("Select Import Format:")
+        self.content_layout.addWidget(label)
+        
+        self.rb_csv = QtWidgets.QRadioButton("CSV File")
+        self.rb_ldif = QtWidgets.QRadioButton("LDIF File")
+        self.rb_db = QtWidgets.QRadioButton("Database")
+        self.rb_csv.setChecked(True)
+        
+        self.content_layout.addWidget(self.rb_csv)
+        self.content_layout.addWidget(self.rb_ldif)
+        self.content_layout.addWidget(self.rb_db)
+        self.content_layout.addStretch()
+    
+    def show_connection_selection(self):
+        """Step 1: Select database connection (only for DB import)."""
+        label = QtWidgets.QLabel("Select Database Connection:")
+        self.content_layout.addWidget(label)
+        
+        self.conn_combo = QtWidgets.QComboBox()
+        if self.db_connections:
+            self.conn_combo.addItems(list(self.db_connections.keys()))
+        else:
+            self.conn_combo.addItem("(No connections available)")
+            self.next_btn.setEnabled(False)
+        
+        self.content_layout.addWidget(self.conn_combo)
+        self.content_layout.addStretch()
+    
+    def show_query_mode_selection(self):
+        """Step 2: Select Table vs Custom Query."""
+        label = QtWidgets.QLabel("Select Import Source:")
+        self.content_layout.addWidget(label)
+        
+        self.rb_table = QtWidgets.QRadioButton("Import from Table")
+        self.rb_custom = QtWidgets.QRadioButton("Import from Custom Query")
+        self.rb_table.setChecked(True)
+        
+        self.content_layout.addWidget(self.rb_table)
+        self.content_layout.addWidget(self.rb_custom)
+        self.content_layout.addStretch()
+    
+    def go_next(self):
+        """Move to next step or finish."""
+        if self.current_step == 0:
+            # Determine source type and update result
+            if self.rb_csv.isChecked():
+                self.result['source_type'] = 'csv'
+                self.accept()
+            elif self.rb_ldif.isChecked():
+                self.result['source_type'] = 'ldif'
+                self.accept()
+            elif self.rb_db.isChecked():
+                self.result['source_type'] = 'db'
+                self.show_step(1)
+        elif self.current_step == 1:
+            self.selected_connection = self.conn_combo.currentText()
+            if not self.selected_connection or self.selected_connection == "(No connections available)":
+                QtWidgets.QMessageBox.warning(self, "No Connection", "Please select a valid database connection.")
+                return
+            self.result['connection_name'] = self.selected_connection
+            self.show_step(2)
+        elif self.current_step == 2:
+            query_mode = 'custom' if self.rb_custom.isChecked() else 'table'
+            self.result['query_mode'] = query_mode
+            self.accept()
+    
+    def go_back(self):
+        """Move to previous step."""
+        if self.current_step > 0:
+            self.show_step(self.current_step - 1)
+    
+    def get_result(self) -> dict:
+        """Return the import source selection result."""
+        return self.result

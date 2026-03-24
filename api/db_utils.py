@@ -18,6 +18,31 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 
+def _quote_identifier(db_type: str, ident: str) -> str:
+    """Return a safely quoted SQL identifier for the target database type.
+
+    This treats ``ident`` as a single identifier token. It is suitable for
+    column names, including legacy names that may themselves contain dots.
+    """
+    db_lower = (db_type or "").lower()
+    token = str(ident or "")
+    if not token:
+        raise ValueError("Identifier cannot be empty")
+
+    if db_lower in ('mssql', 'sqlserver') or 'mssql' in db_lower:
+        return f"[{token.replace(']', ']]')}]"
+    # MariaDB/MySQL default
+    return f"`{token.replace('`', '``')}`"
+
+
+def _quote_table_identifier(db_type: str, ident: str) -> str:
+    """Return a quoted table identifier, supporting dotted schema.table paths."""
+    parts = [p for p in str(ident or "").split('.') if p]
+    if not parts:
+        raise ValueError("Identifier cannot be empty")
+    return '.'.join(_quote_identifier(db_type, p) for p in parts)
+
+
 def _make_url(db_type: str, host: str, port: int, database: str,
               user: str, password: str, driver_path: Optional[str] = None) -> str:
     """Construct a SQLAlchemy URL for the given parameters.
@@ -55,7 +80,15 @@ def test_connection(db_type: str, host: str, port: int, database: str,
     """
     try:
         url = _make_url(db_type, host, port, database, user, password, driver_path)
-        engine = create_engine(url, pool_pre_ping=True)
+        # Add connection timeout to fail faster if host is unreachable
+        connect_args = {}
+        if "mysql" in url.lower():
+            # For PyMySQL: connect_timeout in seconds, plus read/write timeouts
+            connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+        connect_kwargs = {"pool_pre_ping": True}
+        if connect_args:
+            connect_kwargs["connect_args"] = connect_args
+        engine = create_engine(url, **connect_kwargs)
         with engine.connect() as conn:
             # execute a lightweight statement
             conn.execute(text("SELECT 1"))
@@ -72,7 +105,10 @@ def get_table_columns(db_type: str, host: str, port: int, database: str,
     Raises SQLAlchemyError on failure.
     """
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
     inspector = inspect(engine)
     cols = inspector.get_columns(table_name)
     return [c['name'] for c in cols]
@@ -86,10 +122,14 @@ def get_table_sample(db_type: str, host: str, port: int, database: str,
     Useful for showing sample values next to column names.
     """
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
     with engine.connect() as conn:
         try:
-            result = conn.execute(text(f"SELECT * FROM {table_name} LIMIT 1"))
+            q_table = _quote_table_identifier(db_type, table_name)
+            result = conn.execute(text(f"SELECT * FROM {q_table} LIMIT 1"))
             row = result.fetchone()
             if row is not None:
                 return dict(row._mapping)
@@ -107,7 +147,10 @@ def get_table_names(db_type: str, host: str, port: int, database: str,
     in the UI.
     """
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
     inspector = inspect(engine)
     return inspector.get_table_names()
 
@@ -124,14 +167,60 @@ def get_table_rows(db_type: str, host: str, port: int, database: str,
     table exists beforehand.
     """
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
     with engine.connect() as conn:
-        sql = f"SELECT * FROM {table_name}"
+        q_table = _quote_table_identifier(db_type, table_name)
+        sql = f"SELECT * FROM {q_table}"
         if limit:
             sql += f" LIMIT {limit}"
         result = conn.execute(text(sql))
         rows = [dict(r._mapping) for r in result.fetchall()]
     return rows
+
+
+def get_query_rows(db_type: str, host: str, port: int, database: str,
+                   user: str, password: str, query: str,
+                   driver_path: Optional[str] = None,
+                   limit: Optional[int] = None) -> List[dict]:
+    """Return rows from a custom SELECT query as a list of dicts.
+
+    The caller is responsible for supplying a valid read-only query.
+    If ``limit`` is provided, this method truncates the returned list in-memory.
+    """
+    if not query or not query.strip():
+        raise ValueError("Query cannot be empty")
+    url = _make_url(db_type, host, port, database, user, password, driver_path)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        rows = [dict(r._mapping) for r in result.fetchall()]
+        if limit and limit > 0:
+            rows = rows[:limit]
+        return rows
+
+
+def get_query_columns(db_type: str, host: str, port: int, database: str,
+                      user: str, password: str, query: str,
+                      driver_path: Optional[str] = None) -> List[str]:
+    """Return result column names for a custom query."""
+    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1)
+    if not rows:
+        return []
+    return list(rows[0].keys())
+
+
+def get_query_sample(db_type: str, host: str, port: int, database: str,
+                     user: str, password: str, query: str,
+                     driver_path: Optional[str] = None) -> Optional[dict]:
+    """Return one sample row for a custom query, or None if no rows."""
+    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1)
+    return rows[0] if rows else None
 
 
 def create_table_if_not_exists(db_type: str, host: str, port: int, database: str,
@@ -145,12 +234,56 @@ def create_table_if_not_exists(db_type: str, host: str, port: int, database: str
     richer schema if desired.
     """
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
     inspector = inspect(engine)
     if not inspector.has_table(table_name):
-        cols_def = ", ".join(f"{col} TEXT" for col in columns)
-        with engine.connect() as conn:
-            conn.execute(text(f"CREATE TABLE {table_name} ({cols_def})"))
+        cols_def = ", ".join(f"{_quote_identifier(db_type, col)} TEXT" for col in columns)
+        q_table = _quote_table_identifier(db_type, table_name)
+        with engine.begin() as conn:
+            conn.execute(text(f"CREATE TABLE {q_table} ({cols_def})"))
+
+
+def rename_table_columns(db_type: str, host: str, port: int, database: str,
+                         user: str, password: str, table_name: str,
+                         rename_map: dict,
+                         driver_path: Optional[str] = None):
+    """Rename columns on an existing table.
+
+    ``rename_map`` should be {old_name: new_name}. This helper currently
+    supports MariaDB/MySQL via ``CHANGE COLUMN`` and preserves the existing
+    SQLAlchemy-reflected type/nullability for each column.
+    """
+    if not rename_map:
+        return
+
+    db_lower = (db_type or '').lower()
+    if not (db_lower in ('mariadb', 'mysql') or 'mariadb' in db_lower or 'mysql' in db_lower):
+        raise NotImplementedError("Column rename migration is currently implemented for MariaDB/MySQL only")
+
+    url = _make_url(db_type, host, port, database, user, password, driver_path)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
+    inspector = inspect(engine)
+    meta_cols = {c.get('name'): c for c in inspector.get_columns(table_name)}
+    q_table = _quote_table_identifier(db_type, table_name)
+
+    with engine.begin() as conn:
+        for old_name, new_name in rename_map.items():
+            if not old_name or not new_name or old_name == new_name:
+                continue
+            col_meta = meta_cols.get(old_name)
+            if not col_meta:
+                continue
+            col_type = str(col_meta.get('type', 'TEXT'))
+            null_sql = "NULL" if bool(col_meta.get('nullable', True)) else "NOT NULL"
+            q_old = _quote_identifier(db_type, old_name)
+            q_new = _quote_identifier(db_type, new_name)
+            conn.execute(text(f"ALTER TABLE {q_table} CHANGE COLUMN {q_old} {q_new} {col_type} {null_sql}"))
 
 
 def insert_rows(db_type: str, host: str, port: int, database: str,
@@ -165,9 +298,24 @@ def insert_rows(db_type: str, host: str, port: int, database: str,
     if not rows:
         return
     url = _make_url(db_type, host, port, database, user, password, driver_path)
-    engine = create_engine(url)
-    with engine.connect() as conn:
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
+    q_table = _quote_table_identifier(db_type, table_name)
+    with engine.begin() as conn:
         for row in rows:
-            cols = ", ".join(row.keys())
-            params = ", ".join(f":{k}" for k in row.keys())
-            conn.execute(text(f"INSERT INTO {table_name} ({cols}) VALUES ({params})"), **row)
+            if not row:
+                continue
+            col_items = list(row.items())
+            q_cols = []
+            placeholders = []
+            bind_params = {}
+            for idx, (col_name, value) in enumerate(col_items):
+                bind_name = f"p{idx}"
+                q_cols.append(_quote_identifier(db_type, col_name))
+                placeholders.append(f":{bind_name}")
+                bind_params[bind_name] = value
+            cols_sql = ", ".join(q_cols)
+            params_sql = ", ".join(placeholders)
+            conn.execute(text(f"INSERT INTO {q_table} ({cols_sql}) VALUES ({params_sql})"), bind_params)

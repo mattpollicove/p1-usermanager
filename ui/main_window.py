@@ -92,6 +92,7 @@ Database Import/Export:
 - Use File → Manage DB Connections (or the button in Configuration tab) to define connections.
 - Supported types: MSSQL and MariaDB/MySQL. Provide JDBC/ODBC driver path if needed.
 - After defining a connection you can import or export data via the toolbar buttons on the User Management tab.
+- Use the Configuration action "Open PingOne Console" to launch the active environment in your browser.
 
 Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
@@ -114,6 +115,7 @@ Viewing Users:
 - Click "Refresh" to reload users from PingOne.
 - Use "Columns" to select which attributes to display.
 - Column selection and order are saved per-profile.
+- Use the filter box to live-search across all visible columns.
 
 Editing Users:
 - Double-click on the UUID or username to open the edit dialog.
@@ -334,6 +336,8 @@ class MainWindow(QtWidgets.QMainWindow):
         config_help_action.triggered.connect(self.show_config_help)
         user_help_action = help_menu.addAction("User Management Help")
         user_help_action.triggered.connect(self.show_user_help)
+        filter_help_action = help_menu.addAction("Filter Help")
+        filter_help_action.triggered.connect(self.show_filter_help)
         tabs_help_action = help_menu.addAction("Tabs Overview")
         tabs_help_action.triggered.connect(self.show_tabs_help)
         full_help_action = help_menu.addAction("Full Help & Options")
@@ -388,51 +392,57 @@ class MainWindow(QtWidgets.QMainWindow):
         secret_widget = QtWidgets.QWidget()
         secret_widget.setLayout(secret_layout)
 
-        # previous implementation attached editingFinished handlers that
-        # automatically prompted to save/test once all three fields were
-        # populated.  this behavior has been removed per user request; the
-        # user may manually save or test using the corresponding buttons.
-        # (handlers remain connected but perform no action.)
+        # Monitor all three credential fields; when in new-connection mode and
+        # all three are non-empty, a debounce timer triggers the save-profile
+        # prompt automatically.
         for le in (self.env_id, self.cl_id, self.cl_sec):
-            le.editingFinished.connect(self._new_conn_field_edited)
+            le.textChanged.connect(self._new_conn_field_edited)
 
-        btn_save = QtWidgets.QPushButton("Save Profile")
-        btn_save.clicked.connect(self.save_current_profile)
-        btn_save.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_P))
-        btn_save.setToolTip(f"Save profile ({'Cmd' if IS_MACOS else 'Ctrl'}+P)")
-        
-        btn_sync = QtWidgets.QPushButton("Connect")
-        btn_sync.clicked.connect(self.connect_only)
-        btn_sync.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_N))
-        btn_sync.setToolTip(f"Connect to PingOne ({'Cmd' if IS_MACOS else 'Ctrl'}+N)")
-        
-        btn_test = QtWidgets.QPushButton("Test Credentials")
-        btn_test.clicked.connect(self.test_credentials)
-        btn_test.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_T))
-        btn_test.setToolTip(f"Test credentials ({'Cmd' if IS_MACOS else 'Ctrl'}+T)")
-        
-        btn_new_conn = QtWidgets.QPushButton("New Connection")
-        btn_new_conn.clicked.connect(self.new_connection)
-        btn_new_conn.setToolTip("Clear fields and begin entry of a new environment/client pair")
-
-        btn_delete = QtWidgets.QPushButton("Delete Profile")
-        btn_delete.clicked.connect(self.delete_current_profile)
         # Swap Test Credentials and Save Profile positions per request
         cred_form.addRow("Env ID:", self.env_id); cred_form.addRow("Client ID:", self.cl_id)
         cred_form.addRow("Secret:", secret_widget);
-        cred_form.addRow(btn_test);
-        cred_form.addRow(btn_new_conn);
-        cred_form.addRow(btn_save);
-        cred_form.addRow(btn_sync);
-        cred_form.addRow(btn_delete)
-        # Button to view connection log
-        self._view_conn_log_btn = QtWidgets.QPushButton("View Connection Log")
-        self._view_conn_log_btn.clicked.connect(self.view_connection_log)
-        cred_form.addRow(self._view_conn_log_btn)
-        # Button to manage database connections
-        self._manage_db_btn = QtWidgets.QPushButton("Manage DB Connections")
-        self._manage_db_btn.clicked.connect(self.manage_db_connections)
-        cred_form.addRow(self._manage_db_btn)
+        self.config_action_combo = QtWidgets.QComboBox()
+        self.config_action_combo.addItems([
+            "Test Credentials",
+            "New Connection",
+            "Save Profile",
+            "Connect",
+            "Delete Profile",
+            "View Connection Log",
+            "Manage DB Connections",
+        ])
+        self.config_action_combo.setToolTip("Select a configuration action")
+        self.config_action_execute_btn = QtWidgets.QPushButton("Execute")
+        self.config_action_execute_btn.clicked.connect(self.execute_config_action)
+        self.open_pingone_console_btn = QtWidgets.QPushButton("Open PingOne Console")
+        self.open_pingone_console_btn.setToolTip("Launch the active PingOne environment in your browser")
+        self.open_pingone_console_btn.clicked.connect(self.open_pingone_console)
+        self.open_pingone_console_env_label = QtWidgets.QLabel("https://console.pingone.com/?env=")
+        self.open_pingone_console_env_label.setToolTip("Full URL used for Open PingOne Console")
+        self.open_pingone_console_env_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.open_pingone_console_env_label.setCursor(
+            QtGui.QCursor(QtCore.Qt.CursorShape.IBeamCursor)
+        )
+        self.env_id.textChanged.connect(self.update_pingone_console_env_label)
+        config_action_row = QtWidgets.QHBoxLayout()
+        config_action_row.addWidget(self.config_action_combo)
+        config_action_row.addWidget(self.config_action_execute_btn)
+        config_action_row.addWidget(self.open_pingone_console_btn)
+        config_action_row.addWidget(self.open_pingone_console_env_label)
+        self.update_pingone_console_env_label(self.env_id.text())
+        cred_form.addRow("Action:", config_action_row)
+
+        # Preserve keyboard shortcuts for frequent configuration actions.
+        self.shortcut_save_profile = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_P), self)
+        self.shortcut_save_profile.activated.connect(self.save_current_profile)
+        self.shortcut_connect_profile = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_N), self)
+        self.shortcut_connect_profile.activated.connect(self.connect_only)
+        self.shortcut_test_credentials = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_T), self)
+        self.shortcut_test_credentials.activated.connect(self.test_credentials)
+
         # Per-profile option: show live API calls in status bar
         self.show_api_calls_cb = QtWidgets.QCheckBox('Show live API calls in status bar')
         self.show_api_calls_cb.setChecked(False)
@@ -445,76 +455,65 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Users Tab ---
         user_tab = QtWidgets.QWidget(); user_lay = QtWidgets.QVBoxLayout(user_tab)
         toolbar = QtWidgets.QHBoxLayout()
-        btn_reload = QtWidgets.QPushButton("🔄 Refresh"); btn_reload.clicked.connect(self.refresh_users)
-        btn_reload.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_R))
-        btn_reload.setToolTip(f"Refresh user list ({'Cmd' if IS_MACOS else 'Ctrl'}+R)")
-        
-        btn_del = QtWidgets.QPushButton("🗑 Delete Selected")
-        self.btn_del = btn_del  # Store reference for theme updates
-        btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
-        btn_del.clicked.connect(self.delete_selected_users)
-        # Delete key works on Windows/Linux, Backspace on macOS is more common
-        if IS_MACOS:
-            btn_del.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace))
-            btn_del.setToolTip("Delete selected users (Backspace)")
-        else:
-            btn_del.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete))
-            btn_del.setToolTip("Delete selected users (Delete)")
-        
+        self.btn_del = None
         self.search_bar = QtWidgets.QLineEdit(); self.search_bar.setPlaceholderText("Filter...")
         self.search_bar.textChanged.connect(self.filter_table)
         # Create a shortcut to focus the search bar (QLineEdit doesn't have setShortcut method)
         search_shortcut = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_L), self)
         search_shortcut.activated.connect(self.search_bar.setFocus)
         self.search_bar.setToolTip(f"Focus filter field ({'Cmd' if IS_MACOS else 'Ctrl'}+L)")
-        
-        toolbar.addWidget(btn_reload); toolbar.addWidget(btn_del); toolbar.addWidget(self.search_bar)
-        btn_import_csv = QtWidgets.QPushButton("Import CSV")
-        btn_import_csv.clicked.connect(self.import_from_csv)
-        btn_import_csv.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_I))
-        btn_import_csv.setToolTip(f"Import from CSV ({'Cmd' if IS_MACOS else 'Ctrl'}+I)")
-        
-        btn_import_ldif = QtWidgets.QPushButton("Import LDIF")
-        btn_import_ldif.clicked.connect(self.import_from_ldif)
-        btn_import_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_I))
-        btn_import_ldif.setToolTip(f"Import from LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+I)")
-        
-        btn_export_csv = QtWidgets.QPushButton("Export CSV")
-        btn_export_csv.clicked.connect(self.export_to_csv)
-        btn_export_csv.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_E))
-        btn_export_csv.setToolTip(f"Export to CSV ({'Cmd' if IS_MACOS else 'Ctrl'}+E)")
-        
-        btn_export_ldif = QtWidgets.QPushButton("Export LDIF")
-        btn_export_ldif.clicked.connect(self.export_to_ldif)
-        btn_export_ldif.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_E))
-        btn_export_ldif.setToolTip(f"Export to LDIF ({'Cmd' if IS_MACOS else 'Ctrl'}+Shift+E)")
-        
-        # Database import/export buttons
-        btn_import_db = QtWidgets.QPushButton("Import DB")
-        btn_import_db.clicked.connect(self.import_from_database)
-        btn_import_db.setToolTip("Import users from a database table")
-        btn_import_db.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_I))
-        btn_export_db = QtWidgets.QPushButton("Export DB")
-        btn_export_db.clicked.connect(self.export_to_database)
-        btn_export_db.setToolTip("Export users to a database table")
-        btn_export_db.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_E))
-        
-        toolbar.addWidget(btn_import_csv); toolbar.addWidget(btn_import_ldif)
-        toolbar.addWidget(btn_import_db)
-        toolbar.addWidget(btn_export_csv); toolbar.addWidget(btn_export_ldif)
-        toolbar.addWidget(btn_export_db)
-        btn_columns = QtWidgets.QPushButton("Columns")
-        btn_columns.clicked.connect(self.select_columns)
-        btn_columns.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_K))
-        btn_columns.setToolTip(f"Select columns ({'Cmd' if IS_MACOS else 'Ctrl'}+K)")
-        
-        toolbar.addWidget(btn_columns)
-        btn_save_layout = QtWidgets.QPushButton("Save Layout")
-        btn_save_layout.clicked.connect(self.save_columns_to_config)
-        btn_save_layout.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_S))
-        btn_save_layout.setToolTip(f"Save column layout ({'Cmd' if IS_MACOS else 'Ctrl'}+S)")
-        
-        toolbar.addWidget(btn_save_layout)
+
+        toolbar.addWidget(self.search_bar)
+
+        self.command_combo = QtWidgets.QComboBox()
+        self.command_combo.addItems([
+            "Refresh Users",
+            "Delete Selected",
+            "Select Columns",
+            "Save Layout",
+            "Manage DB Connections",
+        ])
+        self.command_combo.setToolTip("Select a command for the user table")
+        self.command_execute_btn = QtWidgets.QPushButton("Execute")
+        self.command_execute_btn.clicked.connect(self.execute_user_command)
+        toolbar.addWidget(self.command_combo)
+        toolbar.addWidget(self.command_execute_btn)
+
+        self.transfer_combo = QtWidgets.QComboBox()
+        self.transfer_combo.addItems([
+            "Import",
+            "Export",
+        ])
+        self.transfer_combo.setToolTip("Select import/export action")
+        self.transfer_execute_btn = QtWidgets.QPushButton("Execute")
+        self.transfer_execute_btn.clicked.connect(self.execute_transfer_action)
+        toolbar.addWidget(self.transfer_combo)
+        toolbar.addWidget(self.transfer_execute_btn)
+
+        # Keep keyboard shortcuts for commonly-used actions.
+        self.shortcut_refresh = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_R), self)
+        self.shortcut_refresh.activated.connect(self.refresh_users)
+        self.shortcut_import_csv = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_I), self)
+        self.shortcut_import_csv.activated.connect(self.import_from_csv)
+        self.shortcut_import_ldif = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_I), self)
+        self.shortcut_import_ldif.activated.connect(self.import_from_ldif)
+        self.shortcut_export_csv = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_E), self)
+        self.shortcut_export_csv.activated.connect(self.export_to_csv)
+        self.shortcut_export_ldif = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_E), self)
+        self.shortcut_export_ldif.activated.connect(self.export_to_ldif)
+        self.shortcut_import_db = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_I), self)
+        self.shortcut_import_db.activated.connect(self.import_from_database)
+        self.shortcut_export_db = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.Key.Key_E), self)
+        self.shortcut_export_db.activated.connect(self.export_to_database)
+        self.shortcut_columns = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_K), self)
+        self.shortcut_columns.activated.connect(self.select_columns)
+        self.shortcut_save_layout = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_S), self)
+        self.shortcut_save_layout.activated.connect(self.save_columns_to_config)
+        if IS_MACOS:
+            self.shortcut_delete_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self)
+        else:
+            self.shortcut_delete_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self)
+        self.shortcut_delete_users.activated.connect(self.delete_selected_users)
         
         self.u_table = QtWidgets.QTableWidget(0, 0)
         self.u_table.setHorizontalHeaderLabels([])
@@ -537,6 +536,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label = QtWidgets.QLabel("Ready")
         self.api_calls_label = QtWidgets.QLabel("")
         self.profile_name_label = QtWidgets.QLabel("")
+        self.last_source_label = QtWidgets.QLabel("Last source: none")
         user_lay.addWidget(self.status_label)
         user_lay.addWidget(self.api_calls_label)
         sb = QtWidgets.QStatusBar()
@@ -545,6 +545,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.statusBar().showMessage(self.status_label.text())
             self.statusBar().addPermanentWidget(self.profile_name_label)
+            self.statusBar().addPermanentWidget(self.last_source_label)
             self.statusBar().addPermanentWidget(self.api_calls_label)
         except Exception:
             pass
@@ -575,6 +576,124 @@ class MainWindow(QtWidgets.QMainWindow):
             options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
         # Windows uses native by default, which is fine
         return options
+
+    def execute_user_command(self):
+        """Execute the selected command from the main user-command pulldown."""
+        cmd = self.command_combo.currentText()
+        handlers = {
+            "Refresh Users": self.refresh_users,
+            "Delete Selected": self.delete_selected_users,
+            "Select Columns": self.select_columns,
+            "Save Layout": self.save_columns_to_config,
+            "Manage DB Connections": self.manage_db_connections,
+        }
+        fn = handlers.get(cmd)
+        if fn:
+            fn()
+
+    def execute_config_action(self):
+        """Execute the selected action from the configuration pulldown."""
+        action = self.config_action_combo.currentText()
+        handlers = {
+            "Test Credentials": self.test_credentials,
+            "New Connection": self.new_connection,
+            "Save Profile": self.save_current_profile,
+            "Connect": self.connect_only,
+            "Delete Profile": self.delete_current_profile,
+            "View Connection Log": self.view_connection_log,
+            "Manage DB Connections": self.manage_db_connections,
+        }
+        fn = handlers.get(action)
+        if fn:
+            fn()
+
+    def open_pingone_console(self):
+        """Open the PingOne admin console for the active environment."""
+        env = (self.env_id.text() or "").strip()
+        if not env:
+            QtWidgets.QMessageBox.information(self, "PingOne Console", "Enter an Environment ID first.")
+            return
+        encoded_env = QtCore.QUrl.toPercentEncoding(env).data().decode()
+        primary_url = f"https://console.pingone.com/?env={encoded_env}"
+        fallback_url = "https://console.pingone.com/"
+        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(primary_url)):
+            if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(fallback_url)):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "PingOne Console",
+                    f"Unable to open browser URL:\n{primary_url}\n\nFallback also failed:\n{fallback_url}"
+                )
+
+    def update_pingone_console_env_label(self, value=""):
+        """Display the full URL used by the Open PingOne Console button."""
+        env = (value or "").strip()
+        encoded_env = QtCore.QUrl.toPercentEncoding(env).data().decode() if env else ""
+        self.open_pingone_console_env_label.setText(f"https://console.pingone.com/?env={encoded_env}")
+
+    def execute_transfer_action(self):
+        """Execute the selected import/export action from the transfer pulldown."""
+        action = self.transfer_combo.currentText()
+        
+        if action == "Import":
+            self._launch_import_wizard()
+        elif action == "Export":
+            # Show export options dialog
+            self._show_export_menu()
+
+    def _launch_import_wizard(self):
+        """Launch wizard-style import dialog with radio buttons for source selection."""
+        from ui.dialogs import ImportWizardDialog
+        
+        cfg = self._read_config()
+        dbs = cfg.get('db_connections', {})
+        
+        dlg = ImportWizardDialog(self, db_connections=dbs)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        
+        result = dlg.get_result()
+        source_type = result.get('source_type')
+        
+        try:
+            if source_type == 'csv':
+                self.import_from_csv()
+            elif source_type == 'ldif':
+                self.import_from_ldif()
+            elif source_type == 'db':
+                self.import_from_database_wizard(
+                    connection_name=result.get('connection_name'),
+                    query_mode=result.get('query_mode', 'table')
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
+
+    def _show_export_menu(self):
+        """Show export options dialog for CSV, LDIF, or Database."""
+        options, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Export",
+            "Select export format:",
+            ["CSV", "LDIF", "Database"],
+            editable=False
+        )
+        if not ok:
+            return
+        
+        if options == "CSV":
+            self.export_to_csv()
+        elif options == "LDIF":
+            self.export_to_ldif()
+        elif options == "Database":
+            self.export_to_database()
+
+    def _set_last_data_source(self, source: str):
+        """Update status bar with the most recent DB connection or input file source."""
+        if not source:
+            return
+        try:
+            self.last_source_label.setText(f"Last source: {source}")
+        except Exception:
+            pass
 
     # --- Profile Methods ---
     def _read_config(self):
@@ -997,10 +1116,33 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not name:
                 return
             conn = dbs[name]
-            default_tbl = conn.get('table', '')
-            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:", text=default_tbl)
-            if not ok or not table:
+
+            source_mode, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Import Source",
+                "Import from:",
+                ["Table", "Custom Query"],
+                editable=False,
+            )
+            if not ok or not source_mode:
                 return
+
+            query_text = None
+            table = None
+            if source_mode == "Custom Query":
+                query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+                    self,
+                    "Custom Query",
+                    "Enter SQL query (SELECT):",
+                    "SELECT * FROM your_table"
+                )
+                if not ok or not query_text or not query_text.strip():
+                    return
+            else:
+                default_tbl = conn.get('table', '')
+                table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:", text=default_tbl)
+                if not ok or not table:
+                    return
             # test connection
             try:
                 from api import db_utils
@@ -1018,8 +1160,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             # fetch columns and sample row
             try:
-                cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
-                sample = db_utils.get_table_sample(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
+                if source_mode == "Custom Query":
+                    cols = db_utils.get_query_columns(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], query_text, conn.get('driver')
+                    )
+                    sample = db_utils.get_query_sample(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], query_text, conn.get('driver')
+                    )
+                else:
+                    cols = db_utils.get_table_columns(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, conn.get('driver')
+                    )
+                    sample = db_utils.get_table_sample(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, conn.get('driver')
+                    )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
                 return
@@ -1032,10 +1190,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
                 # retrieve rows from the selected table
                 try:
-                    rows = db_utils.get_table_rows(
-                        conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver')
-                    )
+                    if source_mode == "Custom Query":
+                        rows = db_utils.get_query_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver')
+                        )
+                        self._set_last_data_source(f"DB {name}: custom query")
+                    else:
+                        rows = db_utils.get_table_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver')
+                        )
+                        self._set_last_data_source(f"DB {name}: {table}")
                 except Exception as e:
                     QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table rows: {e}")
                     return
@@ -1058,6 +1224,161 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import DB", str(e))
 
+
+    def import_from_database_wizard(self, connection_name: str, query_mode: str = 'table'):
+        """Import from database with parameters provided by wizard dialog."""
+        try:
+            cfg = self._read_config()
+            dbs = cfg.get('db_connections', {})
+            
+            if not connection_name or connection_name not in dbs:
+                QtWidgets.QMessageBox.critical(self, "Import DB", "Connection not found.")
+                return
+            
+            conn = dbs[connection_name]
+            
+            # Prompt for table name or custom query
+            if query_mode == 'custom':
+                query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+                    self,
+                    "Custom Query",
+                    "Enter SQL query (SELECT):",
+                    "SELECT * FROM your_table"
+                )
+                if not ok or not query_text or not query_text.strip():
+                    return
+                table = None
+            else:
+                default_tbl = conn.get('table', '')
+                table, ok = QtWidgets.QInputDialog.getText(
+                    self, "Table Name", "Database table to import from:", text=default_tbl
+                )
+                if not ok or not table:
+                    return
+                query_text = None
+            
+            # Test connection and fetch data
+            try:
+                from api import db_utils
+            except ModuleNotFoundError:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Import DB",
+                    "SQLAlchemy is not installed. Please run `pip install -r requirements.txt`."
+                )
+                return
+            
+            ok, _ = db_utils.test_connection(
+                conn['type'], conn['host'], conn['port'], conn['database'],
+                conn['user'], conn['password'], conn.get('driver')
+            )
+            if not ok:
+                QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
+                return
+            
+            # Fetch columns and convert any dotted names
+            try:
+                if query_text:
+                    cols = db_utils.get_query_columns(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], query_text, conn.get('driver')
+                    )
+                    sample = db_utils.get_query_sample(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], query_text, conn.get('driver')
+                    )
+                else:
+                    cols = db_utils.get_table_columns(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, conn.get('driver')
+                    )
+                    sample = db_utils.get_table_sample(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, conn.get('driver')
+                    )
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
+                return
+            
+            # Convert any dotted column names to underscore equivalents
+            converted_cols = [self._convert_dotted_to_underscore(col) for col in cols]
+            # Also convert sample row keys
+            if sample:
+                converted_sample = {self._convert_dotted_to_underscore(k): v for k, v in sample.items()}
+            else:
+                converted_sample = {}
+            
+            # Check if any columns were actually converted and show confirmation
+            adjustments = [(orig, converted) for orig, converted in zip(cols, converted_cols) if orig != converted]
+            if adjustments:
+                msg = "Adjusted column names for SQL compatibility:\n\n"
+                for orig, converted in adjustments:
+                    msg += f"  {orig} → {converted}\n"
+                msg += "\nProceed with import using the _ values?"
+                
+                reply = QtWidgets.QMessageBox.question(
+                    self,
+                    "Column Name Adjustments",
+                    msg,
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.Yes
+                )
+                if reply != QtWidgets.QMessageBox.Yes:
+                    return
+            
+            ping_attrs = self._get_pingone_attributes()
+            from ui.dialogs import DatabaseMappingDialog
+            dlg = DatabaseMappingDialog(converted_cols, ping_attrs, direction='import', sample_row=converted_sample, parent=self)
+            
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                mapping = dlg.get_mapping()
+                if not mapping:
+                    QtWidgets.QMessageBox.information(self, "Import DB", "No columns were mapped; import cancelled.")
+                    return
+                
+                # Retrieve rows and convert keys
+                try:
+                    if query_text:
+                        rows = db_utils.get_query_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver')
+                        )
+                        self._set_last_data_source(f"DB {connection_name}: custom query")
+                    else:
+                        rows = db_utils.get_table_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver')
+                        )
+                        self._set_last_data_source(f"DB {connection_name}: {table}")
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table rows: {e}")
+                    return
+                
+                if not rows:
+                    QtWidgets.QMessageBox.information(self, "Import DB", "No rows found in table.")
+                    return
+                
+                # Convert row keys to underscore versions
+                converted_rows = []
+                for row in rows:
+                    converted_row = {self._convert_dotted_to_underscore(k): v for k, v in row.items()}
+                    converted_rows.append(converted_row)
+                
+                # Prepare client and import
+                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+                pops = {}
+                try:
+                    token = asyncio.run(client.get_token())
+                    if token:
+                        pops = asyncio.run(client.get_populations())
+                except Exception:
+                    token = None
+                
+                users = self._convert_rows_to_users(converted_rows, mapping, client, pops)
+                self._perform_import_sequence(users, client, pops)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
+
     def export_to_database(self):
         """Initiate export flow to a database table."""
         try:
@@ -1074,6 +1395,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok or not name:
                 return
             conn = dbs[name]
+            self._set_last_data_source(f"DB {name}")
             default_tbl = conn.get('table', '')
             table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to export to (will be created if it does not exist):", text=default_tbl)
             if not ok or not table:
@@ -1099,13 +1421,84 @@ class MainWindow(QtWidgets.QMainWindow):
                 cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
             except Exception:
                 cols = []
+
+            # Offer one-click migration for legacy dotted column names.
+            dotted_cols = [c for c in cols if '.' in str(c)]
+            if dotted_cols:
+                rename_map = self._build_db_column_rename_map(cols)
+                if rename_map:
+                    details = "\n".join(f"{old} -> {new}" for old, new in rename_map.items())
+                    answer = QtWidgets.QMessageBox.question(
+                        self,
+                        "Migrate Legacy Columns",
+                        "This table contains legacy dotted column names.\n\n"
+                        "Rename them to underscored names now for better compatibility?\n\n"
+                        + details,
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                        QtWidgets.QMessageBox.Yes,
+                    )
+                    if answer == QtWidgets.QMessageBox.Yes:
+                        try:
+                            db_utils.rename_table_columns(
+                                conn['type'], conn['host'], conn['port'], conn['database'],
+                                conn['user'], conn['password'], table, rename_map, conn.get('driver')
+                            )
+                            cols = db_utils.get_table_columns(
+                                conn['type'], conn['host'], conn['port'], conn['database'],
+                                conn['user'], conn['password'], table, conn.get('driver')
+                            )
+                            QtWidgets.QMessageBox.information(self, "Migrate Legacy Columns", "Column rename migration completed.")
+                        except NotImplementedError as e:
+                            QtWidgets.QMessageBox.information(self, "Migrate Legacy Columns", str(e))
+                        except Exception as e:
+                            QtWidgets.QMessageBox.warning(self, "Migrate Legacy Columns", f"Migration failed: {e}")
+
             ping_attrs = self._get_pingone_attributes()
-            dlg = DatabaseMappingDialog(cols or ping_attrs, ping_attrs, direction='export', parent=self)
+            sample_p1 = {}
+            try:
+                selected = self.u_table.selectionModel().selectedRows()
+                sample_user = None
+                if selected:
+                    id_col = self.columns.index('id') if 'id' in self.columns else -1
+                    if id_col != -1:
+                        sample_id = self.u_table.item(selected[0].row(), id_col).text()
+                        sample_user = next((u for u in self.users_cache if u.get('id') == sample_id), None)
+                if sample_user is None and self.users_cache:
+                    sample_user = self.users_cache[0]
+                if sample_user:
+                    sample_p1 = self._flatten_user(sample_user)
+            except Exception:
+                sample_p1 = {}
+            dlg = DatabaseMappingDialog(cols or ping_attrs, ping_attrs, direction='export', sample_row=sample_p1, parent=self)
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 mapping = dlg.get_mapping()
                 if not mapping:
                     QtWidgets.QMessageBox.information(self, "Export DB", "No attributes were mapped; export cancelled.")
                     return
+                effective_mapping = dict(mapping)
+                renamed_columns = {}
+                # When creating a new table, normalize invalid SQL identifiers.
+                if not cols:
+                    effective_mapping = {}
+                    used_names = set()
+                    for ping_attr, target_col in mapping.items():
+                        base_name = self._sanitize_db_column_name(target_col)
+                        candidate = base_name
+                        suffix = 2
+                        while candidate in used_names:
+                            candidate = f"{base_name}_{suffix}"
+                            suffix += 1
+                        used_names.add(candidate)
+                        effective_mapping[ping_attr] = candidate
+                        if candidate != target_col:
+                            renamed_columns[target_col] = candidate
+                if renamed_columns:
+                    details = "\n".join(f"{old} -> {new}" for old, new in renamed_columns.items())
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Export DB",
+                        "Adjusted column names for SQL compatibility:\n\n" + details,
+                    )
                 # compute list of users to export
                 if not self.users_cache:
                     QtWidgets.QMessageBox.information(self, "Export DB", "No users to export.")
@@ -1125,7 +1518,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 for u in export_users:
                     flat = self._flatten_user(u)
                     row = {}
-                    for ping_attr, col in mapping.items():
+                    for ping_attr, col in effective_mapping.items():
                         val = flat.get(ping_attr)
                         if isinstance(val, (dict, list)):
                             try:
@@ -1138,7 +1531,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     db_utils.create_table_if_not_exists(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, list(mapping.values()), conn.get('driver')
+                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver')
                     )
                     db_utils.insert_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
@@ -1151,13 +1544,36 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Export DB", str(e))
 
     def _get_pingone_attributes(self) -> list:
-        """Return a list of PingOne attribute names for mapping dialogs."""
-        # for now, return a hardcoded common set; could be extended to
-        # query the API schema or derive from cached users
-        return [
+        """Return schema-informed PingOne attribute names for mapping dialogs."""
+        attrs = set()
+
+        def _walk_schema(node, prefix=''):
+            if not isinstance(node, dict):
+                return
+            props = node.get('properties')
+            if isinstance(props, dict):
+                for key, child in props.items():
+                    full = f"{prefix}.{key}" if prefix else key
+                    attrs.add(full)
+                    _walk_schema(child, full)
+
+        try:
+            schema_path = Path('user_schema.json')
+            if schema_path.exists():
+                with open(schema_path, 'r', encoding='utf-8') as f:
+                    schema = json.load(f)
+                _walk_schema(schema)
+        except Exception:
+            pass
+
+        extras = {
             'username', 'email', 'name.given', 'name.family',
-            'population.id', 'population.name', 'id'
-        ]
+            'population.id', 'population.name',
+            'phoneNumbers.mobile', 'phoneNumbers.work', 'phoneNumbers.home',
+            'title', 'organization', 'enabled', 'id',
+        }
+        attrs.update(extras)
+        return sorted(attrs)
 
     def connect_only(self):
         """Attempt to obtain a token using the UI credentials and log success/failure."""
@@ -1764,8 +2180,9 @@ class MainWindow(QtWidgets.QMainWindow):
         "bad client ID/secret" (network errors, mis‑typed environment ID, etc.);
         the original implementation swallowed the exception message and always
         displayed the generic
-        "Auth Failed. Check credentials." dialog.  That's confusing during
-        debugging, so we now append the underlying error text when available.
+        "Auth Failed. Check credentials." dialog. That's confusing during
+        debugging, so we now offer the underlying error text in a separate
+        detail window when available.
         """
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
         err = None
@@ -1786,12 +2203,23 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         else:
-            msg = "Auth Failed. Check credentials."
+            if not err:
+                err = client.last_error
+            msg_box = QtWidgets.QMessageBox(self)
+            msg_box.setIcon(QtWidgets.QMessageBox.Critical)
+            msg_box.setWindowTitle("Test Credentials")
+            msg_box.setText("Auth Failed. Check credentials.")
             if err:
-                # include just the first line of the error to avoid huge dialogs
-                first_line = err.splitlines()[0]
-                msg += f"\n\nDetails: {first_line}"
-            QtWidgets.QMessageBox.critical(self, "Test Credentials", msg)
+                msg_box.setInformativeText("Would you like to view the detailed error message?")
+                msg_box.setStandardButtons(
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                )
+                msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+            else:
+                msg_box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
+            result = msg_box.exec()
+            if err and result == QtWidgets.QMessageBox.StandardButton.Yes:
+                self.show_detail_message_window("Credential Test Details", err)
             try:
                 api_client.credential_logger.error(f"Test credentials failed: env={client.env_id}, client_id={client.client_id} - {err}")
             except Exception:
@@ -1801,6 +2229,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("Credentials invalid")
             except Exception:
                 pass
+
+    def show_detail_message_window(self, title: str, message: str):
+        """Show a read-only detail window for longer error messages."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(760, 420)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+        text = QtWidgets.QTextEdit(dlg)
+        text.setReadOnly(True)
+        text.setPlainText(message or "")
+        layout.addWidget(text)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, parent=dlg)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec()
 
     def new_connection(self):
         """Clear credential fields and prepare to save a profile once entry is complete."""
@@ -1812,12 +2258,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self._new_conn_mode = True
 
     def _new_conn_field_edited(self):
-        # previously this method prompted to save/test once all three credential
-        # fields were populated. that behaviour has been explicitly removed
-        # per user's latest request; the method now simply resets the mode flag
-        # so that accidental future edits don't re-trigger logic.
-        if getattr(self, '_new_conn_mode', False):
-            self._new_conn_mode = False
+        """Called on textChanged for any credential field while in new-connection mode.
+
+        Starts a short debounce timer so the save dialog appears automatically
+        once all three fields are non-empty, regardless of which field was
+        edited last or whether focus has moved.
+        """
+        if not getattr(self, '_new_conn_mode', False):
+            return
+        if not (self.env_id.text().strip() and self.cl_id.text().strip() and self.cl_sec.text().strip()):
+            # Not all fields filled yet; cancel any pending prompt.
+            if hasattr(self, '_new_conn_timer'):
+                self._new_conn_timer.stop()
+            return
+        # All three are filled — (re)start debounce timer.
+        if not hasattr(self, '_new_conn_timer'):
+            self._new_conn_timer = QtCore.QTimer(self)
+            self._new_conn_timer.setSingleShot(True)
+            self._new_conn_timer.timeout.connect(self._prompt_save_new_profile)
+        self._new_conn_timer.start(600)
+
+    def _prompt_save_new_profile(self):
+        """Show the save-profile dialog after the debounce period has elapsed."""
+        if not getattr(self, '_new_conn_mode', False):
+            return
+        if not (self.env_id.text().strip() and self.cl_id.text().strip() and self.cl_sec.text().strip()):
+            return
+        self._new_conn_mode = False
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Save New Profile", "Profile name:"
+        )
+        if ok and name:
+            p = self._read_config()
+            p[name] = {
+                "env_id": self.env_id.text().strip(),
+                "cl_id": self.cl_id.text().strip(),
+                "columns": self.selected_columns,
+                "column_widths": self.column_widths,
+                "status_show_api_calls": bool(
+                    getattr(self, "show_api_calls_cb", QtWidgets.QCheckBox()).isChecked()
+                ),
+            }
+            meta = p.get("__meta__", {})
+            meta["last_working_profile"] = name
+            p["__meta__"] = meta
+            with open(self.config_file, "w") as f:
+                json.dump(p, f, indent=4)
+            try:
+                keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Keyring Error",
+                    f"Failed to save client secret to keyring: {e}\n\nCredentials will not be stored persistently.",
+                )
+            self.load_profiles_from_disk(skip_connect=True)
+            idx = self.profile_list.findText(name)
+            if idx >= 0:
+                self.profile_list.setCurrentIndex(idx)
+            # Reset action combo back to "Test Credentials"
+            self.config_action_combo.setCurrentIndex(0)
 
     def toggle_server_dryrun(self):
         enabled = self.use_server_dryrun_action.isChecked()
@@ -1854,7 +2354,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if app:
             self.theme_manager.set_theme(theme, app)
             # Update delete button style to match new theme
-            if hasattr(self, 'btn_del'):
+            if hasattr(self, 'btn_del') and self.btn_del is not None:
                 self.btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
             self.save_app_settings()
             msg = "Dark mode enabled" if enabled else "Light mode enabled"
@@ -1875,7 +2375,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.theme_manager.set_theme(theme, app)
                 self.dark_mode_action.setChecked(theme == ThemeManager.DARK)
                 # Update delete button style to match loaded theme
-                if hasattr(self, 'btn_del'):
+                if hasattr(self, 'btn_del') and self.btn_del is not None:
                     self.btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
         except Exception:
             pass
@@ -1924,6 +2424,52 @@ class MainWindow(QtWidgets.QMainWindow):
             row = [flat.get(col, '') for col in columns]
             yield row
 
+    def _sanitize_db_column_name(self, name: str) -> str:
+        """Return a SQL-friendly column name for new table creation."""
+        raw = str(name or '').strip()
+        if not raw:
+            return 'col'
+        safe = ''.join(ch if (ch.isalnum() or ch == '_') else '_' for ch in raw)
+        safe = safe.strip('_') or 'col'
+        if safe[0].isdigit():
+            safe = f"col_{safe}"
+        return safe
+
+    def _convert_dotted_to_underscore(self, name: str) -> str:
+        """Convert dotted.attribute names to underscore_attribute for SQL compatibility."""
+        mapping = {
+            'address.city': 'address_city',
+            'address.street': 'address_street',
+            'address.streetAddress': 'address_street',
+            'address.locality': 'address_city',
+            'name.family': 'name_family',
+            'name.given': 'name_given',
+            'phoneNumbers.home': 'phoneNumbers_home',
+            'phoneNumbers.mobile': 'phoneNumbers_mobile',
+            'phoneNumbers.work': 'phoneNumbers_work',
+            'population.id': 'population_id',
+            'population.name': 'population_name',
+        }
+        return mapping.get(name, name.replace('.', '_') if '.' in name else name)
+
+    def _build_db_column_rename_map(self, existing_columns: list) -> dict:
+        """Build a non-conflicting rename map for legacy dotted DB columns."""
+        rename_map = {}
+        used = set(existing_columns or [])
+        for old_col in existing_columns or []:
+            if '.' not in str(old_col):
+                continue
+            base = self._sanitize_db_column_name(old_col)
+            candidate = base
+            suffix = 2
+            while candidate in used and candidate != old_col:
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            if candidate != old_col:
+                rename_map[old_col] = candidate
+                used.add(candidate)
+        return rename_map
+
     # --- shared import helpers ------------------------------------------------
     def _convert_rows_to_users(self, rows: list, mapping: dict,
                                client, pops: dict = None,
@@ -1938,22 +2484,64 @@ class MainWindow(QtWidgets.QMainWindow):
         users = []
         for row in rows:
             flat = {}
-            for k, v in row.items():
+            phone_by_type = {}
+
+            for src_key, target in mapping.items():
+                source_name = src_key
+                source_phone_type = None
+                if isinstance(src_key, str) and '::' in src_key:
+                    source_name, source_phone_type = src_key.split('::', 1)
+
+                v = row.get(source_name)
                 if v is None or v == '':
                     continue
-                target = mapping.get(k, k)
+
+                # Extract typed phone value when mapping comes from expanded phone rows.
+                if source_phone_type:
+                    extracted = None
+                    source_val = v
+                    if isinstance(source_val, str):
+                        s = source_val.strip()
+                        if s.startswith('[') or s.startswith('{'):
+                            try:
+                                source_val = json.loads(s)
+                            except Exception:
+                                source_val = v
+                    if isinstance(source_val, list):
+                        for item in source_val:
+                            if isinstance(item, dict) and str(item.get('type', '')).lower() == source_phone_type.lower():
+                                extracted = item.get('number')
+                                break
+                    elif isinstance(source_val, dict):
+                        # support dict payloads keyed by phone type
+                        extracted = source_val.get(source_phone_type) or source_val.get('number')
+                    if extracted is not None:
+                        v = extracted
+
                 # Skip any mapping that resolves to an empty/blank target
                 if not target or (isinstance(target, str) and not target.strip()):
                     continue
+
                 # Treat any 'uid' mapping as username (avoid importing as system id)
                 try:
                     if isinstance(target, str) and target.lower() == 'uid':
                         target = 'username'
                 except Exception:
                     pass
+
                 # Show ID columns in the mapping UI but do NOT import ID values.
                 if target == 'id':
                     continue
+
+                # Phone targets are explicitly type-aware in mapping dialogs.
+                if isinstance(target, str) and target.startswith('phoneNumbers.'):
+                    ptype = target.split('.', 1)[1].strip().lower()
+                    if ptype in ('mobile', 'work', 'home'):
+                        val = str(v).strip()
+                        if val:
+                            phone_by_type[ptype] = val
+                    continue
+
                 # convert enabled values to booleans when mapped
                 if target == 'enabled':
                     try:
@@ -1968,6 +2556,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         flat[target] = v
                 else:
                     flat[target] = v
+
+            if phone_by_type:
+                ordered = []
+                for t in ('mobile', 'work', 'home'):
+                    if t in phone_by_type:
+                        ordered.append({'type': t, 'number': phone_by_type[t]})
+                if ordered:
+                    flat['phoneNumbers'] = ordered
             user = self._unflatten_user(flat)
             # normalize username whitespace
             try:
@@ -2267,16 +2863,59 @@ class MainWindow(QtWidgets.QMainWindow):
             worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Error", m)))
             self.threadpool.start(worker)
 
+    def _show_text_help_dialog(self, title: str, content: str):
+        """Show help text in a resizable dialog that scales with screen size."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        txt = QtWidgets.QTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(content)
+        lay.addWidget(txt)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+
+        try:
+            screen = dlg.screen() or QtWidgets.QApplication.primaryScreen()
+            geom = screen.availableGeometry()
+            w = min(1100, int(geom.width() * 0.78))
+            h = min(820, int(geom.height() * 0.78))
+            dlg.resize(max(760, w), max(460, h))
+        except Exception:
+            dlg.resize(900, 600)
+
+        dlg.exec()
+
     def show_config_help(self):
-        QtWidgets.QMessageBox.information(self, "Configuration Help", HELP_CONFIG)
+        self._show_text_help_dialog("Configuration Help", HELP_CONFIG)
 
     def show_user_help(self):
-        QtWidgets.QMessageBox.information(self, "User Management Help", HELP_USER)
+        self._show_text_help_dialog("User Management Help", HELP_USER)
+
+    def show_filter_help(self):
+        filter_text = (
+            "Filter Help:\n\n"
+            "The filter box on the User Management toolbar performs a case-insensitive contains match across all visible cells in each row.\n\n"
+            "How it behaves:\n"
+            "- As you type, rows update immediately.\n"
+            "- A row stays visible if any column contains the typed text.\n"
+            "- Clearing the filter restores all rows.\n"
+            "- Shortcut: Cmd/Ctrl+L focuses the filter field.\n\n"
+            "Example queries:\n"
+            "- To narrow to users with last name Doe, type: Doe\n"
+            "- To narrow toward first name Jane and last name Doe, type: Jane Doe\n\n"
+            "Note:\n"
+            "- The filter is a simple contains search, not a field-specific parser.\n"
+            "- Queries such as 'last name = Doe' or 'first name = Jane, last name = Doe' are not interpreted literally; instead, type the values you want to match."
+        )
+        self._show_text_help_dialog("Filter Help", filter_text)
 
     def show_full_help(self):
         """Show comprehensive help covering all UI options and configuration."""
         combined = f"{HELP_CONFIG}\n\n{HELP_USER}"
-        QtWidgets.QMessageBox.information(self, "Full Help & Options", combined)
+        self._show_text_help_dialog("Full Help & Options", combined)
 
     def show_tabs_help(self):
         """Show a focused help dialog describing the Connection and User tabs."""
@@ -2296,7 +2935,7 @@ User Management Tab:
 
 See Configuration Help and User Management Help from the Help menu for detailed information.
 """
-        QtWidgets.QMessageBox.information(self, "Tabs Overview", tabs_text)
+        self._show_text_help_dialog("Tabs Overview", tabs_text)
 
     def show_app_help(self):
         """Show the project's README.md as application help in a resizable dialog."""
@@ -2627,6 +3266,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         )
         if not path:
             return
+        self._set_last_data_source(f"File {path}")
         try:
             import csv as _csv
             # read all rows first so we can re-use them after showing mapping dialog
@@ -2634,6 +3274,30 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 reader = _csv.DictReader(f)
                 headers = reader.fieldnames or []
                 raw_rows = list(reader)
+
+            # Check if headers have dotted names that need adjustment
+            adjusted_headers = [self._convert_dotted_to_underscore(h) for h in headers]
+            adjustments = [(orig, converted) for orig, converted in zip(headers, adjusted_headers) if orig != converted]
+            
+            if adjustments:
+                msg = "Adjusted column names for SQL compatibility:\n\n"
+                for orig, converted in adjustments:
+                    msg += f"  {orig} → {converted}\n"
+                msg += "\nProceed with import using the _ values?"
+                
+                reply = QtWidgets.QMessageBox.question(
+                    self,
+                    "Column Name Adjustments",
+                    msg,
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.Yes
+                )
+                if reply != QtWidgets.QMessageBox.Yes:
+                    return
+                
+                # Apply adjustments to headers and rows
+                headers = adjusted_headers
+                raw_rows = [{self._convert_dotted_to_underscore(k): v for k, v in row.items()} for row in raw_rows]
 
             # prepare client & populate list for mapping UI
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
@@ -2666,7 +3330,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             map_dialog = AttributeMappingDialog(headers, self, pop_map=pops,
                                                initial_mapping=initial_mapping,
                                                initial_fixed_pop_id=initial_fixed,
-                                               initial_fixed_enabled=initial_enabled)
+                                               initial_fixed_enabled=initial_enabled,
+                                               pingone_attrs=self._get_pingone_attributes(),
+                                               sample_row=(raw_rows[0] if raw_rows else None))
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:
                 return
             mapping, fixed_pop_id, fixed_enabled, remember = map_dialog.get_mapping()
@@ -2701,6 +3367,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         )
         if not path:
             return
+        self._set_last_data_source(f"File {path}")
         try:
             users = []
             with open(path, 'r', encoding='utf-8') as f:
@@ -2709,15 +3376,19 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             # Show attribute mapping dialog using a synthetic header list
             # derived from the first entry's keys (hyphens converted to dots)
             first_flat_keys = []
+            first_sample = {}
             if entries:
                 first = entries[0]
                 for line in first.splitlines():
                     if not line or ':' not in line:
                         continue
                     key = line.split(':', 1)[0].strip()
+                    val = line.split(':', 1)[1].strip()
                     if '-' in key and '.' not in key:
                         key = key.replace('-', '.')
                     first_flat_keys.append(key)
+                    if key.lower() != 'dn' and key not in first_sample:
+                        first_sample[key] = val
             # Create API client early to fetch populations for mapping UI
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             pops = {}
@@ -2741,7 +3412,16 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             except Exception:
                 initial_mapping = None
                 initial_fixed = None
-            map_dialog = AttributeMappingDialog(first_flat_keys, self, pop_map=pops, initial_mapping=initial_mapping, initial_fixed_pop_id=initial_fixed, initial_fixed_enabled=initial_enabled)
+            map_dialog = AttributeMappingDialog(
+                first_flat_keys,
+                self,
+                pop_map=pops,
+                initial_mapping=initial_mapping,
+                initial_fixed_pop_id=initial_fixed,
+                initial_fixed_enabled=initial_enabled,
+                pingone_attrs=self._get_pingone_attributes(),
+                sample_row=first_sample,
+            )
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:
                 return
             mapping, fixed_pop_id, fixed_enabled, remember = map_dialog.get_mapping()
