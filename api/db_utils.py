@@ -174,6 +174,61 @@ def get_table_names(db_type: str, host: str, port: int, database: str,
     return inspector.get_table_names()
 
 
+def get_database_names(db_type: str, host: str, port: int,
+                       user: str, password: str,
+                       driver_path: Optional[str] = None) -> List[str]:
+    """Return a list of accessible database names on the server.
+
+    Connects without selecting a specific database and runs SHOW DATABASES
+    (MySQL/MariaDB) or queries sys.databases (MSSQL).
+
+    Raises PermissionError if the user lacks the required privilege.
+    Raises ValueError or SQLAlchemyError for connection failures.
+    """
+    db_lower = db_type.lower()
+    if 'mssql' in db_lower or 'sqlserver' in db_lower:
+        try:
+            import pymssql  # type: ignore
+            url = f"mssql+pymssql://{user}:{password}@{host}:{port}/master"
+        except ImportError:
+            drv = driver_path or "ODBC Driver 17 for SQL Server"
+            drv_enc = drv.replace(' ', '+')
+            url = f"mssql+pyodbc://{user}:{password}@{host}:{port}/master?driver={drv_enc}"
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            try:
+                result = conn.execute(text(
+                    "SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name"
+                ))
+                return [row[0] for row in result]
+            except SQLAlchemyError as e:
+                err_str = str(e).lower()
+                if "permission" in err_str or "denied" in err_str or "privilege" in err_str:
+                    raise PermissionError(
+                        "Insufficient permissions to list databases. "
+                        "Please enter the database name manually."
+                    ) from e
+                raise
+    else:
+        # MySQL/MariaDB: connect without selecting a database
+        url = f"mysql+pymysql://{user}:{password}@{host}:{port}/"
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+        engine = create_engine(url, connect_args=connect_args)
+        with engine.connect() as conn:
+            try:
+                result = conn.execute(text("SHOW DATABASES"))
+                system_dbs = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+                return [row[0] for row in result if row[0].lower() not in system_dbs]
+            except SQLAlchemyError as e:
+                err_str = str(e).lower()
+                if "access denied" in err_str or "1044" in str(e) or "1045" in str(e):
+                    raise PermissionError(
+                        "Insufficient permissions to list databases. "
+                        "Please enter the database name manually."
+                    ) from e
+                raise
+
+
 def get_table_rows(db_type: str, host: str, port: int, database: str,
                    user: str, password: str, table_name: str,
                    driver_path: Optional[str] = None,

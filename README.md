@@ -2,9 +2,9 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.6 - Alpha)
+PingOne UserManager (v0.70 - Alpha)
 
-⚠️ **Alpha Release**: Version 0.6 is in active development and focuses on database connectivity features. While core user management functionality is stable, the database import/export capabilities are still being refined. Please report issues and provide feedback.
+⚠️ **Alpha Release**: Version 0.70 is in active development and focuses on database connectivity features. While core user management functionality is stable, the database import/export capabilities are still being refined. Please report issues and provide feedback.
 
 PingOne UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
@@ -128,6 +128,14 @@ Importing Users
 - Import CSV: Use the `Import CSV` button in the User Management toolbar to create users from a CSV file. The CSV should include headers matching the exported column names (dot-notation for nested attributes, e.g. `name.given`). List-valued attributes are stored as JSON strings in the CSV and will be parsed during import.
 - Import/Export Database: Define database connections via **File → Manage DB Connections** or the button on the Configuration tab. Supported backends are MSSQL and MariaDB/MySQL; an ODBC/JDBC driver name or path may be required. The connection dialog now provides a dropdown of standard driver names for convenience. Once a connection is configured, the `Import DB` / `Export DB` buttons on the User Management toolbar open a mapping dialog that lets you map table columns to PingOne attributes (or vice versa).
 - Import LDIF: Use the `Import LDIF` button to import simple LDIF files produced by this app. The importer accepts attribute names where dots may have been replaced by hyphens (e.g., `name-given`), and will attempt to convert them back to nested attributes.
+
+Logging Options
+
+- Settings -> Show Log Files opens the log index dialog.
+- Each log viewer includes command buttons for `Set Log Level`, `Reset Log`, `Save Log As`, and `Refresh`.
+- API Capture includes `Set Log Level`, `Reset`, and `Save` controls directly in the capture window.
+- Menu shortcuts for log maintenance remain under Logs: `Clear All Logs` and `Archive Logs...`.
+- Connection logs are plain text and do not support level changes; API and credentials logs do.
 
 Developer Note
 ------------

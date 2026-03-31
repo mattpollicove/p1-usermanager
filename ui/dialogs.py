@@ -309,20 +309,35 @@ class EditUserDialog(QtWidgets.QDialog):
         
         main_layout.addLayout(layout)
         
-        # Show all populated attributes section
+        # Show all populated attributes section in a clean table-like view
         all_attrs = self._get_all_populated_attributes(user_data)
         if all_attrs:
             separator = QtWidgets.QLabel("All User Attributes:")
             separator.setStyleSheet("font-weight: bold; margin-top: 10px;")
             main_layout.addWidget(separator)
-            
-            # Create scrollable text area with all attributes
-            attrs_display = QtWidgets.QTextEdit()
-            attrs_display.setReadOnly(True)
-            attrs_display.setMaximumHeight(120)
-            attrs_text = "\n".join(all_attrs)
-            attrs_display.setPlainText(attrs_text)
-            main_layout.addWidget(attrs_display)
+
+            attrs_table = QtWidgets.QTableWidget(len(all_attrs), 2)
+            attrs_table.setHorizontalHeaderLabels(["Attribute", "Value"])
+            attrs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            attrs_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+            attrs_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+            attrs_table.setAlternatingRowColors(True)
+            attrs_table.verticalHeader().setVisible(False)
+            attrs_table.horizontalHeader().setStretchLastSection(True)
+            attrs_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+            attrs_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+            attrs_table.setWordWrap(False)
+            attrs_table.setMaximumHeight(220)
+
+            for row, (key, value) in enumerate(all_attrs):
+                key_item = QtWidgets.QTableWidgetItem(key)
+                key_item.setFlags(key_item.flags() & ~QtCore.Qt.ItemIsEditable)
+                value_item = QtWidgets.QTableWidgetItem(value)
+                value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemIsEditable)
+                attrs_table.setItem(row, 0, key_item)
+                attrs_table.setItem(row, 1, value_item)
+
+            main_layout.addWidget(attrs_table)
         
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         # default/escape roles for keyboard accessibility
@@ -340,27 +355,26 @@ class EditUserDialog(QtWidgets.QDialog):
         self.pop_map = pop_map
     
     def _get_all_populated_attributes(self, user_data):
-        """Return a formatted list of all populated attributes in user data."""
-        def format_dict(d, prefix="", indent=0):
-            """Recursively format dict/list attributes."""
+        """Return populated attributes as (key, value) rows for display."""
+        def format_dict(d, prefix=""):
             result = []
             for key, value in sorted(d.items()):
                 full_key = f"{prefix}.{key}" if prefix else key
                 if isinstance(value, dict):
-                    if value:  # Only show non-empty dicts
-                        result.extend(format_dict(value, full_key, indent + 2))
+                    if value:
+                        result.extend(format_dict(value, full_key))
                 elif isinstance(value, list):
-                    if value:  # Only show non-empty lists
+                    if value:
                         for i, item in enumerate(value):
                             item_key = f"{full_key}[{i}]"
                             if isinstance(item, dict):
-                                result.extend(format_dict(item, item_key, indent + 2))
-                            else:
-                                result.append(f"{'  ' * (indent + 1)}{item_key}: {item}")
-                elif value is not None and value != "":  # Only show populated values
-                    result.append(f"{'  ' * indent}{full_key}: {value}")
+                                result.extend(format_dict(item, item_key))
+                            elif item is not None and item != "":
+                                result.append((item_key, str(item)))
+                elif value is not None and value != "":
+                    result.append((full_key, str(value)))
             return result
-        
+
         return format_dict(user_data)
     
     def get_data(self):
@@ -887,9 +901,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
         self.port_edit.setPlaceholderText("port number")
         self.port_edit.setToolTip("TCP port for the database service")
-        self.db_edit = QtWidgets.QLineEdit()
-        self.db_edit.setPlaceholderText("database name")
-        self.db_edit.setToolTip("Name of the target database")
+        self.db_combo = QtWidgets.QComboBox()
+        self.db_combo.setEditable(True)
+        self.db_combo.lineEdit().setPlaceholderText("database name")
+        self.db_combo.setToolTip("Name of the target database")
         # add JDBC URL display field before any signals use it
         self.jdbc_edit = QtWidgets.QLineEdit()
         self.jdbc_edit.setReadOnly(True)
@@ -924,7 +939,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         # update JDBC string when host/db/port change
         self.host_edit.textChanged.connect(self._update_jdbc_string)
         self.port_edit.textChanged.connect(self._update_jdbc_string)
-        self.db_edit.textChanged.connect(self._update_jdbc_string)
+        self.db_combo.currentTextChanged.connect(self._update_jdbc_string)
         drv_layout = QtWidgets.QHBoxLayout()
         drv_layout.addWidget(self.driver_combo)
 
@@ -932,13 +947,34 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         form.addRow("Type:", self.type_combo)
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
-        form.addRow("Database:", self.db_edit)
+        db_row = QtWidgets.QHBoxLayout()
+        db_row.addWidget(self.db_combo, 1)
+        self.db_fetch_btn = QtWidgets.QPushButton("Fetch Databases")
+        self.db_fetch_btn.setToolTip("Fetch available databases from the server (requires SHOW DATABASES privilege)")
+        self.db_fetch_btn.clicked.connect(self._populate_databases)
+        db_row.addWidget(self.db_fetch_btn)
+        form.addRow("Database:", db_row)
         # table selector will be populated after a successful connection test
         self.table_combo = QtWidgets.QComboBox()
+        self.table_combo.setEditable(True)
+        self.table_combo.lineEdit().setPlaceholderText("(run Test Connection to populate)")
         self.table_combo.setEnabled(False)
-        form.addRow("Table:", self.table_combo)
+        table_row = QtWidgets.QHBoxLayout()
+        table_row.addWidget(self.table_combo, 1)
+        self.table_refresh_btn = QtWidgets.QPushButton("Refresh Tables")
+        self.table_refresh_btn.setToolTip("Refresh table list from server")
+        self.table_refresh_btn.clicked.connect(self._populate_tables)
+        table_row.addWidget(self.table_refresh_btn)
+        form.addRow("Table:", table_row)
         form.addRow("User:", self.user_edit)
-        form.addRow("Password:", self.pw_edit)
+        pw_row = QtWidgets.QHBoxLayout()
+        pw_row.addWidget(self.pw_edit, 1)
+        self.show_pw_btn = QtWidgets.QPushButton("Show")
+        self.show_pw_btn.setCheckable(True)
+        self.show_pw_btn.setToolTip("Show or hide password")
+        self.show_pw_btn.toggled.connect(self._toggle_password_visibility)
+        pw_row.addWidget(self.show_pw_btn)
+        form.addRow("Password:", pw_row)
         form.addRow("Driver:", drv_layout)
         # show the selected driver name below the driver field
         form.addRow("", self.driver_label)
@@ -993,7 +1029,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.type_combo.setCurrentText(initial.get('type', 'MariaDB/MySQL'))
             self.host_edit.setText(initial.get('host', ''))
             self.port_edit.setText(str(initial.get('port', '')))
-            self.db_edit.setText(initial.get('database', ''))
+            self.db_combo.setCurrentText(initial.get('database', ''))
             self.user_edit.setText(initial.get('user', ''))
             self.pw_edit.setText(initial.get('password', ''))
             self.driver_combo.setCurrentText(initial.get('driver', ''))
@@ -1017,13 +1053,13 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.name_edit.setFocus()
             return
         host = self.host_edit.text().strip()
-        db = self.db_edit.text().strip()
+        db = self.db_combo.currentText().strip()
         if not host or not db:
             QtWidgets.QMessageBox.warning(self, "Missing Details", "Host and database name are required.")
             if not host:
                 self.host_edit.setFocus()
             else:
-                self.db_edit.setFocus()
+                self.db_combo.setFocus()
             return
         # everything seems fine
         self.accept()
@@ -1087,7 +1123,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         typ = self.type_combo.currentText()
         host = self.host_edit.text().strip()
         port = self.port_edit.text().strip() or ("3306" if typ == "MariaDB/MySQL" else "1433")
-        db = self.db_edit.text().strip()
+        db = self.db_combo.currentText().strip()
         url = ""
         if host and db:
             if typ == "MariaDB/MySQL":
@@ -1106,7 +1142,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             return
 
         try:
-            db_name = self.db_edit.text().strip()
+            db_name = self.db_combo.currentText().strip()
             if not db_name:
                 self.status_label.setText("Database name is required to list tables.")
                 return
@@ -1158,7 +1194,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.type_combo.currentText(),
             self.host_edit.text(),
             port,
-            self.db_edit.text(),
+            self.db_combo.currentText(),
             self.user_edit.text(),
             self.pw_edit.text(),
             self.driver_combo.currentText() or None
@@ -1191,7 +1227,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.type_combo.currentText(),
                 self.host_edit.text(),
                 int(self.port_edit.text() or 0),
-                self.db_edit.text(),
+                self.db_combo.currentText(),
                 self.user_edit.text(),
                 self.pw_edit.text(),
                 self.table_combo.currentText(),
@@ -1218,7 +1254,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Invalid Name", "Connection name cannot be empty.")
             self.name_edit.setFocus()
             return
-        if not self.host_edit.text().strip() or not self.db_edit.text().strip():
+        if not self.host_edit.text().strip() or not self.db_combo.currentText().strip():
             QtWidgets.QMessageBox.warning(self, "Missing Details", "Host and database name are required.")
             return
         # Mark that we should use this connection
@@ -1231,7 +1267,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'type': self.type_combo.currentText(),
             'host': self.host_edit.text().strip(),
             'port': int(self.port_edit.text() or 0),
-            'database': self.db_edit.text().strip(),
+            'database': self.db_combo.currentText().strip(),
             'user': self.user_edit.text().strip(),
             'password': self.pw_edit.text(),
             'driver': self.driver_combo.currentText().strip(),
@@ -1242,6 +1278,70 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         if self.table_combo.count() and self.table_combo.currentText():
             data['table'] = self.table_combo.currentText()
         return data
+
+    def _populate_databases(self):
+        """Fetch available databases from the server and populate db_combo.
+
+        Requires the user to have SHOW DATABASES (MySQL) or VIEW ANY DATABASE
+        (MSSQL) privilege.  If the privilege is missing, shows an informational
+        dialog so the user knows to enter the name manually.
+        """
+        try:
+            from api import db_utils
+        except ModuleNotFoundError:
+            return
+
+        host = self.host_edit.text().strip()
+        user = self.user_edit.text().strip()
+        if not host or not user:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing Details",
+                "Enter the host and user name before fetching databases."
+            )
+            return
+
+        port = int(self.port_edit.text() or 0)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            names = db_utils.get_database_names(
+                self.type_combo.currentText(),
+                host,
+                port,
+                user,
+                self.pw_edit.text(),
+                self.driver_combo.currentText() or None,
+            )
+            current = self.db_combo.currentText()
+            self.db_combo.clear()
+            self.db_combo.addItems(names)
+            if current:
+                self.db_combo.setCurrentText(current)
+            msg = f"Found {len(names)} database(s)." if names else "No databases found."
+            self.status_label.setText(msg)
+        except PermissionError as e:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Insufficient Permissions",
+                f"{e}\n\nYou can still type the database name directly in the field."
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Could Not Fetch Databases",
+                f"Failed to retrieve database list:\n\n{e}"
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    def _toggle_password_visibility(self, checked: bool):
+        """Toggle password field between hidden and visible."""
+        if checked:
+            self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
+            self.show_pw_btn.setText("Hide")
+        else:
+            self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+            self.show_pw_btn.setText("Show")
 
 
 class DBConnectionsManager(QtWidgets.QDialog):
@@ -1381,7 +1481,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
     Optionally, ``sample_row`` may provide a dict of a single row for preview
     values (used only in import direction).
     """
-    def __init__(self, table_cols: List[str], pingone_attrs: List[str], direction: str = 'import', sample_row: Optional[dict] = None, parent=None):
+    def __init__(self, table_cols: List[str], pingone_attrs: List[str], direction: str = 'import', sample_row: Optional[dict] = None, initial_mapping: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Database Mapping")
         self.setModal(True)
@@ -1399,6 +1499,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         self.table_cols = list(table_cols or [])
         self.pingone_attrs = list(pingone_attrs or [])
         self.sample_row = sample_row or {}
+        self.initial_mapping = dict(initial_mapping or {})
 
         layout = QtWidgets.QVBoxLayout(self)
         direction_label = QtWidgets.QLabel(
@@ -1430,6 +1531,9 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         # Install key event handling for Enter/Tab navigation
         apply_mapping_table_keys(self.table, mapping_col=2)
 
+        # If a saved mapping exists for this connection, prefill combos.
+        self._apply_initial_mapping()
+
         layout.addWidget(self.table)
 
         row_actions = QtWidgets.QHBoxLayout()
@@ -1443,6 +1547,10 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         row_actions.addWidget(del_row_btn)
         row_actions.addStretch()
         layout.addLayout(row_actions)
+
+        self.remember_cb = QtWidgets.QCheckBox("Save mapping in DB connection settings")
+        self.remember_cb.setChecked(False)
+        layout.addWidget(self.remember_cb)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         ok_btn = btns.button(QtWidgets.QDialogButtonBox.Ok)
@@ -1613,6 +1721,18 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         for row in rows:
             self.table.removeRow(row)
 
+    def _apply_initial_mapping(self):
+        if not self.initial_mapping:
+            return
+        for row in range(self.table.rowCount()):
+            left_item = self.table.item(row, 0)
+            combo = self.table.cellWidget(row, 2)
+            if not left_item or not isinstance(combo, QtWidgets.QComboBox):
+                continue
+            left = left_item.data(QtCore.Qt.UserRole) or left_item.text()
+            if left in self.initial_mapping:
+                combo.setCurrentText(str(self.initial_mapping[left]))
+
     def get_mapping(self) -> dict:
         result = {}
         for row in range(self.table.rowCount()):
@@ -1624,6 +1744,9 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
                 if tgt and tgt != "<None>":
                     result[left] = tgt
         return result
+
+    def remember_mapping(self) -> bool:
+        return bool(self.remember_cb.isChecked())
 
 
 

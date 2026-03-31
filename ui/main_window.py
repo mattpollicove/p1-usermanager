@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime
 import asyncio
 import functools
+import logging
+import httpx
 import zipfile
 import shutil
 import sys
@@ -52,7 +54,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.6"
+APP_VERSION = "0.70"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 
 
@@ -99,6 +101,7 @@ Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
 - Displays connection status and recent operation results.
 - API call logging can be toggled from the Settings menu.
+- Use Settings -> Show Log Files to open log viewers with in-window controls.
 
 Settings Menu:
 - Dark Mode: Toggle between light and dark themes (Cmd+D / Ctrl+D).
@@ -117,6 +120,7 @@ Viewing Users:
 - The table displays users with selected columns (UUID, username, name, etc.).
 - Click "Refresh" to reload users from PingOne.
 - Use "Columns" to select which attributes to display.
+- Use "Hide Links" in the User Management toolbar to hide columns with names or values that begin with `{` or `http`.
 - Column selection and order are saved per-profile.
 - Use the filter box to live-search across all visible columns.
 
@@ -135,6 +139,9 @@ Importing Users:
   • You can assign a fixed population to all imported users
   • Check "Remember mapping for this profile" to save mappings
 - Database import: first define a connection via File → Manage DB Connections or the Configuration tab button, then click "Import DB" on the User Management toolbar and follow the prompts to select a table and map its columns.
+- Imported attributes not currently shown are automatically added to the grid columns after import.
+- For DB imports/exports, you can save custom queries and mapping selections in DB connection settings; saved queries auto-reuse their saved mappings.
+- During import preparation, PingOne attributes are refreshed from live user data so custom attributes appear in mapping choices.
 - Usernames are normalized (whitespace trimmed, case-insensitive comparison).
 - If a username already exists on the server, the import updates that user instead of creating a duplicate.
 - Local JSON Schema validation is performed if jsonschema is installed and user_schema.json exists.
@@ -151,11 +158,13 @@ Deleting Users:
 - A confirmation dialog will appear before deletion.
 - Progress is shown for bulk deletions.
 
-Logs Menu:
-- "Show Log Files" displays connection and API logs in a dialog.
-- "Reset Log" clears an individual log file.
-- "Clear All Logs" empties all log files at once.
-- "Archive Logs" creates a timestamped .zip archive of all logs, with optional rotation (truncate originals after archiving).
+Logging & Log Viewers:
+- Settings -> Show Log Files opens the log index dialog.
+- Each log viewer window provides command buttons: Set Log Level, Reset Log, Save Log As, and Refresh.
+- API Capture window also includes Set Log Level, Reset, and Save controls.
+- Use Logs -> Clear All Logs to truncate all known logs.
+- Use Logs -> Archive Logs to create a timestamped .zip archive (with optional rotation).
+- Connection log is plain-text and does not support log levels; API and credentials logs do.
 """
 
 
@@ -217,6 +226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.json_editing_enabled = False
         self.use_friendly_names = True
         self.pingone_console_url = DEFAULT_PINGONE_CONSOLE_URL
+        self._closing = False
+        self.hide_raw_http_columns = False
         self.column_widths = {}
         self.friendly_names = {
             'username': 'Username',
@@ -305,8 +316,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.enable_credentials_logging_action.setCheckable(True)
         self.enable_credentials_logging_action.setChecked(True)
         self.enable_credentials_logging_action.triggered.connect(self.toggle_credentials_logging)
-        self.credentials_log_level_action = settings_menu.addAction("Credentials Log Level...")
-        self.credentials_log_level_action.triggered.connect(self.set_credentials_log_level)
         settings_menu.addSeparator()
         # API logging toggle (log all API activity)
         self.enable_api_logging_action = settings_menu.addAction("Log All API Activity")
@@ -326,13 +335,6 @@ class MainWindow(QtWidgets.QMainWindow):
         logs_menu = menubar.addMenu("Logs")
         self.logs_show_action = logs_menu.addAction("Show Log Files...")
         self.logs_show_action.triggered.connect(self.show_log_files)
-        self.logs_reset_api = logs_menu.addAction("Reset API Calls Log")
-        self.logs_reset_api.triggered.connect(lambda: self.reset_log_file(getattr(api_client, 'LOG_FILE', Path('api_calls.log'))))
-        self.logs_reset_conn = logs_menu.addAction("Reset Connection Log")
-        self.logs_reset_conn.triggered.connect(lambda: self.reset_log_file(getattr(api_client, 'CONNECTION_LOG', Path('connection_errors.log'))))
-        self.logs_reset_creds = logs_menu.addAction("Reset Credentials Log")
-        self.logs_reset_creds.triggered.connect(lambda: self.reset_log_file(getattr(api_client, 'CREDENTIALS_LOG', Path('credentials.log'))))
-        logs_menu.addSeparator()
         self.logs_clear_all = logs_menu.addAction("Clear All Logs")
         self.logs_clear_all.triggered.connect(self.clear_all_logs)
         self.logs_archive = logs_menu.addAction("Archive Logs...")
@@ -471,6 +473,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_bar.setToolTip(f"Focus filter field ({'Cmd' if IS_MACOS else 'Ctrl'}+L)")
 
         toolbar.addWidget(self.search_bar)
+
+        self.hide_raw_http_columns_cb = QtWidgets.QCheckBox("Hide Links")
+        self.hide_raw_http_columns_cb.setChecked(False)
+        self.hide_raw_http_columns_cb.setToolTip("Hide columns whose names start with '{' or 'http'")
+        self.hide_raw_http_columns_cb.stateChanged.connect(self.on_hide_raw_http_columns_toggled)
+        toolbar.addWidget(self.hide_raw_http_columns_cb)
 
         self.command_combo = QtWidgets.QComboBox()
         self.command_combo.addItems([
@@ -908,6 +916,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         """Override closeEvent to save window geometry before closing."""
+        self._closing = True
+        try:
+            if hasattr(self, 'api_timer') and self.api_timer is not None:
+                self.api_timer.stop()
+        except Exception:
+            pass
         self.save_window_geometry()
         super().closeEvent(event)
 
@@ -1033,6 +1047,12 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             try:
+                hide_cols = bool(p[name].get('hide_raw_http_columns', False))
+                self.hide_raw_http_columns = hide_cols
+                self.hide_raw_http_columns_cb.setChecked(hide_cols)
+            except Exception:
+                pass
+            try:
                 msg = f"Profile loaded: {name}"
                 self.status_label.setText(msg)
                 try:
@@ -1052,6 +1072,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p[name]["column_widths"] = self.column_widths
             # Save per-profile UI options
             p[name]['status_show_api_calls'] = bool(getattr(self, 'show_api_calls_cb', QtWidgets.QCheckBox()).isChecked())
+            p[name]['hide_raw_http_columns'] = bool(getattr(self, 'hide_raw_http_columns_cb', QtWidgets.QCheckBox()).isChecked())
             # also update last working profile so auto-connect will remember this one
             meta = p.get('__meta__', {})
             meta['last_working_profile'] = name
@@ -1090,10 +1111,48 @@ class MainWindow(QtWidgets.QMainWindow):
             if name not in cfg:
                 cfg[name] = {}
             cfg[name]['status_show_api_calls'] = bool(self.show_api_calls_cb.isChecked())
+            cfg[name]['hide_raw_http_columns'] = bool(self.hide_raw_http_columns_cb.isChecked())
             with open(self.config_file, 'w') as f:
                 json.dump(cfg, f, indent=4)
         except Exception:
             pass
+
+    def _should_hide_column(self, column_name: str) -> bool:
+        """Return True when the current view filter hides the column."""
+        if not self.hide_raw_http_columns:
+            return False
+        name = str(column_name or '').lstrip().lower()
+        if name.startswith('{') or name.startswith('http'):
+            return True
+
+        # Also hide columns whose displayed values are link-like/JSON-like.
+        # This matches the "Hide Links" intent for dynamically-named columns.
+        try:
+            if self.users_cache:
+                for user in self.users_cache[:200]:
+                    val = self._get_value(user, column_name)
+                    text = str(val or '').lstrip().lower()
+                    if not text:
+                        continue
+                    return text.startswith('{') or text.startswith('http')
+        except Exception:
+            pass
+        return False
+
+    def _get_visible_columns(self, preferred_columns, available_columns):
+        """Return ordered columns that exist in data and pass view filters."""
+        visible = []
+        available = set(available_columns or [])
+        for col in preferred_columns or []:
+            if col in available and not self._should_hide_column(col):
+                visible.append(col)
+        return visible
+
+    def on_hide_raw_http_columns_toggled(self, state):
+        """Toggle filtering of columns that start with '{' or 'http'."""
+        self.hide_raw_http_columns = bool(state)
+        self.save_profile_option()
+        self.refresh_table()
 
     def on_show_api_calls_toggled(self, state):
         """Enable or disable live API capture and persist the per-profile choice."""
@@ -1152,6 +1211,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _poll_api_events(self):
         """Poll `api.client` live events and display them in the UI when enabled for profile."""
         try:
+            if getattr(self, '_closing', False) or QtCore.QCoreApplication.closingDown():
+                return
+            if not hasattr(self, 'profile_list') or not hasattr(self, 'api_calls_label'):
+                return
             events = api_client.get_and_clear_live_events()
             if not events:
                 return
@@ -1175,6 +1238,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- THE MISSING SLOT ---
     def refresh_users(self):
         """Fixes the AttributeError by providing the reload function."""
+        self._capture_current_column_layout()
         # Create an API client using current UI credentials and start the
         # UserFetchWorker in the shared threadpool so the UI stays responsive.
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
@@ -1235,20 +1299,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
             query_text = None
+            query_saved = False
             table = None
             if source_mode == "Custom Query":
-                query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-                    self,
-                    "Custom Query",
-                    "Enter SQL query (SELECT):",
-                    "SELECT * FROM your_table"
-                )
-                if not ok or not query_text or not query_text.strip():
+                query_text, query_saved = self._prompt_custom_query_from_connection(conn, name)
+                if not query_text:
                     return
             else:
-                default_tbl = conn.get('table', '')
-                table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to import from:", text=default_tbl)
-                if not ok or not table:
+                table = self._prompt_import_table_from_connection(conn, name)
+                if not table:
                     return
             # test connection
             try:
@@ -1288,13 +1347,33 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
                 return
-            ping_attrs = self._get_pingone_attributes()
-            dlg = DatabaseMappingDialog(cols, ping_attrs, direction='import', sample_row=sample, parent=self)
+            client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+            ping_attrs = self._get_pingone_attributes_for_import(client)
+            initial_mapping = conn.get('db_import_mapping', {})
+            if source_mode == "Custom Query" and query_text:
+                by_query = conn.get('db_import_mappings_by_query', {}) or {}
+                if query_text in by_query:
+                    initial_mapping = by_query.get(query_text, initial_mapping)
+            dlg = DatabaseMappingDialog(
+                cols,
+                ping_attrs,
+                direction='import',
+                sample_row=sample,
+                initial_mapping=initial_mapping,
+                parent=self,
+            )
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 mapping = dlg.get_mapping()
                 if not mapping:
                     QtWidgets.QMessageBox.information(self, "Import DB", "No columns were mapped; import cancelled.")
                     return
+                if dlg.remember_mapping() or (source_mode == "Custom Query" and query_saved):
+                    updates = {'db_import_mapping': mapping}
+                    if source_mode == "Custom Query" and query_saved and query_text:
+                        by_query = dict(conn.get('db_import_mappings_by_query', {}) or {})
+                        by_query[query_text] = mapping
+                        updates['db_import_mappings_by_query'] = by_query
+                    self._save_db_connection_settings(name, updates)
                 # retrieve rows from the selected table
                 try:
                     if source_mode == "Custom Query":
@@ -1316,7 +1395,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtWidgets.QMessageBox.information(self, "Import DB", "No rows found in table.")
                     return
                 # prepare API client and optional population cache
-                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
                 pops = {}
                 try:
                     token = asyncio.run(client.get_token())
@@ -1330,6 +1408,215 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._perform_import_sequence(users, client, pops)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import DB", str(e))
+
+    def _prompt_import_table_from_connection(self, conn: dict, connection_name: str) -> str:
+        """Prompt for table name using an available-table dropdown when possible."""
+        default_tbl = (conn.get('table', '') or '').strip()
+        table_names = []
+        list_error = None
+        try:
+            from api import db_utils
+            table_names = db_utils.get_table_names(
+                conn['type'], conn['host'], conn['port'], conn['database'],
+                conn['user'], conn['password'], conn.get('driver')
+            )
+            table_names = [t.strip() for t in table_names if str(t).strip()]
+        except Exception as e:
+            list_error = str(e)
+            table_names = []
+
+        if table_names:
+            options = list(table_names)
+            if default_tbl and default_tbl not in options:
+                options.insert(0, default_tbl)
+            table, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Select Table",
+                f"Database table to import from ({connection_name}):",
+                options,
+                0,
+                True,
+            )
+        else:
+            if list_error:
+                err_lower = list_error.lower()
+                if "permission" in err_lower or "denied" in err_lower or "privilege" in err_lower:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Table List Unavailable",
+                        "This account does not have enough permissions to list tables automatically.\n\n"
+                        "Enter the table name manually."
+                    )
+            table, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Table Name",
+                "Database table to import from:",
+                text=default_tbl,
+            )
+
+        if not ok or not table:
+            return ""
+        table = table.strip()
+        if not table:
+            QtWidgets.QMessageBox.warning(self, "Table Name", "Table name cannot be empty.")
+            return ""
+        return table
+
+    def _prompt_export_table_from_connection(self, conn: dict, connection_name: str) -> str:
+        """Prompt for export target table using available-table dropdown when possible."""
+        default_tbl = (conn.get('table', '') or '').strip()
+        table_names = []
+        list_error = None
+        try:
+            from api import db_utils
+            table_names = db_utils.get_table_names(
+                conn['type'], conn['host'], conn['port'], conn['database'],
+                conn['user'], conn['password'], conn.get('driver')
+            )
+            table_names = [t.strip() for t in table_names if str(t).strip()]
+        except Exception as e:
+            list_error = str(e)
+            table_names = []
+
+        if table_names:
+            options = list(table_names)
+            if default_tbl and default_tbl not in options:
+                options.insert(0, default_tbl)
+            table, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Select Table",
+                f"Database table to export to ({connection_name}):",
+                options,
+                0,
+                True,
+            )
+        else:
+            if list_error:
+                err_lower = list_error.lower()
+                if "permission" in err_lower or "denied" in err_lower or "privilege" in err_lower:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Table List Unavailable",
+                        "This account does not have enough permissions to list tables automatically.\n\n"
+                        "Enter the table name manually."
+                    )
+            table, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Table Name",
+                "Database table to export to (will be created if it does not exist):",
+                text=default_tbl,
+            )
+
+        if not ok or not table:
+            return ""
+        table = table.strip()
+        if not table:
+            QtWidgets.QMessageBox.warning(self, "Table Name", "Table name cannot be empty.")
+            return ""
+        return table
+
+    def _save_db_connection_settings(self, connection_name: str, updates: dict):
+        """Persist additional per-connection settings under db_connections."""
+        if not connection_name or not updates:
+            return
+        try:
+            cfg = self._read_config()
+            dbs = cfg.get('db_connections', {})
+            if connection_name not in dbs:
+                return
+            dbs[connection_name].update(updates)
+            cfg['db_connections'] = dbs
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
+
+    def _prompt_custom_query_from_connection(self, conn: dict, connection_name: str):
+        """Prompt for SQL query and return (query_text, query_saved)."""
+        saved_queries = [q for q in (conn.get('saved_custom_queries', []) or []) if str(q).strip()]
+        default_query = (conn.get('last_custom_query') or '').strip() or "SELECT * FROM your_table"
+
+        # If queries were previously saved, let the user start from one.
+        if saved_queries:
+            options = ["<Type new query>"] + saved_queries
+            selected, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Saved Custom Queries",
+                f"Select a saved query for {connection_name} or choose '<Type new query>':",
+                options,
+                0,
+                False,
+            )
+            if not ok:
+                return "", False
+            if selected and selected != "<Type new query>":
+                default_query = selected
+
+        query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Custom Query",
+            "Enter SQL query (SELECT):",
+            default_query,
+        )
+        if not ok or not query_text or not query_text.strip():
+            return "", False
+
+        query_text = query_text.strip()
+
+        if query_text in saved_queries:
+            self._save_db_connection_settings(connection_name, {'last_custom_query': query_text})
+            return query_text, True
+
+        save = QtWidgets.QMessageBox.question(
+            self,
+            "Save Custom Query",
+            "Save this query in the selected DB connection settings for reuse?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if save == QtWidgets.QMessageBox.Yes:
+            merged = [query_text] + [q for q in saved_queries if q != query_text]
+            self._save_db_connection_settings(
+                connection_name,
+                {
+                    'last_custom_query': query_text,
+                    'saved_custom_queries': merged[:10],
+                },
+            )
+            return query_text, True
+
+        return query_text, False
+
+    def _get_pingone_attributes_for_import(self, client) -> list:
+        """Refresh available PingOne attributes from live user data."""
+        attrs = set(self._get_pingone_attributes())
+        try:
+            token = asyncio.run(client.get_token())
+            if not token:
+                return sorted(attrs)
+
+            async def _fetch_attrs():
+                headers = client._get_auth_headers(token)
+                url = f"{client.base_url}/users"
+                pages = 0
+                async with httpx.AsyncClient(timeout=10.0) as session:
+                    while url and pages < 5:
+                        resp = await session.get(url, headers=headers)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        for u in data.get("_embedded", {}).get("users", []):
+                            self._collect_keys(u, '', attrs)
+                        url = data.get("_links", {}).get("next", {}).get("href")
+                        pages += 1
+
+            asyncio.run(_fetch_attrs())
+        except Exception:
+            pass
+
+        if 'population.id' in attrs:
+            attrs.discard('population.id')
+            attrs.add('population.name')
+        return sorted(attrs)
 
 
     def import_from_database_wizard(self, connection_name: str, query_mode: str = 'table'):
@@ -1346,25 +1633,14 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Prompt for table name or custom query
             if query_mode == 'custom':
-                query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-                    self,
-                    "Custom Query",
-                    "Enter SQL query (SELECT):",
-                    "SELECT * FROM your_table"
-                )
-                if not ok or not query_text or not query_text.strip():
+                query_text, query_saved = self._prompt_custom_query_from_connection(conn, connection_name)
+                if not query_text:
                     return
                 table = None
             else:
-                default_tbl = conn.get('table', '')
-                table, ok = QtWidgets.QInputDialog.getText(
-                    self, "Table Name", "Database table to import from:", text=default_tbl
-                )
-                if not ok or not table:
-                    return
-                table = table.strip()  # Strip whitespace from user input
+                query_saved = False
+                table = self._prompt_import_table_from_connection(conn, connection_name)
                 if not table:
-                    QtWidgets.QMessageBox.warning(self, "Table Name", "Table name cannot be empty.")
                     return
                 query_text = None
             
@@ -1437,15 +1713,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 if reply != QtWidgets.QMessageBox.Yes:
                     return
             
-            ping_attrs = self._get_pingone_attributes()
+            client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+            ping_attrs = self._get_pingone_attributes_for_import(client)
             from ui.dialogs import DatabaseMappingDialog
-            dlg = DatabaseMappingDialog(converted_cols, ping_attrs, direction='import', sample_row=converted_sample, parent=self)
+            initial_mapping = conn.get('db_import_mapping', {})
+            if query_mode == 'custom' and query_text:
+                by_query = conn.get('db_import_mappings_by_query', {}) or {}
+                if query_text in by_query:
+                    initial_mapping = by_query.get(query_text, initial_mapping)
+            dlg = DatabaseMappingDialog(
+                converted_cols,
+                ping_attrs,
+                direction='import',
+                sample_row=converted_sample,
+                initial_mapping=initial_mapping,
+                parent=self,
+            )
             
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 mapping = dlg.get_mapping()
                 if not mapping:
                     QtWidgets.QMessageBox.information(self, "Import DB", "No columns were mapped; import cancelled.")
                     return
+                if dlg.remember_mapping() or (query_mode == 'custom' and query_saved):
+                    updates = {'db_import_mapping': mapping}
+                    if query_mode == 'custom' and query_saved and query_text:
+                        by_query = dict(conn.get('db_import_mappings_by_query', {}) or {})
+                        by_query[query_text] = mapping
+                        updates['db_import_mappings_by_query'] = by_query
+                    self._save_db_connection_settings(connection_name, updates)
                 
                 # Retrieve rows and convert keys
                 try:
@@ -1476,7 +1772,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     converted_rows.append(converted_row)
                 
                 # Prepare client and import
-                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
                 pops = {}
                 try:
                     token = asyncio.run(client.get_token())
@@ -1507,9 +1802,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             conn = dbs[name]
             self._set_last_data_source(f"DB {name}")
-            default_tbl = conn.get('table', '')
-            table, ok = QtWidgets.QInputDialog.getText(self, "Table Name", "Database table to export to (will be created if it does not exist):", text=default_tbl)
-            if not ok or not table:
+            table = self._prompt_export_table_from_connection(conn, name)
+            if not table:
                 return
             # test connection
             try:
@@ -1580,12 +1874,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     sample_p1 = self._flatten_user(sample_user)
             except Exception:
                 sample_p1 = {}
-            dlg = DatabaseMappingDialog(cols or ping_attrs, ping_attrs, direction='export', sample_row=sample_p1, parent=self)
+            initial_mapping = conn.get('db_export_mapping', {})
+            dlg = DatabaseMappingDialog(
+                cols or ping_attrs,
+                ping_attrs,
+                direction='export',
+                sample_row=sample_p1,
+                initial_mapping=initial_mapping,
+                parent=self,
+            )
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 mapping = dlg.get_mapping()
                 if not mapping:
                     QtWidgets.QMessageBox.information(self, "Export DB", "No attributes were mapped; export cancelled.")
                     return
+                if dlg.remember_mapping():
+                    self._save_db_connection_settings(name, {'db_export_mapping': mapping})
                 effective_mapping = dict(mapping)
                 renamed_columns = {}
                 # When creating a new table, normalize invalid SQL identifiers.
@@ -1924,7 +2228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.all_columns = self._get_all_columns(self.users_cache)
         # Use saved column configuration, filtering to only columns present in dataset
-        self.columns = [c for c in self.selected_columns if c in self.all_columns]
+        self.columns = self._get_visible_columns(self.selected_columns, self.all_columns)
         
         # Disable sorting during table rebuild for better performance
         self.u_table.setSortingEnabled(False)
@@ -2064,26 +2368,135 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_credentials_log_level(self):
         """Prompt user to select a credentials log level."""
+        self._prompt_set_log_level("credentials")
+
+    def _prompt_set_log_level(self, log_kind: str):
+        """Prompt and apply a log level for supported log types."""
         levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        lvl, ok = QtWidgets.QInputDialog.getItem(self, "Credentials Log Level", "Level:", levels, 1, False)
-        if ok and lvl:
+        current_idx = 1
+        if log_kind == "api":
             try:
+                lvl_name = logging.getLevelName(api_client.api_logger.level)
+                if lvl_name in levels:
+                    current_idx = levels.index(lvl_name)
+            except Exception:
+                pass
+            title = "API Log Level"
+        elif log_kind == "credentials":
+            try:
+                lvl_name = logging.getLevelName(api_client.credential_logger.level)
+                if lvl_name in levels:
+                    current_idx = levels.index(lvl_name)
+            except Exception:
+                pass
+            title = "Credentials Log Level"
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Log Level Not Available",
+                "Connection log entries are plain text and do not support log levels."
+            )
+            return
+
+        lvl, ok = QtWidgets.QInputDialog.getItem(self, title, "Level:", levels, current_idx, False)
+        if not ok or not lvl:
+            return
+        try:
+            if log_kind == "api":
+                api_client.api_logger.setLevel(getattr(logging, lvl, logging.INFO))
+            else:
                 api_client.set_credentials_log_level(lvl)
-                self.status_label.setText(f"Credentials log level set to {lvl}")
+            self.status_label.setText(f"{title} set to {lvl}")
+            try:
+                self.statusBar().showMessage(f"{title} set to {lvl}")
+            except Exception:
+                pass
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Logging", f"Failed to set log level: {e}")
+
+    def _show_log_viewer(self, title: str, path: Path, log_kind: str):
+        """Show a log viewer with Set Level, Reset, and Save commands."""
+        p = Path(path)
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        lay = QtWidgets.QVBoxLayout(dlg)
+
+        cmd_row = QtWidgets.QHBoxLayout()
+        set_level_btn = QtWidgets.QPushButton("Set Log Level")
+        reset_btn = QtWidgets.QPushButton("Reset Log")
+        save_btn = QtWidgets.QPushButton("Save Log As...")
+        refresh_btn = QtWidgets.QPushButton("Refresh")
+        close_btn = QtWidgets.QPushButton("Close")
+        cmd_row.addWidget(set_level_btn)
+        cmd_row.addWidget(reset_btn)
+        cmd_row.addWidget(save_btn)
+        cmd_row.addWidget(refresh_btn)
+        cmd_row.addStretch()
+        cmd_row.addWidget(close_btn)
+        lay.addLayout(cmd_row)
+
+        path_line = QtWidgets.QLineEdit(str(p.resolve() if p.exists() else p))
+        path_line.setReadOnly(True)
+        lay.addWidget(path_line)
+
+        te = QtWidgets.QTextEdit()
+        te.setReadOnly(True)
+        lay.addWidget(te)
+
+        def refresh_text():
+            try:
+                if p.exists():
+                    te.setPlainText(p.read_text(encoding='utf-8', errors='replace'))
+                else:
+                    te.setPlainText(f"Log file does not exist yet: {p}")
+                te.moveCursor(QtGui.QTextCursor.End)
             except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "Logging", f"Failed to set log level: {e}")
+                te.setPlainText(f"Failed to read log file:\n{e}")
+
+        def reset_and_refresh():
+            self.reset_log_file(p)
+            refresh_text()
+
+        def save_copy():
+            options = self._get_native_file_dialog_options()
+            default_name = f"{p.stem}_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}{p.suffix or '.log'}"
+            out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save Log Copy",
+                default_name,
+                "Log Files (*.log *.txt);;All Files (*)",
+                options=options,
+            )
+            if not out_path:
+                return
+            try:
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write(te.toPlainText())
+                QtWidgets.QMessageBox.information(self, "Save Log", f"Saved log copy to {out_path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Save Log", f"Failed to save log copy: {e}")
+
+        set_level_btn.clicked.connect(lambda: self._prompt_set_log_level(log_kind))
+        reset_btn.clicked.connect(reset_and_refresh)
+        save_btn.clicked.connect(save_copy)
+        refresh_btn.clicked.connect(refresh_text)
+        close_btn.clicked.connect(dlg.accept)
+
+        refresh_text()
+        dlg.resize(980, 520)
+        dlg.exec()
 
     def show_log_files(self):
         """Display a small dialog listing the log files and allow opening them."""
         logs = [
-            ("API Calls Log", getattr(api_client, 'LOG_FILE', Path('api_calls.log'))),
-            ("Connection Log", getattr(api_client, 'CONNECTION_LOG', Path('connection_errors.log'))),
-            ("Credentials Log", getattr(api_client, 'CREDENTIALS_LOG', Path('credentials.log'))),
+            ("API Calls Log", getattr(api_client, 'LOG_FILE', Path('api_calls.log')), "api"),
+            ("Connection Log", getattr(api_client, 'CONNECTION_LOG', Path('connection_errors.log')), "connection"),
+            ("Credentials Log", getattr(api_client, 'CREDENTIALS_LOG', Path('credentials.log')), "credentials"),
         ]
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Log Files")
         lay = QtWidgets.QVBoxLayout(dlg)
-        for label, p in logs:
+        for label, p, kind in logs:
             try:
                 pth = p.resolve()
             except Exception:
@@ -2092,26 +2505,11 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl = QtWidgets.QLabel(f"{label}:")
             val = QtWidgets.QLineEdit(str(pth))
             val.setReadOnly(True)
-            btn = QtWidgets.QPushButton("Open")
-            def _open(path):
-                try:
-                    QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
-                except Exception:
-                    pass
-            btn.clicked.connect(functools.partial(_open, pth))
-            reset_btn = QtWidgets.QPushButton("Reset")
-            def _reset(path):
-                try:
-                    if QtWidgets.QMessageBox.question(self, "Reset Log", f"Truncate {path}? This cannot be undone.") != QtWidgets.QMessageBox.Yes:
-                        return
-                    with open(path, 'w', encoding='utf-8'):
-                        pass
-                    QtWidgets.QMessageBox.information(self, "Reset Log", f"Truncated {path}")
-                except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "Reset Log", f"Failed to truncate {path}: {e}")
-            reset_btn.clicked.connect(functools.partial(_reset, pth))
-            row.addWidget(lbl); row.addWidget(val); row.addWidget(btn)
-            row.addWidget(reset_btn)
+            btn = QtWidgets.QPushButton("View")
+            btn.clicked.connect(functools.partial(self._show_log_viewer, label, pth, kind))
+            row.addWidget(lbl)
+            row.addWidget(val)
+            row.addWidget(btn)
             lay.addLayout(row)
         # Clear all logs button
         btn_row = QtWidgets.QHBoxLayout()
@@ -2149,9 +2547,17 @@ class MainWindow(QtWidgets.QMainWindow):
         start_btn = QtWidgets.QPushButton("Start Capture")
         stop_btn = QtWidgets.QPushButton("Stop Capture")
         stop_btn.setEnabled(False)
+        set_level_btn = QtWidgets.QPushButton("Set Log Level")
+        reset_btn = QtWidgets.QPushButton("Reset")
         save_btn = QtWidgets.QPushButton("Save...")
         close_btn = QtWidgets.QPushButton("Close")
-        btn_row.addWidget(start_btn); btn_row.addWidget(stop_btn); btn_row.addWidget(save_btn); btn_row.addStretch(); btn_row.addWidget(close_btn)
+        btn_row.addWidget(start_btn)
+        btn_row.addWidget(stop_btn)
+        btn_row.addWidget(set_level_btn)
+        btn_row.addWidget(reset_btn)
+        btn_row.addWidget(save_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
         lay.addLayout(btn_row); lay.addWidget(te)
 
         timer = QtCore.QTimer(dlg)
@@ -2197,8 +2603,16 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Save Failed", str(e))
 
+        def reset_capture():
+            te.clear()
+
+        def set_level():
+            self._prompt_set_log_level("api")
+
         start_btn.clicked.connect(start)
         stop_btn.clicked.connect(stop)
+        set_level_btn.clicked.connect(set_level)
+        reset_btn.clicked.connect(reset_capture)
         save_btn.clicked.connect(save)
         close_btn.clicked.connect(lambda: (stop(), dlg.accept()))
 
@@ -2408,6 +2822,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "column_widths": self.column_widths,
                 "status_show_api_calls": bool(
                     getattr(self, "show_api_calls_cb", QtWidgets.QCheckBox()).isChecked()
+                ),
+                "hide_raw_http_columns": bool(
+                    getattr(self, "hide_raw_http_columns_cb", QtWidgets.QCheckBox()).isChecked()
                 ),
             }
             meta = p.get("__meta__", {})
@@ -2909,16 +3326,44 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         w = BulkCreateWorker(client, users)
         w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
+        w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
         def on_done(res):
             self.prog.hide()
             created = res.get('created', 0)
+            updated_on_retry = res.get('updated_on_retry', 0)
             total = res.get('total', 0)
             errors = res.get('errors', []) or []
-            if created == 0 and errors:
+            summary = f"Created {created}/{total} users"
+            if updated_on_retry:
+                summary += f"; Updated on retry {updated_on_retry}"
+            if created == 0 and updated_on_retry == 0 and errors:
                 dlg = QtWidgets.QDialog(self)
                 dlg.setWindowTitle("Import Result")
                 lay = QtWidgets.QVBoxLayout(dlg)
-                lab = QtWidgets.QLabel(f"Created {created}/{total} users. No users were created.")
+                lab = QtWidgets.QLabel(f"{summary}. No users were created.")
+                te = QtWidgets.QTextEdit()
+                te.setReadOnly(True)
+                te.setPlainText('\n'.join(errors))
+                te.setMinimumHeight(300)
+                lay.addWidget(lab)
+                lay.addWidget(te)
+                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+                btns.accepted.connect(dlg.accept)
+                lay.addWidget(btns)
+                try:
+                    screen = QtWidgets.QApplication.primaryScreen()
+                    geom = screen.availableGeometry()
+                    w = min(int(geom.width() * 0.75), 1100)
+                    h = min(int(geom.height() * 0.6), 800)
+                    dlg.resize(max(700, w), max(400, h))
+                except Exception:
+                    dlg.resize(900, 500)
+                dlg.exec()
+            elif errors:
+                dlg = QtWidgets.QDialog(self)
+                dlg.setWindowTitle("Import Result")
+                lay = QtWidgets.QVBoxLayout(dlg)
+                lab = QtWidgets.QLabel(summary)
                 te = QtWidgets.QTextEdit()
                 te.setReadOnly(True)
                 te.setPlainText('\n'.join(errors))
@@ -2938,7 +3383,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     dlg.resize(900, 500)
                 dlg.exec()
             else:
-                QtWidgets.QMessageBox.information(self, "Import Complete", f"Created {created}/{total} users")
+                QtWidgets.QMessageBox.information(self, "Import Complete", summary)
+            self._include_import_attributes_in_grid(users)
             self.refresh_users()
         w.signals.finished.connect(on_done)
         w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
@@ -3114,7 +3560,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         if not self.all_columns:
             QtWidgets.QMessageBox.information(self, "Info", "Load users first to see available columns.")
             return
-        dialog = ColumnSelectDialog(self.all_columns, self.selected_columns, self)
+        available_cols = sorted([c for c in self.all_columns if not self._should_hide_column(c)])
+        selected_cols = [c for c in self.selected_columns if c in available_cols]
+        dialog = ColumnSelectDialog(available_cols, selected_cols, self)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             self.selected_columns = dialog.get_selected()
             self.save_columns_to_config(show_notification=True)
@@ -3814,9 +4262,11 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     self.prog.setRange(0, len(create_users))
                     w = BulkCreateWorker(client, create_users)
                     w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
+                    w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
 
                     def on_done(res):
                         created = res.get('created', 0)
+                        updated_on_retry = res.get('updated_on_retry', 0)
                         total = res.get('total', 0)
                         errors = res.get('errors', []) or []
 
@@ -3825,7 +4275,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                             updated = res2.get('updated', 0)
                             total_upd = res2.get('total', 0)
                             upd_errors = res2.get('errors', []) or []
-                            result_msg = f"Created {created}/{total} users; Updated {updated}/{total_upd} users"
+                            result_msg = f"Created {created}/{total} users"
+                            if updated_on_retry:
+                                result_msg += f"; Updated on retry {updated_on_retry}"
+                            result_msg += f"; Updated {updated}/{total_upd} users"
                             errors_combined = errors + upd_errors
                             if errors_combined:
                                 dlg = QtWidgets.QDialog(self)
@@ -3852,6 +4305,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                                 dlg.exec()
                             else:
                                 QtWidgets.QMessageBox.information(self, "Import Complete", result_msg)
+                            self._include_import_attributes_in_grid(users)
                             self.refresh_users()
 
                         if update_pairs:
@@ -3908,6 +4362,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                                 dlg.exec()
                             else:
                                 QtWidgets.QMessageBox.information(self, "Import Complete", result_msg)
+                            self._include_import_attributes_in_grid(users)
                             self.refresh_users()
 
                         upd_w.signals.finished.connect(_on_updates_done2)
@@ -3923,6 +4378,26 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     pass
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
+
+    def _include_import_attributes_in_grid(self, imported_users: list):
+        """Append additional imported attributes to currently selected columns."""
+        try:
+            if not imported_users:
+                return
+            imported_cols = self._get_all_columns(imported_users)
+            added = [c for c in imported_cols if c not in self.selected_columns]
+            if not added:
+                return
+            self.selected_columns.extend(added)
+            self.save_columns_to_config()
+            msg = f"Added {len(added)} imported attribute column(s) to grid"
+            self.status_label.setText(msg)
+            try:
+                self.statusBar().showMessage(msg, 4000)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def save_columns_to_config(self, show_notification=False):
         """Save the selected columns to the current profile's configuration."""
@@ -3987,7 +4462,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             return
         
         # Filter columns to only those present in dataset
-        self.columns = [c for c in self.selected_columns if c in self.all_columns]
+        self.columns = self._get_visible_columns(self.selected_columns, self.all_columns)
         
         # Disable sorting during table rebuild for better performance
         self.u_table.setSortingEnabled(False)
@@ -4075,12 +4550,32 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
     def on_column_moved(self, logicalIndex, oldVisualIndex, newVisualIndex):
         """Update the selected columns order after user reorders table columns."""
-        self.selected_columns = [self.columns[self.u_table.horizontalHeader().visualIndex(i)] for i in range(len(self.columns))]
-        self.save_columns_to_config()
+        self._capture_current_column_layout()
         msg = "Column order updated"
         self.status_label.setText(msg)
         try:
             self.statusBar().showMessage(msg)
+        except Exception:
+            pass
+
+    def _capture_current_column_layout(self):
+        """Persist current visual column order (and widths) into selected_columns."""
+        try:
+            if not hasattr(self, 'u_table') or self.u_table.columnCount() == 0:
+                return
+            if not self.columns:
+                return
+            header = self.u_table.horizontalHeader()
+            visual_order = []
+            for visual_idx in range(self.u_table.columnCount()):
+                logical_idx = header.logicalIndex(visual_idx)
+                if 0 <= logical_idx < len(self.columns):
+                    visual_order.append(self.columns[logical_idx])
+            if visual_order:
+                # Keep non-visible selected columns (if any) appended in original order.
+                remaining = [c for c in self.selected_columns if c not in visual_order]
+                self.selected_columns = visual_order + remaining
+                self.save_columns_to_config()
         except Exception:
             pass
 

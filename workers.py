@@ -35,6 +35,7 @@ class WorkerSignals(QtCore.QObject):
     finished = QtCore.Signal(dict)
     progress = QtCore.Signal(int, int)
     error = QtCore.Signal(str)
+    status = QtCore.Signal(str)
 
 
 class UserFetchWorker(QtCore.QRunnable):
@@ -196,6 +197,34 @@ class BulkCreateWorker(QtCore.QRunnable):
         super().__init__()
         self.client, self.users, self.signals = client, users, WorkerSignals()
 
+    def _is_existing_user_error(self, err_text: str) -> bool:
+        """Return True when an error indicates the user already exists."""
+        txt = (err_text or "").lower()
+        return (
+            "409" in txt
+            or "already exists" in txt
+            or "duplicate" in txt
+            or "uniqueness" in txt
+            or "not unique" in txt
+        )
+
+    async def _build_existing_user_map(self, headers: dict) -> dict:
+        """Fetch username->id map from PingOne for retry-on-conflict updates."""
+        user_map = {}
+        url = f"{self.client.base_url}/users"
+        async with httpx.AsyncClient(timeout=10.0) as session:
+            while url:
+                resp = await session.get(url, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                for u in data.get("_embedded", {}).get("users", []):
+                    uid = u.get("id")
+                    uname = u.get("username")
+                    if uid and uname:
+                        user_map[str(uname).strip().lower()] = uid
+                url = data.get("_links", {}).get("next", {}).get("href")
+        return user_map
+
     @QtCore.Slot()
     def run(self):
         asyncio.run(self.execute())
@@ -206,9 +235,12 @@ class BulkCreateWorker(QtCore.QRunnable):
         if not token:
             self.signals.error.emit("Auth Failed. Check credentials.")
             return
+        headers = self.client._get_auth_headers(token)
         created = 0
+        updated_on_retry = 0
         total = len(self.users)
         errors = []
+        existing_user_map = None
 
         # Removed server-side dry-run validation phase; proceed directly to creates
 
@@ -229,15 +261,54 @@ class BulkCreateWorker(QtCore.QRunnable):
                 await self.client.create_user(user)
                 created += 1
             except Exception as e:
-                # Capture error message for UI feedback
-                err_msg = f"User {user.get('username') or user.get('id')}: {str(e)}"
-                errors.append(err_msg)
-                if api_client.API_LOGGING_ENABLED:
-                    api_client.api_logger.error(f"Create user failed: {err_msg}")
+                err_text = str(e)
+                username = user.get('username')
+                uname_norm = (str(username).strip().lower() if username else "")
+
+                # If user already exists, retry as update.
+                retried = False
+                if uname_norm and self._is_existing_user_error(err_text):
                     try:
-                        api_client.write_connection_log(f"Create user ERROR - {err_msg}")
-                    except Exception:
-                        pass
+                        self.signals.status.emit(
+                            f"Create conflict for {username}; retrying as update..."
+                        )
+                        if existing_user_map is None:
+                            self.signals.status.emit("Building existing-user index for retry updates...")
+                            existing_user_map = await self._build_existing_user_map(headers)
+                        existing_id = existing_user_map.get(uname_norm)
+                        if existing_id:
+                            await self.client.update_user(existing_id, user)
+                            updated_on_retry += 1
+                            retried = True
+                            self.signals.status.emit(
+                                f"Retried as update for {username}"
+                            )
+                            if api_client.API_LOGGING_ENABLED:
+                                try:
+                                    api_client.write_connection_log(
+                                        f"Create->Update retry succeeded for username={username}, user_id={existing_id}"
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as retry_err:
+                        if api_client.API_LOGGING_ENABLED:
+                            try:
+                                api_client.write_connection_log(
+                                    f"Create->Update retry failed for username={username}: {retry_err}"
+                                )
+                            except Exception:
+                                pass
+
+                if not retried:
+                    # Capture error message for UI feedback
+                    err_msg = f"User {user.get('username') or user.get('id')}: {err_text}"
+                    errors.append(err_msg)
+                    if api_client.API_LOGGING_ENABLED:
+                        api_client.api_logger.error(f"Create user failed: {err_msg}")
+                        try:
+                            api_client.write_connection_log(f"Create user ERROR - {err_msg}")
+                        except Exception:
+                            pass
             self.signals.progress.emit(i + 1, total)
 
         if api_client.API_LOGGING_ENABLED:
@@ -248,7 +319,12 @@ class BulkCreateWorker(QtCore.QRunnable):
                 pass
 
         # Include any captured errors in the finished payload for UI feedback
-        self.signals.finished.emit({"created": created, "total": total, "errors": errors})
+        self.signals.finished.emit({
+            "created": created,
+            "updated_on_retry": updated_on_retry,
+            "total": total,
+            "errors": errors,
+        })
 
 
 class UserUpdateWorker(QtCore.QRunnable):

@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Bumped application version to `0.70`.
 - New "New Connection" toolbar button: clears environment ID, client ID, and client secret fields and prompts user to save after entering values.
 - Ability to skip automatic connection attempts when loading profiles from disk to avoid spurious "Auth Failed" messages.
 - Improved connection testing and error reporting when validating credentials (shows detailed error message).
