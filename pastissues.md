@@ -27,6 +27,13 @@ This file tracks issues that have been encountered and resolved. When making cod
 ### Resolved
 
 - **Date**: 2026-03-31
+- **Issue**: Database import failed with `pymysql.err.ProgrammingError: Incorrect table name 'people '` due to trailing whitespace in table names.
+- **Root Cause**: Table names were read from combo boxes and user input without stripping whitespace, then passed to SQL queries which interpreted the space as part of the identifier.
+- **Solution**: Strip whitespace from table names in three places: (1) `_quote_table_identifier()` in db_utils, (2) when populating table combos from database, (3) when accepting user input for table names.
+- **Files Affected**: `api/db_utils.py` (_quote_table_identifier ~L41), `ui/dialogs.py` (_populate_tables ~L1108), `ui/main_window.py` (import_from_database_wizard ~L1357)
+- **Prevention**: Always strip user input and database-sourced identifiers before using in SQL queries. Apply sanitization at both input and query execution layers.
+
+- **Date**: 2026-03-31
 - **Issue**: DBConnectionsManager broke itemSelectionChanged/itemActivated signals when repopulating the QListWidget after editing.
 - **Root Cause**: Calling `clear()` triggered `itemSelectionChanged` before items were re-added, causing spurious state changes and button state confusion.
 - **Solution**: Modified `_populate()` to block signals during clear/repopulate, then manually trigger `_update_button_state()` after unblocking.

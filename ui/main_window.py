@@ -1362,6 +1362,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 if not ok or not table:
                     return
+                table = table.strip()  # Strip whitespace from user input
+                if not table:
+                    QtWidgets.QMessageBox.warning(self, "Table Name", "Table name cannot be empty.")
+                    return
                 query_text = None
             
             # Test connection and fetch data

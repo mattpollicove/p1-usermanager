@@ -1115,6 +1115,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.pw_edit.text(),
                 self.driver_combo.currentText() or None,
             )
+            # Strip whitespace from table names to prevent SQL errors
+            names = [name.strip() for name in names]
             self.table_combo.clear()
             self.table_combo.addItems(names)
             self.table_combo.setEnabled(bool(names))

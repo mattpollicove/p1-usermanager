@@ -36,8 +36,12 @@ def _quote_identifier(db_type: str, ident: str) -> str:
 
 
 def _quote_table_identifier(db_type: str, ident: str) -> str:
-    """Return a quoted table identifier, supporting dotted schema.table paths."""
-    parts = [p for p in str(ident or "").split('.') if p]
+    """Return a quoted table identifier, supporting dotted schema.table paths.
+    
+    Strips whitespace from identifiers to prevent SQL errors.
+    """
+    ident = str(ident or "").strip()
+    parts = [p.strip() for p in ident.split('.') if p.strip()]
     if not parts:
         raise ValueError("Identifier cannot be empty")
     return '.'.join(_quote_identifier(db_type, p) for p in parts)
