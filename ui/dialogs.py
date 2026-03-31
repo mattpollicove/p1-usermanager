@@ -1288,13 +1288,18 @@ class DBConnectionsManager(QtWidgets.QDialog):
         self.del_btn.setEnabled(has_selection)
 
     def _populate(self, connections):
+        """Repopulate the list widget, blocking signals during update to avoid spurious state changes."""
+        self.list_widget.blockSignals(True)
         self.list_widget.clear()
         for name in sorted(connections.keys()):
             self.list_widget.addItem(name)
+        self.list_widget.blockSignals(False)
         # Focus on most recent entry (last in sorted list) or Add button if empty
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(self.list_widget.count() - 1)
             self.list_widget.setFocus()
+        # Update button state after unblocking signals
+        self._update_button_state()
 
     def add(self):
         dlg = DatabaseConnectionDialog(parent=self)
