@@ -56,6 +56,10 @@ def _make_url(db_type: str, host: str, port: int, database: str,
     driver_path is currently ignored for MariaDB/MySQL but may be used for
     specifying an ODBC driver string (name or path) for MSSQL.
     """
+    # Validate database name is provided
+    if not database or not str(database).strip():
+        raise ValueError("Database name cannot be empty")
+    
     db_lower = db_type.lower()
     if db_lower in ('mssql', 'sqlserver') or 'mssql' in db_lower:
         # prefer pymssql if available; fall back to pyodbc with a driver
@@ -69,8 +73,8 @@ def _make_url(db_type: str, host: str, port: int, database: str,
             drv_enc = drv.replace(' ', '+')
             return f"mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver={drv_enc}"
     elif db_lower in ('mariadb', 'mysql') or 'mariadb' in db_lower or 'mysql' in db_lower:
-        # use pymysql driver
-        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+        # use pymysql driver; include init_command to ensure database is selected
+        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?init_command=SET sql_mode='STRICT_TRANS_TABLES'"
     else:
         raise ValueError(f"Unsupported database type: {db_type}")
 
@@ -82,6 +86,14 @@ def test_connection(db_type: str, host: str, port: int, database: str,
     Returns (True, None) on success, or (False, error_string) on failure.
     The error message includes exception details for debugging.
     """
+    # Validate required parameters
+    if not host or not host.strip():
+        return False, "Host name cannot be empty"
+    if not database or not str(database).strip():
+        return False, "Database name cannot be empty"
+    if not user or not user.strip():
+        return False, "User name cannot be empty"
+    
     try:
         url = _make_url(db_type, host, port, database, user, password, driver_path)
         # Add connection timeout to fail faster if host is unreachable
@@ -150,6 +162,9 @@ def get_table_names(db_type: str, host: str, port: int, database: str,
     Raises SQLAlchemyError on failure.  Useful for populating a table selector
     in the UI.
     """
+    if not database or not str(database).strip():
+        raise ValueError("Database name cannot be empty when fetching table names")
+    
     url = _make_url(db_type, host, port, database, user, password, driver_path)
     connect_args = {}
     if "mysql" in url.lower():

@@ -1106,11 +1106,16 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             return
 
         try:
+            db_name = self.db_edit.text().strip()
+            if not db_name:
+                self.status_label.setText("Database name is required to list tables.")
+                return
+            
             names = db_utils.get_table_names(
                 self.type_combo.currentText(),
                 self.host_edit.text(),
                 int(self.port_edit.text() or 0),
-                self.db_edit.text(),
+                db_name,
                 self.user_edit.text(),
                 self.pw_edit.text(),
                 self.driver_combo.currentText() or None,
@@ -1124,9 +1129,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.status_label.setText(f"Found {len(names)} table(s).")
             else:
                 self.status_label.setText("No tables found.")
-        except Exception:
-            # silently ignore; tables remain as-is
-            pass
+        except Exception as e:
+            # Show error so user can debug
+            self.status_label.setText(f"Failed to read table metadata: {e}")
+            self.table_combo.clear()
+            self.table_combo.setEnabled(False)
 
     def _on_test(self):
         # show busy cursor and status while testing
@@ -1246,6 +1253,15 @@ class DBConnectionsManager(QtWidgets.QDialog):
         dpi = get_dpi_scale()
         self.setMinimumSize(scale_size(600, dpi), scale_size(400, dpi))
         layout = QtWidgets.QVBoxLayout(self)
+        
+        # Create buttons FIRST so they exist when signals are unblocked
+        self.add_btn = QtWidgets.QPushButton("Add")
+        self.add_btn.setToolTip("Create a new connection profile")
+        self.edit_btn = QtWidgets.QPushButton("Edit")
+        self.edit_btn.setToolTip("Modify the selected connection")
+        self.del_btn = QtWidgets.QPushButton("Delete")
+        self.del_btn.setToolTip("Remove the selected connection")
+        
         # ensure Enter triggers edit when a connection is selected
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.itemActivated.connect(self.edit)
@@ -1254,12 +1270,6 @@ class DBConnectionsManager(QtWidgets.QDialog):
         layout.addWidget(self.list_widget)
 
         btn_layout = QtWidgets.QHBoxLayout()
-        self.add_btn = QtWidgets.QPushButton("Add")
-        self.add_btn.setToolTip("Create a new connection profile")
-        self.edit_btn = QtWidgets.QPushButton("Edit")
-        self.edit_btn.setToolTip("Modify the selected connection")
-        self.del_btn = QtWidgets.QPushButton("Delete")
-        self.del_btn.setToolTip("Remove the selected connection")
         btn_layout.addWidget(self.add_btn); btn_layout.addWidget(self.edit_btn); btn_layout.addWidget(self.del_btn);
         layout.addLayout(btn_layout)
 
