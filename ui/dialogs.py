@@ -69,6 +69,40 @@ def apply_screen_relative_size(
     dialog.resize(target_w, target_h)
 
 
+def ensure_dialog_caption_fit(dialog: QtWidgets.QDialog):
+    """Adjust dialog width so title/short labels are not cramped."""
+    try:
+        dialog.adjustSize()
+        fm = dialog.fontMetrics()
+        title_w = fm.horizontalAdvance(dialog.windowTitle() or "") + scale_size(120)
+
+        # Include short, single-line labels that act like captions in forms.
+        caption_w = 0
+        for lbl in dialog.findChildren(QtWidgets.QLabel):
+            text = (lbl.text() or "").replace('&', '').strip()
+            if not text or '\n' in text or len(text) > 48:
+                continue
+            caption_w = max(caption_w, fm.horizontalAdvance(text))
+
+        target_w = max(
+            dialog.minimumWidth(),
+            dialog.width(),
+            title_w,
+            caption_w + scale_size(380),
+        )
+
+        screen = dialog.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            max_w = int(geom.width() * 0.86)
+            target_w = min(target_w, max_w)
+
+        dialog.setMinimumWidth(target_w)
+        dialog.resize(target_w, max(dialog.height(), dialog.minimumHeight()))
+    except Exception:
+        pass
+
+
 def apply_combo_typeahead(combo: QtWidgets.QComboBox, options: List[str]):
     """Attach case-insensitive contains-based type-ahead completion to a combo."""
     if not combo.isEditable():
@@ -353,6 +387,7 @@ class EditUserDialog(QtWidgets.QDialog):
         
         self.user_data = user_data
         self.pop_map = pop_map
+        ensure_dialog_caption_fit(self)
     
     def _get_all_populated_attributes(self, user_data):
         """Return populated attributes as (key, value) rows for display."""
@@ -475,6 +510,7 @@ class ColumnSelectDialog(QtWidgets.QDialog):
         buttons_layout.addWidget(button_box)
         
         main_layout.addLayout(buttons_layout)
+        ensure_dialog_caption_fit(self)
     
     def get_selected(self):
         """Return the list of selected column names."""
@@ -552,6 +588,7 @@ class JSONViewDialog(QtWidgets.QDialog):
         close_btn.clicked.connect(self.accept)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
+        ensure_dialog_caption_fit(self)
     
     def save_changes(self):
         """Save the edited JSON back to the user data."""
@@ -602,6 +639,7 @@ class TextViewDialog(QtWidgets.QDialog):
         self._user_id = user_id
         self._col_name = col_name
         self._parent = parent
+        ensure_dialog_caption_fit(self)
 
     def _on_save(self):
         """Save edited text back to the user field via parent.update_user_field."""
@@ -793,6 +831,7 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+        ensure_dialog_caption_fit(self)
 
     def _normalize_mapping_token(self, value: str) -> str:
         token = str(value or '').strip().lower()
@@ -988,9 +1027,16 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         # ensure JDBC string is populated as well
         self._update_jdbc_string()
 
+        action_row = QtWidgets.QHBoxLayout()
         test_btn = QtWidgets.QPushButton("Test Connection")
         test_btn.clicked.connect(self._on_test)
-        layout.addWidget(test_btn)
+        new_btn = QtWidgets.QPushButton("New Connection")
+        new_btn.setToolTip("Clear fields so you can enter a new database connection")
+        new_btn.clicked.connect(self._new_connection)
+        action_row.addWidget(test_btn)
+        action_row.addWidget(new_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
 
         # status label shows progress/result of connection test
         self.status_label = QtWidgets.QLabel("")
@@ -1039,6 +1085,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self._update_jdbc_string()
             # if editing an existing connection, focus name field for convenience
             self.name_edit.setFocus()
+        ensure_dialog_caption_fit(self)
 
     # browsing is no longer required since driver is entered via combo
     # kept for historical reference but not used
@@ -1343,6 +1390,26 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
             self.show_pw_btn.setText("Show")
 
+    def _new_connection(self):
+        """Reset fields to defaults so user can define a new DB connection."""
+        self.name_edit.clear()
+        self.type_combo.setCurrentText("MariaDB/MySQL")
+        self.host_edit.clear()
+        self.port_edit.clear()
+        self.db_combo.clearEditText()
+        self.table_combo.clear()
+        self.table_combo.setEnabled(False)
+        self.user_edit.clear()
+        self.pw_edit.clear()
+        self.driver_combo.setCurrentIndex(0)
+        self.save_cb.setChecked(True)
+        self.status_label.setText("")
+        self.sample_label.setVisible(False)
+        self.show_pw_btn.setChecked(False)
+        self._update_port_default()
+        self._update_jdbc_string()
+        self.name_edit.setFocus()
+
 
 class DBConnectionsManager(QtWidgets.QDialog):
     """List, create, edit, and delete saved database connections."""
@@ -1392,6 +1459,7 @@ class DBConnectionsManager(QtWidgets.QDialog):
 
         self.connections = connections
         self.result = connections.copy()
+        ensure_dialog_caption_fit(self)
     
     def _update_button_state(self):
         """Enable/disable edit and delete buttons based on selection."""
@@ -1454,6 +1522,370 @@ class DBConnectionsManager(QtWidgets.QDialog):
             if new_name and new_name != name:
                 del self.result[name]
             self.result[new_name] = new_data
+            self._populate(self.result)
+
+    def delete(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        name = item.text()
+        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
+            del self.result[name]
+            self._populate(self.result)
+
+    def get_connections(self) -> dict:
+        return self.result
+
+
+class LDAPConnectionDialog(QtWidgets.QDialog):
+    """Dialog for creating or editing an LDAP connection definition."""
+
+    def __init__(self, initial: dict = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("LDAP Connection")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(520, dpi), scale_size(430, dpi))
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+
+        self.name_edit = QtWidgets.QLineEdit()
+        self.host_edit = QtWidgets.QLineEdit()
+        self.host_edit.setPlaceholderText("ldap.example.com")
+        self.host_edit.setToolTip("Host or URI, e.g. ldap.example.com, ldap://ldap.example.com:1389, or ldaps://ldap.example.com:1636")
+        self.port_edit = QtWidgets.QLineEdit()
+        self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
+        self.port_edit.setPlaceholderText("389")
+        self.port_edit.setToolTip("Any LDAP port is supported, e.g. 389, 636, 1389, 1636")
+
+        self.use_ssl_cb = QtWidgets.QCheckBox("Use SSL (LDAPS)")
+        self.start_tls_cb = QtWidgets.QCheckBox("Use StartTLS")
+        self.auto_create_parents_cb = QtWidgets.QCheckBox("Auto-create missing parent containers")
+        self.auto_create_parents_cb.setToolTip("When enabled, export can create missing OU/DC parent containers before adding user entries.")
+
+        self.base_dn_edit = QtWidgets.QLineEdit()
+        self.base_dn_edit.setPlaceholderText("ou=People,dc=example,dc=com")
+        self.bind_dn_edit = QtWidgets.QLineEdit()
+        self.bind_dn_edit.setPlaceholderText("cn=admin,dc=example,dc=com")
+
+        self.pw_edit = QtWidgets.QLineEdit()
+        self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.show_pw_btn = QtWidgets.QPushButton("Show")
+        self.show_pw_btn.setCheckable(True)
+        self.show_pw_btn.toggled.connect(self._toggle_password_visibility)
+        pw_row = QtWidgets.QHBoxLayout()
+        pw_row.addWidget(self.pw_edit, 1)
+        pw_row.addWidget(self.show_pw_btn)
+
+        self.filter_edit = QtWidgets.QLineEdit()
+        self.filter_edit.setPlaceholderText("(objectClass=person)")
+        self.rdn_attr_edit = QtWidgets.QLineEdit()
+        self.rdn_attr_edit.setPlaceholderText("uid")
+        self.timeout_edit = QtWidgets.QLineEdit()
+        self.timeout_edit.setValidator(QtGui.QIntValidator(3, 120))
+        self.timeout_edit.setPlaceholderText("30")
+        self.timeout_edit.setToolTip("LDAP connect timeout in seconds (3-120)")
+
+        form.addRow("Name:", self.name_edit)
+        form.addRow("Host:", self.host_edit)
+        form.addRow("Port:", self.port_edit)
+        form.addRow("", self.use_ssl_cb)
+        form.addRow("", self.start_tls_cb)
+        form.addRow("", self.auto_create_parents_cb)
+        form.addRow("Base DN:", self.base_dn_edit)
+        form.addRow("Bind DN:", self.bind_dn_edit)
+        form.addRow("Password:", pw_row)
+        form.addRow("Search Filter:", self.filter_edit)
+        form.addRow("RDN Attribute:", self.rdn_attr_edit)
+        form.addRow("Timeout (sec):", self.timeout_edit)
+        layout.addLayout(form)
+
+        self.sample_label = QtWidgets.QLabel("")
+        self.sample_label.setWordWrap(True)
+        self.sample_label.setStyleSheet("background-color: #f0f0f0; padding: 8px; border-radius: 4px;")
+        self.sample_label.setVisible(False)
+        layout.addWidget(self.sample_label)
+
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label)
+
+        action_row = QtWidgets.QHBoxLayout()
+        test_btn = QtWidgets.QPushButton("Test Connection")
+        test_btn.clicked.connect(self._on_test)
+        new_btn = QtWidgets.QPushButton("New Connection")
+        new_btn.setToolTip("Clear fields so you can enter a new LDAP connection")
+        new_btn.clicked.connect(self._new_connection)
+        action_row.addWidget(test_btn)
+        action_row.addWidget(new_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self.save_cb = QtWidgets.QCheckBox("Save this connection")
+        self.save_cb.setChecked(True)
+        layout.addWidget(self.save_cb)
+
+        btn_layout = QtWidgets.QHBoxLayout()
+        use_btn = QtWidgets.QPushButton("Use This Connection")
+        use_btn.clicked.connect(self._on_use)
+        self.use_btn = use_btn
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._validate_and_accept)
+        btns.rejected.connect(self.reject)
+
+        btn_layout.addWidget(use_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btns)
+        layout.addLayout(btn_layout)
+
+        self.use_ssl_cb.toggled.connect(self._sync_port_with_tls)
+
+        if initial:
+            self.name_edit.setText(initial.get('name', ''))
+            self.host_edit.setText(initial.get('host', ''))
+            self.port_edit.setText(str(initial.get('port', '')))
+            self.use_ssl_cb.setChecked(bool(initial.get('use_ssl', False)))
+            self.start_tls_cb.setChecked(bool(initial.get('start_tls', False)))
+            self.auto_create_parents_cb.setChecked(bool(initial.get('auto_create_parents', True)))
+            self.base_dn_edit.setText(initial.get('base_dn', ''))
+            self.bind_dn_edit.setText(initial.get('bind_dn', ''))
+            self.pw_edit.setText(initial.get('password', ''))
+            self.filter_edit.setText(initial.get('search_filter', '(objectClass=person)'))
+            self.rdn_attr_edit.setText(initial.get('rdn_attribute', 'uid'))
+            self.timeout_edit.setText(str(initial.get('timeout', 30)))
+        else:
+            self.auto_create_parents_cb.setChecked(True)
+
+        if not self.port_edit.text().strip():
+            self._sync_port_with_tls()
+        if not self.filter_edit.text().strip():
+            self.filter_edit.setText('(objectClass=person)')
+        if not self.rdn_attr_edit.text().strip():
+            self.rdn_attr_edit.setText('uid')
+        if not self.timeout_edit.text().strip():
+            self.timeout_edit.setText('30')
+        ensure_dialog_caption_fit(self)
+
+    def _new_connection(self):
+        """Reset fields to defaults so user can define a new LDAP connection."""
+        self.name_edit.clear()
+        self.host_edit.clear()
+        self.port_edit.clear()
+        self.use_ssl_cb.setChecked(False)
+        self.start_tls_cb.setChecked(False)
+        self.auto_create_parents_cb.setChecked(True)
+        self.base_dn_edit.clear()
+        self.bind_dn_edit.clear()
+        self.pw_edit.clear()
+        self.filter_edit.setText('(objectClass=person)')
+        self.rdn_attr_edit.setText('uid')
+        self.timeout_edit.setText('30')
+        self.sample_label.setVisible(False)
+        self.status_label.setText('')
+        self.save_cb.setChecked(True)
+        self._sync_port_with_tls()
+        self.name_edit.setFocus()
+
+    def _toggle_password_visibility(self, checked: bool):
+        if checked:
+            self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
+            self.show_pw_btn.setText("Hide")
+        else:
+            self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+            self.show_pw_btn.setText("Show")
+
+    def _sync_port_with_tls(self):
+        if self.port_edit.text().strip():
+            return
+        self.port_edit.setText("636" if self.use_ssl_cb.isChecked() else "389")
+
+    def _validate_and_accept(self):
+        if not self.name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Invalid Name", "Connection name cannot be empty.")
+            self.name_edit.setFocus()
+            return
+        if not self.host_edit.text().strip() or not self.base_dn_edit.text().strip() or not self.bind_dn_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Missing Details", "Host, Base DN, and Bind DN are required.")
+            return
+        self.accept()
+
+    def _on_test(self):
+        try:
+            from api import ldap_utils
+        except ModuleNotFoundError:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Missing Dependency",
+                "ldap3 is not installed. Please install requirements and restart (e.g. `pip install -r requirements.txt`)."
+            )
+            self.status_label.setText("Dependency missing.")
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        self.status_label.setText("Testing connection...")
+        QtWidgets.QApplication.processEvents()
+        timeout = int(self.timeout_edit.text() or 30)
+        ok, err = ldap_utils.test_connection(
+            self.host_edit.text().strip(),
+            int(self.port_edit.text() or 0),
+            bool(self.use_ssl_cb.isChecked()),
+            self.bind_dn_edit.text().strip(),
+            self.pw_edit.text(),
+            self.base_dn_edit.text().strip(),
+            bool(self.start_tls_cb.isChecked()),
+            timeout=timeout,
+        )
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not ok:
+            self.status_label.setText("Connection failed.")
+            msg = "Failed to connect to LDAP directory."
+            if err:
+                msg += f"\n\nError details:\n{err}"
+            QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
+            self.sample_label.setVisible(False)
+            return
+
+        self.status_label.setText("Connection successful.")
+        try:
+            sample = ldap_utils.get_entry_sample(
+                self.host_edit.text().strip(),
+                int(self.port_edit.text() or 0),
+                bool(self.use_ssl_cb.isChecked()),
+                self.bind_dn_edit.text().strip(),
+                self.pw_edit.text(),
+                self.base_dn_edit.text().strip(),
+                self.filter_edit.text().strip() or "(objectClass=person)",
+                bool(self.start_tls_cb.isChecked()),
+                timeout=timeout,
+            )
+            if sample:
+                fields = []
+                for key in sorted(sample.keys())[:6]:
+                    fields.append(f"{key}={sample[key]}")
+                self.sample_label.setText("Sample entry: " + " | ".join(fields))
+                self.sample_label.setVisible(True)
+            else:
+                self.sample_label.setText("Connected, but no matching entries found.")
+                self.sample_label.setVisible(True)
+        except Exception as exc:
+            self.sample_label.setText(f"Connected, but sample read failed: {exc}")
+            self.sample_label.setVisible(True)
+
+    def _on_use(self):
+        self._validate_and_accept()
+        if self.result() == QtWidgets.QDialog.Accepted:
+            self.use_connection = True
+
+    def get_connection_data(self) -> dict:
+        return {
+            'name': self.name_edit.text().strip(),
+            'host': self.host_edit.text().strip(),
+            'port': int(self.port_edit.text() or 0),
+            'use_ssl': bool(self.use_ssl_cb.isChecked()),
+            'start_tls': bool(self.start_tls_cb.isChecked()),
+            'auto_create_parents': bool(self.auto_create_parents_cb.isChecked()),
+            'base_dn': self.base_dn_edit.text().strip(),
+            'bind_dn': self.bind_dn_edit.text().strip(),
+            'password': self.pw_edit.text(),
+            'search_filter': (self.filter_edit.text().strip() or '(objectClass=person)'),
+            'rdn_attribute': (self.rdn_attr_edit.text().strip() or 'uid'),
+            'timeout': int(self.timeout_edit.text() or 30),
+            'save': bool(self.save_cb.isChecked()),
+            'use': getattr(self, 'use_connection', False),
+        }
+
+
+class LDAPConnectionsManager(QtWidgets.QDialog):
+    """List, create, edit, and delete saved LDAP connections."""
+
+    def __init__(self, connections: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage LDAP Connections")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(600, dpi), scale_size(400, dpi))
+        self.connections = connections
+        self.result = connections.copy()
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.itemActivated.connect(self.edit)
+        self.list_widget.itemSelectionChanged.connect(self._update_button_state)
+        layout.addWidget(self.list_widget)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.add_btn = QtWidgets.QPushButton("Add")
+        self.edit_btn = QtWidgets.QPushButton("Edit")
+        self.del_btn = QtWidgets.QPushButton("Delete")
+        self.add_btn.clicked.connect(self.add)
+        self.edit_btn.clicked.connect(self.edit)
+        self.del_btn.clicked.connect(self.delete)
+        btn_row.addWidget(self.add_btn)
+        btn_row.addWidget(self.edit_btn)
+        btn_row.addWidget(self.del_btn)
+        layout.addLayout(btn_row)
+
+        close_btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close_btns.rejected.connect(self.reject)
+        layout.addWidget(close_btns)
+
+        self._populate(self.result)
+        ensure_dialog_caption_fit(self)
+
+    def _populate(self, connections: dict):
+        self.list_widget.blockSignals(True)
+        self.list_widget.clear()
+        for name in sorted(connections.keys()):
+            self.list_widget.addItem(name)
+        self.list_widget.blockSignals(False)
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(self.list_widget.count() - 1)
+        self._update_button_state()
+
+    def _update_button_state(self):
+        has_selection = self.list_widget.currentItem() is not None
+        self.edit_btn.setEnabled(has_selection)
+        self.del_btn.setEnabled(has_selection)
+
+    def add(self):
+        dlg = LDAPConnectionDialog(parent=self)
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            data = dlg.get_connection_data()
+            if not data.get('save', True):
+                return
+            name = data.get('name')
+            if name:
+                if name in self.result:
+                    resp = QtWidgets.QMessageBox.question(
+                        self,
+                        "Replace Connection",
+                        f"A connection named '{name}' already exists. Replace it?",
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    )
+                    if resp != QtWidgets.QMessageBox.Yes:
+                        return
+                self.result[name] = data
+                self._populate(self.result)
+
+    def edit(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        name = item.text()
+        dlg = LDAPConnectionDialog(initial=self.result.get(name, {}), parent=self)
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            data = dlg.get_connection_data()
+            if not data.get('save', True):
+                if name in self.result:
+                    del self.result[name]
+                    self._populate(self.result)
+                return
+            new_name = data.get('name')
+            if new_name and new_name != name:
+                del self.result[name]
+            self.result[new_name] = data
             self._populate(self.result)
 
     def delete(self):
@@ -1562,6 +1994,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+        ensure_dialog_caption_fit(self)
 
     def _normalize_mapping_token(self, value: str) -> str:
         token = str(value or '').strip().lower()
@@ -1749,6 +2182,112 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         return bool(self.remember_cb.isChecked())
 
 
+class LDAPMappingDialog(DatabaseMappingDialog):
+    """Mapping dialog for LDAP directory attributes and PingOne attributes.
+
+    Mirrors DatabaseMappingDialog but uses LDAP-specific labels and terminology.
+
+    - ``'import'``: LDAP attributes -> PingOne attributes
+    - ``'export'``: PingOne attributes -> LDAP attributes
+    """
+
+    # Well-known PingOne attribute -> canonical LDAP attribute name mapping.
+    # Used so the dialog auto-suggests correct LDAP names (e.g. `mail` not `email`).
+    _PINGONE_TO_LDAP: Dict[str, str] = {
+        'email': 'mail',
+        'username': 'cn',
+        'name.formatted': 'cn',
+        'name.given': 'givenName',
+        'name.family': 'sn',
+        'name.middle': 'initials',
+        'phoneNumbers.work': 'telephoneNumber',
+        'phoneNumbers.mobile': 'mobile',
+        'phoneNumbers.home': 'homePhone',
+        'address.streetAddress': 'street',
+        'address.locality': 'l',
+        'address.region': 'st',
+        'address.postalCode': 'postalCode',
+        'address.countryCode': 'c',
+        'title': 'title',
+        'department': 'departmentNumber',
+        'organization': 'o',
+        'description': 'description',
+    }
+
+    # Reverse map: canonical LDAP -> PingOne attribute, with extra common aliases.
+    _LDAP_TO_PINGONE: Dict[str, str] = {
+        'mail': 'email',
+        'uid': 'username',
+        'cn': 'name.formatted',
+        'givenname': 'name.given',
+        'sn': 'name.family',
+        'surname': 'name.family',
+        'initials': 'name.middle',
+        'telephonenumber': 'phoneNumbers.work',
+        'mobile': 'phoneNumbers.mobile',
+        'homephone': 'phoneNumbers.home',
+        'street': 'address.streetAddress',
+        'l': 'address.locality',
+        'st': 'address.region',
+        'postalcode': 'address.postalCode',
+        'c': 'address.countryCode',
+        'title': 'title',
+        'departmentnumber': 'department',
+        'o': 'organization',
+        'description': 'description',
+    }
+
+    def _suggest_db_column(self, pingone_attr: str) -> str:
+        """Suggest the LDAP attribute name for a PingOne export attribute."""
+        norm = self._normalize_mapping_token(pingone_attr)
+        for p_attr, ldap_name in self._PINGONE_TO_LDAP.items():
+            if self._normalize_mapping_token(p_attr) == norm:
+                # Prefer the known LDAP attr if the server advertised it.
+                for col in self.table_cols:
+                    if self._normalize_mapping_token(col) == self._normalize_mapping_token(ldap_name):
+                        return col
+                # Still return the correct LDAP name as a free-text suggestion.
+                return ldap_name
+        return super()._suggest_db_column(pingone_attr)
+
+    def _suggest_pingone_attr(self, ldap_attr: str, phone_type: str = '') -> str:
+        """Suggest the PingOne attribute name for an LDAP import attribute."""
+        if phone_type:
+            return super()._suggest_pingone_attr(ldap_attr, phone_type)
+        norm = self._normalize_mapping_token(ldap_attr)
+        for l_attr, p_attr in self._LDAP_TO_PINGONE.items():
+            if self._normalize_mapping_token(l_attr) == norm:
+                for pa in self.pingone_attrs:
+                    if self._normalize_mapping_token(pa) == self._normalize_mapping_token(p_attr):
+                        return pa
+                return p_attr
+        return super()._suggest_pingone_attr(ldap_attr, phone_type)
+
+    def __init__(self, ldap_attrs: List[str], pingone_attrs: List[str], direction: str = 'import', sample_row: Optional[dict] = None, initial_mapping: Optional[dict] = None, parent=None):
+        super().__init__(ldap_attrs, pingone_attrs, direction=direction, sample_row=sample_row, initial_mapping=initial_mapping, parent=parent)
+        self.setWindowTitle("LDAP Mapping")
+
+        layout = self.layout()
+        # Replace the direction label (always first widget in the layout)
+        old_label = layout.itemAt(0).widget()
+        if isinstance(old_label, QtWidgets.QLabel):
+            old_label.setText(
+                "LDAP attribute \u2192 PingOne attribute"
+                if direction == 'import'
+                else "PingOne attribute \u2192 LDAP attribute"
+            )
+
+        # Replace column headers
+        if direction == 'import':
+            self.table.setHorizontalHeaderLabels(["LDAP Attribute", "Sample Value", "PingOne Attribute"])
+        else:
+            self.table.setHorizontalHeaderLabels(["PingOne Attribute", "Example Value", "Target LDAP Attribute"])
+
+        # Replace the remember checkbox text
+        self.remember_cb.setText("Save mapping in LDAP connection settings")
+
+        ensure_dialog_caption_fit(self)
+
 
 class ExportOptionsDialog(QtWidgets.QDialog):
     """Dialog to choose export options: selected vs all rows, visible vs all columns.
@@ -1802,6 +2341,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+        ensure_dialog_caption_fit(self)
 
     def get_options(self) -> dict:
         rows = 'selected' if self.rb_sel.isChecked() and self.rb_sel.isEnabled() else 'all'
@@ -1917,6 +2457,7 @@ class NewProfileDialog(QtWidgets.QDialog):
         
         # Focus on name field
         self.name_edit.setFocus()
+        ensure_dialog_caption_fit(self)
     
     def _toggle_secret_visibility(self, checked):
         """Toggle client secret visibility."""
@@ -2075,6 +2616,7 @@ class ProfileManagerDialog(QtWidgets.QDialog):
         
         # Populate the list
         self.populate_profiles()
+        ensure_dialog_caption_fit(self)
     
     def populate_profiles(self):
         """Populate the profile list widget with all available profiles."""
@@ -2282,16 +2824,27 @@ class ProfileManagerDialog(QtWidgets.QDialog):
 class ImportWizardDialog(QtWidgets.QDialog):
     """Wizard-style dialog for import with back/forward navigation and radio buttons."""
     
-    def __init__(self, parent=None, db_connections: dict = None):
+    def __init__(
+        self,
+        parent=None,
+        db_connections: dict = None,
+        ldap_connections: dict = None,
+        manage_db_callback=None,
+        manage_ldap_callback=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Import Data - Wizard")
         self.setModal(True)
         self.setMinimumSize(500, 300)
         
         self.db_connections = db_connections or {}
+        self.ldap_connections = ldap_connections or {}
+        self.manage_db_callback = manage_db_callback
+        self.manage_ldap_callback = manage_ldap_callback
         self.current_step = 0
         self.selected_connection = None
         self.result = {}
+        self._new_ldap_option = "<Create New LDAP Config...>"
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -2331,6 +2884,7 @@ class ImportWizardDialog(QtWidgets.QDialog):
         layout.addLayout(nav_layout)
         
         self.show_step(0)
+        ensure_dialog_caption_fit(self)
     
     def show_step(self, step: int):
         """Show the appropriate step of the wizard."""
@@ -2362,37 +2916,103 @@ class ImportWizardDialog(QtWidgets.QDialog):
         self.next_btn.setText("Next" if step < 2 else "Finish")
     
     def show_import_type_selection(self):
-        """Step 0: Select import type (CSV, LDIF, Database)."""
+        """Step 0: Select import type (CSV, LDIF, Database, LDAP)."""
         label = QtWidgets.QLabel("Select Import Format:")
         self.content_layout.addWidget(label)
         
         self.rb_csv = QtWidgets.QRadioButton("CSV File")
         self.rb_ldif = QtWidgets.QRadioButton("LDIF File")
         self.rb_db = QtWidgets.QRadioButton("Database")
+        self.rb_ldap = QtWidgets.QRadioButton("LDAP Directory")
         self.rb_csv.setChecked(True)
         
         self.content_layout.addWidget(self.rb_csv)
         self.content_layout.addWidget(self.rb_ldif)
         self.content_layout.addWidget(self.rb_db)
+        self.content_layout.addWidget(self.rb_ldap)
         self.content_layout.addStretch()
     
     def show_connection_selection(self):
-        """Step 1: Select database connection (only for DB import)."""
-        label = QtWidgets.QLabel("Select Database Connection:")
+        """Step 1: Select source connection (DB or LDAP)."""
+        source_type = self.result.get('source_type')
+        if source_type == 'ldap':
+            label = QtWidgets.QLabel("Select LDAP Connection:")
+            source_connections = self.ldap_connections
+        else:
+            label = QtWidgets.QLabel("Select Database Connection:")
+            source_connections = self.db_connections
         self.content_layout.addWidget(label)
         
         self.conn_combo = QtWidgets.QComboBox()
-        if self.db_connections:
-            self.conn_combo.addItems(list(self.db_connections.keys()))
+        if source_connections:
+            if source_type == 'ldap':
+                self.conn_combo.addItem(self._new_ldap_option)
+            self.conn_combo.addItems(list(source_connections.keys()))
         else:
             self.conn_combo.addItem("(No connections available)")
             self.next_btn.setEnabled(False)
         
         self.content_layout.addWidget(self.conn_combo)
+
+        if not source_connections:
+            if source_type == 'ldap':
+                note = QtWidgets.QLabel("No LDAP connections found. Use LDAP connection management to add one.")
+            else:
+                note = QtWidgets.QLabel("No database connections found. Use DB connection management to add one.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #666;")
+            self.content_layout.addWidget(note)
+
+            if source_type == 'ldap':
+                manage_btn = QtWidgets.QPushButton("Manage LDAP Connections...")
+                manage_btn.clicked.connect(self._manage_ldap_connections)
+            else:
+                manage_btn = QtWidgets.QPushButton("Manage DB Connections...")
+                manage_btn.clicked.connect(self._manage_db_connections)
+            self.content_layout.addWidget(manage_btn)
+
         self.content_layout.addStretch()
+
+    def _manage_db_connections(self):
+        """Open DB connection manager and refresh wizard connection list."""
+        if callable(self.manage_db_callback):
+            try:
+                self.manage_db_callback()
+            except Exception:
+                pass
+        self._reload_connections_from_parent()
+        self.show_step(1)
+
+    def _manage_ldap_connections(self):
+        """Open LDAP connection manager and refresh wizard connection list."""
+        if callable(self.manage_ldap_callback):
+            try:
+                self.manage_ldap_callback()
+            except Exception:
+                pass
+        self._reload_connections_from_parent()
+        self.show_step(1)
+
+    def _reload_connections_from_parent(self):
+        """Refresh local connection snapshots after manager dialogs close."""
+        p = self.parent()
+        if p is None or not hasattr(p, '_read_config'):
+            return
+        try:
+            cfg = p._read_config()
+            self.db_connections = cfg.get('db_connections', {})
+            self.ldap_connections = cfg.get('ldap_connections', {})
+        except Exception:
+            pass
     
     def show_query_mode_selection(self):
-        """Step 2: Select Table vs Custom Query."""
+        """Step 2: Select DB table/query mode or skip for LDAP."""
+        if self.result.get('source_type') == 'ldap':
+            label = QtWidgets.QLabel("LDAP import is ready.")
+            self.content_layout.addWidget(label)
+            self.content_layout.addStretch()
+            return
+
         label = QtWidgets.QLabel("Select Import Source:")
         self.content_layout.addWidget(label)
         
@@ -2417,16 +3037,23 @@ class ImportWizardDialog(QtWidgets.QDialog):
             elif self.rb_db.isChecked():
                 self.result['source_type'] = 'db'
                 self.show_step(1)
+            elif self.rb_ldap.isChecked():
+                self.result['source_type'] = 'ldap'
+                self.show_step(1)
         elif self.current_step == 1:
             self.selected_connection = self.conn_combo.currentText()
+            if self.result.get('source_type') == 'ldap' and self.selected_connection == self._new_ldap_option:
+                self._manage_ldap_connections()
+                return
             if not self.selected_connection or self.selected_connection == "(No connections available)":
-                QtWidgets.QMessageBox.warning(self, "No Connection", "Please select a valid database connection.")
+                QtWidgets.QMessageBox.warning(self, "No Connection", "Please select a valid connection.")
                 return
             self.result['connection_name'] = self.selected_connection
             self.show_step(2)
         elif self.current_step == 2:
-            query_mode = 'custom' if self.rb_custom.isChecked() else 'table'
-            self.result['query_mode'] = query_mode
+            if self.result.get('source_type') == 'db':
+                query_mode = 'custom' if self.rb_custom.isChecked() else 'table'
+                self.result['query_mode'] = query_mode
             self.accept()
     
     def go_back(self):

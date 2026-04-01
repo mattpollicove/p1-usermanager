@@ -31,7 +31,10 @@ from ui.dialogs import (
     ProfileManagerDialog,
     DatabaseConnectionDialog,
     DBConnectionsManager,
+    LDAPConnectionDialog,
+    LDAPConnectionsManager,
     DatabaseMappingDialog,
+    LDAPMappingDialog,
 )
 from ui.themes import ThemeManager
 
@@ -54,7 +57,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.70"
+APP_VERSION = "0.71"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 
 
@@ -95,6 +98,7 @@ Database Import/Export:
 - Use File → Manage DB Connections (or the button in Configuration tab) to define connections.
 - Supported types: MSSQL and MariaDB/MySQL. Provide JDBC/ODBC driver path if needed.
 - After defining a connection you can import or export data via the toolbar buttons on the User Management tab.
+- LDAP directories are also supported via Manage LDAP Connections.
 - Use the Configuration action "Open PingOne Console" to launch the active environment in your browser.
 
 Status Bar:
@@ -139,8 +143,10 @@ Importing Users:
   • You can assign a fixed population to all imported users
   • Check "Remember mapping for this profile" to save mappings
 - Database import: first define a connection via File → Manage DB Connections or the Configuration tab button, then click "Import DB" on the User Management toolbar and follow the prompts to select a table and map its columns.
+- LDAP import: define a directory in "Manage LDAP Connections", then use Import and select "LDAP Directory" to map LDAP attributes to PingOne attributes.
 - Imported attributes not currently shown are automatically added to the grid columns after import.
 - For DB imports/exports, you can save custom queries and mapping selections in DB connection settings; saved queries auto-reuse their saved mappings.
+- LDAP mappings can also be saved per LDAP connection for reuse.
 - During import preparation, PingOne attributes are refreshed from live user data so custom attributes appear in mapping choices.
 - Usernames are normalized (whitespace trimmed, case-insensitive comparison).
 - If a username already exists on the server, the import updates that user instead of creating a duplicate.
@@ -152,6 +158,7 @@ Exporting Users:
 - Choose to export all columns or only visible columns.
 - Check "Remember these choices" to save export preferences per-profile.
 - Database export: click "Export DB" on the toolbar (after defining a connection) to map PingOne attributes to target table columns; the table will be created if it does not already exist.
+- LDAP export: choose "Export → LDAP Directory" and map PingOne attributes to LDAP attributes; entries are created or updated by DN.
 
 Deleting Users:
 - Select one or more rows and click "Delete Selected" or use the context menu.
@@ -419,6 +426,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Delete Profile",
             "View Connection Log",
             "Manage DB Connections",
+            "Manage LDAP Connections",
         ])
         self.config_action_combo.setToolTip("Select a configuration action")
         self.config_action_execute_btn = QtWidgets.QPushButton("Execute")
@@ -487,6 +495,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Select Columns",
             "Save Layout",
             "Manage DB Connections",
+            "Manage LDAP Connections",
         ])
         self.command_combo.setToolTip("Select a command for the user table")
         self.command_execute_btn = QtWidgets.QPushButton("Execute")
@@ -601,6 +610,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Select Columns": self.select_columns,
             "Save Layout": self.save_columns_to_config,
             "Manage DB Connections": self.manage_db_connections,
+            "Manage LDAP Connections": self.manage_ldap_connections,
         }
         fn = handlers.get(cmd)
         if fn:
@@ -617,6 +627,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Delete Profile": self.delete_current_profile,
             "View Connection Log": self.view_connection_log,
             "Manage DB Connections": self.manage_db_connections,
+            "Manage LDAP Connections": self.manage_ldap_connections,
         }
         fn = handlers.get(action)
         if fn:
@@ -758,8 +769,15 @@ class MainWindow(QtWidgets.QMainWindow):
         
         cfg = self._read_config()
         dbs = cfg.get('db_connections', {})
+        ldaps = cfg.get('ldap_connections', {})
         
-        dlg = ImportWizardDialog(self, db_connections=dbs)
+        dlg = ImportWizardDialog(
+            self,
+            db_connections=dbs,
+            ldap_connections=ldaps,
+            manage_db_callback=self.manage_db_connections,
+            manage_ldap_callback=self.manage_ldap_connections,
+        )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
         
@@ -776,27 +794,47 @@ class MainWindow(QtWidgets.QMainWindow):
                     connection_name=result.get('connection_name'),
                     query_mode=result.get('query_mode', 'table')
                 )
+            elif source_type == 'ldap':
+                self.import_from_ldap_directory_wizard(
+                    connection_name=result.get('connection_name')
+                )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
     def _show_export_menu(self):
         """Show export options dialog for CSV, LDIF, or Database."""
-        options, ok = QtWidgets.QInputDialog.getItem(
-            self,
-            "Export",
-            "Select export format:",
-            ["CSV", "LDIF", "Database"],
-            editable=False
-        )
-        if not ok:
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Export")
+        dlg.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.addWidget(QtWidgets.QLabel("Select export format:"))
+
+        rb_csv = QtWidgets.QRadioButton("CSV")
+        rb_ldif = QtWidgets.QRadioButton("LDIF")
+        rb_db = QtWidgets.QRadioButton("Database")
+        rb_ldap = QtWidgets.QRadioButton("LDAP Directory")
+        rb_csv.setChecked(True)
+        layout.addWidget(rb_csv)
+        layout.addWidget(rb_ldif)
+        layout.addWidget(rb_db)
+        layout.addWidget(rb_ldap)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        
-        if options == "CSV":
+
+        if rb_csv.isChecked():
             self.export_to_csv()
-        elif options == "LDIF":
+        elif rb_ldif.isChecked():
             self.export_to_ldif()
-        elif options == "Database":
+        elif rb_db.isChecked():
             self.export_to_database()
+        elif rb_ldap.isChecked():
+            self.export_to_ldap_directory()
 
     def _set_last_data_source(self, source: str):
         """Update status bar with the most recent DB connection or input file source."""
@@ -1269,6 +1307,452 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(cfg, f, indent=4)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "DB Connections", f"Failed to manage DB connections: {e}")
+
+    def manage_ldap_connections(self):
+        """Show LDAP connections manager and persist updates."""
+        try:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            dlg = LDAPConnectionsManager(conns.copy(), self)
+            dlg.exec()
+            cfg['ldap_connections'] = dlg.get_connections()
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "LDAP Connections", f"Failed to manage LDAP connections: {e}")
+
+    def _save_ldap_connection_settings(self, connection_name: str, updates: dict):
+        """Persist additional per-connection LDAP settings."""
+        if not connection_name or not updates:
+            return
+        try:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            if connection_name not in conns:
+                return
+            conns[connection_name].update(updates)
+            cfg['ldap_connections'] = conns
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
+
+    def _edit_ldap_connection(self, connection_name: str) -> str:
+        """Edit one LDAP connection and persist changes.
+
+        Returns the updated connection name, or the original name if cancelled.
+        """
+        if not connection_name:
+            return connection_name
+        try:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            if connection_name not in conns:
+                return connection_name
+
+            dlg = LDAPConnectionDialog(initial=conns.get(connection_name, {}), parent=self)
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return connection_name
+
+            new_data = dlg.get_connection_data()
+            if not new_data.get('save', True):
+                if connection_name in conns:
+                    del conns[connection_name]
+                    cfg['ldap_connections'] = conns
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                return ''
+
+            new_name = new_data.get('name', '').strip() or connection_name
+            if new_name != connection_name and connection_name in conns:
+                del conns[connection_name]
+            conns[new_name] = new_data
+            cfg['ldap_connections'] = conns
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+            return new_name
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "LDAP Connections", f"Failed to edit LDAP connection: {e}")
+            return connection_name
+
+    def _choose_ldap_connection(self, title: str = "Select LDAP Connection"):
+        """Choose an LDAP connection with inline Edit/Manage actions.
+
+        Returns ``(name, conns)`` or ``(None, conns)`` when cancelled.
+        """
+        create_opt = "<Create New LDAP Config...>"
+        while True:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            if not conns:
+                QtWidgets.QMessageBox.information(self, title, "No LDAP connections defined. Please create one first.")
+                self.manage_ldap_connections()
+                cfg = self._read_config()
+                conns = cfg.get('ldap_connections', {})
+                if not conns:
+                    return None, conns
+
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle(title)
+            dlg.setModal(True)
+            layout = QtWidgets.QVBoxLayout(dlg)
+            layout.addWidget(QtWidgets.QLabel("Connection:"))
+
+            combo = QtWidgets.QComboBox()
+            names = [create_opt] + list(conns.keys())
+            combo.addItems(names)
+            layout.addWidget(combo)
+
+            action = {'value': 'ok'}
+
+            action_row = QtWidgets.QHBoxLayout()
+            edit_btn = QtWidgets.QPushButton("Edit...")
+            manage_btn = QtWidgets.QPushButton("Manage...")
+            action_row.addWidget(edit_btn)
+            action_row.addWidget(manage_btn)
+            action_row.addStretch()
+            layout.addLayout(action_row)
+
+            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            layout.addWidget(btns)
+
+            def _edit_selected():
+                action['value'] = 'edit'
+                dlg.accept()
+
+            def _manage_all():
+                action['value'] = 'manage'
+                dlg.accept()
+
+            edit_btn.clicked.connect(_edit_selected)
+            manage_btn.clicked.connect(_manage_all)
+
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return None, conns
+
+            selected = combo.currentText().strip()
+            if action['value'] == 'manage' or selected == create_opt:
+                self.manage_ldap_connections()
+                continue
+
+            if action['value'] == 'edit':
+                if selected and selected != create_opt and selected in conns:
+                    self._edit_ldap_connection(selected)
+                continue
+
+            if selected and selected in conns:
+                return selected, conns
+
+    def import_from_ldap_directory_wizard(self, connection_name: str):
+        """Import users from a selected LDAP connection (wizard entry point)."""
+        try:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            if not connection_name or connection_name not in conns:
+                QtWidgets.QMessageBox.critical(self, "Import LDAP", "Connection not found.")
+                return
+            self._import_from_ldap_connection(connection_name, conns[connection_name])
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import LDAP", str(e))
+
+    def import_from_ldap_directory(self):
+        """Initiate import flow from an LDAP directory."""
+        try:
+            name, conns = self._choose_ldap_connection("Select LDAP Connection")
+            if not name:
+                return
+            self._import_from_ldap_connection(name, conns[name])
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import LDAP", str(e))
+
+    def _import_from_ldap_connection(self, connection_name: str, conn: dict):
+        """Import users from an LDAP connection using the mapping dialog flow."""
+        try:
+            from api import ldap_utils
+        except ModuleNotFoundError:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Import LDAP",
+                "ldap3 is not installed. Please run `pip install -r requirements.txt`."
+            )
+            return
+
+        ok, err = ldap_utils.test_connection(
+            conn.get('host', ''),
+            int(conn.get('port', 0) or 0),
+            bool(conn.get('use_ssl', False)),
+            conn.get('bind_dn', ''),
+            conn.get('password', ''),
+            conn.get('base_dn', ''),
+            bool(conn.get('start_tls', False)),
+            timeout=int(conn.get('timeout', 30) or 30),
+        )
+        if not ok:
+            QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
+            return
+
+        search_filter = conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)'
+        try:
+            rows = ldap_utils.get_entries(
+                conn.get('host', ''),
+                int(conn.get('port', 0) or 0),
+                bool(conn.get('use_ssl', False)),
+                conn.get('bind_dn', ''),
+                conn.get('password', ''),
+                conn.get('base_dn', ''),
+                search_filter=search_filter,
+                attributes=None,
+                limit=None,
+                start_tls=bool(conn.get('start_tls', False)),
+                timeout=int(conn.get('timeout', 30) or 30),
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Failed to read LDAP entries: {e}")
+            return
+
+        if not rows:
+            QtWidgets.QMessageBox.information(self, "Import LDAP", "No matching LDAP entries were found.")
+            return
+
+        sample = rows[0]
+        source_fields = sorted([k for k in sample.keys() if k and k.lower() != 'dn'])
+
+        client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        pops = {}
+        try:
+            token = asyncio.run(client.get_token())
+            if token:
+                pops = asyncio.run(client.get_populations())
+        except Exception:
+            pass
+
+        ping_attrs = self._get_pingone_attributes_for_import(client)
+        initial_mapping = conn.get('ldap_import_mapping', {})
+        dlg = LDAPMappingDialog(
+            source_fields,
+            ping_attrs,
+            direction='import',
+            sample_row=sample,
+            initial_mapping=initial_mapping,
+            parent=self,
+        )
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        mapping = dlg.get_mapping()
+        if not mapping:
+            QtWidgets.QMessageBox.information(self, "Import LDAP", "No attributes were mapped; import cancelled.")
+            return
+        if dlg.remember_mapping():
+            self._save_ldap_connection_settings(connection_name, {'ldap_import_mapping': mapping})
+
+        users = self._convert_rows_to_users(rows, mapping, client, pops)
+        self._set_last_data_source(f"LDAP {connection_name}: {conn.get('base_dn', '')}")
+        self._perform_import_sequence(users, client, pops)
+
+    def export_to_ldap_directory(self):
+        """Initiate export flow from PingOne users to LDAP entries."""
+        if not self.users_cache:
+            QtWidgets.QMessageBox.information(self, "Export LDAP", "No users to export.")
+            return
+        try:
+            name, conns = self._choose_ldap_connection("Select LDAP Connection")
+            if not name:
+                return
+            conn = conns[name]
+
+            try:
+                from api import ldap_utils
+            except ModuleNotFoundError:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Export LDAP",
+                    "ldap3 is not installed. Please run `pip install -r requirements.txt`."
+                )
+                return
+
+            ok, err = ldap_utils.test_connection(
+                conn.get('host', ''),
+                int(conn.get('port', 0) or 0),
+                bool(conn.get('use_ssl', False)),
+                conn.get('bind_dn', ''),
+                conn.get('password', ''),
+                conn.get('base_dn', ''),
+                bool(conn.get('start_tls', False)),
+                timeout=int(conn.get('timeout', 30) or 30),
+            )
+            if not ok:
+                QtWidgets.QMessageBox.critical(self, "Export LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
+                return
+
+            profile_name = self.profile_list.currentText()
+            prefer_selected = True
+            only_visible_default = True
+            try:
+                cfg = self._read_config()
+                if profile_name and profile_name in cfg:
+                    prefer_selected = cfg[profile_name].get('export_prefer_selected', prefer_selected)
+                    only_visible_default = cfg[profile_name].get('export_only_visible_columns', only_visible_default)
+            except Exception:
+                pass
+
+            selected = self.u_table.selectionModel().selectedRows()
+            from ui.dialogs import ExportOptionsDialog
+            export_dlg = ExportOptionsDialog(bool(selected), only_visible_default, prefer_selected, self)
+            if export_dlg.exec() != QtWidgets.QDialog.Accepted:
+                return
+            opts = export_dlg.get_options()
+
+            if opts.get('rows') == 'selected' and selected:
+                id_col = self.columns.index('id') if 'id' in self.columns else -1
+                if id_col != -1:
+                    ids = [self.u_table.item(r.row(), id_col).text() for r in selected]
+                    export_users = [u for u in self.users_cache if u.get('id') in ids]
+                else:
+                    export_users = list(self.users_cache)
+            else:
+                export_users = list(self.users_cache)
+
+            sample_entry = None
+            ldap_attrs = [
+                'uid', 'cn', 'sn', 'givenName', 'mail', 'userPrincipalName',
+                'telephoneNumber', 'mobile', 'displayName', 'description'
+            ]
+            try:
+                sample_entry = ldap_utils.get_entry_sample(
+                    conn.get('host', ''),
+                    int(conn.get('port', 0) or 0),
+                    bool(conn.get('use_ssl', False)),
+                    conn.get('bind_dn', ''),
+                    conn.get('password', ''),
+                    conn.get('base_dn', ''),
+                    search_filter=conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)',
+                    start_tls=bool(conn.get('start_tls', False)),
+                    timeout=int(conn.get('timeout', 30) or 30),
+                )
+                if sample_entry:
+                    ldap_attrs = sorted(set(ldap_attrs).union({k for k in sample_entry.keys() if k and k.lower() != 'dn'}))
+            except Exception:
+                pass
+
+            all_ping_attrs = self._get_pingone_attributes()
+            required_ping_attrs = {'username', 'email', 'name.given', 'name.family'}
+            visible_ping_attrs = set()
+            try:
+                for idx, col in enumerate(self.columns or []):
+                    if idx < self.u_table.columnCount() and not self.u_table.isColumnHidden(idx):
+                        visible_ping_attrs.add(str(col))
+            except Exception:
+                visible_ping_attrs = set(self.columns or [])
+            allowed_ping_attrs = required_ping_attrs.union(visible_ping_attrs)
+            ping_attrs = [
+                a for a in all_ping_attrs
+                if a in allowed_ping_attrs and not str(a).lower().startswith('population.')
+            ]
+            for req in sorted(required_ping_attrs):
+                if req not in ping_attrs:
+                    ping_attrs.append(req)
+
+            sample_p1 = {}
+            try:
+                if export_users:
+                    sample_p1 = self._flatten_user(export_users[0])
+            except Exception:
+                sample_p1 = {}
+
+            initial_mapping = conn.get('ldap_export_mapping', {})
+            map_dlg = LDAPMappingDialog(
+                ldap_attrs,
+                ping_attrs,
+                direction='export',
+                sample_row=sample_p1,
+                initial_mapping=initial_mapping,
+                parent=self,
+            )
+            if map_dlg.exec() != QtWidgets.QDialog.Accepted:
+                return
+            mapping = map_dlg.get_mapping()
+            if not mapping:
+                QtWidgets.QMessageBox.information(self, "Export LDAP", "No attributes were mapped; export cancelled.")
+                return
+            if map_dlg.remember_mapping():
+                self._save_ldap_connection_settings(name, {'ldap_export_mapping': mapping})
+
+            rdn_attr = (conn.get('rdn_attribute', 'uid') or 'uid').strip()
+            rdn_aliases = {
+                'username': 'uid',
+                'email': 'mail',
+                'population.name': 'ou',
+                'population.id': 'employeeNumber',
+            }
+            rdn_attr = rdn_aliases.get(rdn_attr.lower(), rdn_attr)
+            object_classes = conn.get('object_classes') or ['top', 'person', 'organizationalPerson', 'inetOrgPerson']
+            entries = []
+            skipped = 0
+            for user in export_users:
+                flat = self._flatten_user(user)
+                attrs = {}
+                for ping_attr, ldap_attr in mapping.items():
+                    val = flat.get(ping_attr)
+                    if val is None or val == '':
+                        continue
+                    attrs[ldap_attr] = val
+
+                rdn_value = attrs.get(rdn_attr) or flat.get('username') or flat.get('email')
+                if not rdn_value:
+                    skipped += 1
+                    continue
+                base_dn = (conn.get('base_dn', '') or '').strip()
+                dn = f"{rdn_attr}={rdn_value},{base_dn}" if base_dn else f"{rdn_attr}={rdn_value}"
+                entries.append({'dn': dn, 'attributes': attrs, 'object_classes': object_classes})
+
+            if not entries:
+                QtWidgets.QMessageBox.information(self, "Export LDAP", "No exportable users found after mapping.")
+                return
+
+            result = ldap_utils.upsert_entries(
+                conn.get('host', ''),
+                int(conn.get('port', 0) or 0),
+                bool(conn.get('use_ssl', False)),
+                conn.get('bind_dn', ''),
+                conn.get('password', ''),
+                entries,
+                start_tls=bool(conn.get('start_tls', False)),
+                timeout=int(conn.get('timeout', 30) or 30),
+                auto_create_parents=bool(conn.get('auto_create_parents', True)),
+            )
+
+            summary = f"Created {result.get('created', 0)}, updated {result.get('updated', 0)} LDAP entries"
+            if skipped:
+                summary += f"; skipped {skipped} users without {rdn_attr}"
+            errors = result.get('errors', []) or []
+            if errors:
+                dlg = QtWidgets.QDialog(self)
+                dlg.setWindowTitle("Export LDAP Result")
+                lay = QtWidgets.QVBoxLayout(dlg)
+                lay.addWidget(QtWidgets.QLabel(summary))
+                te = QtWidgets.QTextEdit()
+                te.setReadOnly(True)
+                te.setPlainText('\n'.join(errors))
+                lay.addWidget(te)
+                btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+                btns.accepted.connect(dlg.accept)
+                lay.addWidget(btns)
+                dlg.resize(820, 460)
+                dlg.exec()
+            else:
+                QtWidgets.QMessageBox.information(self, "Export LDAP", summary)
+
+            self._set_last_data_source(f"LDAP {name}: {conn.get('base_dn', '')}")
+            self.status_label.setText(summary)
+            try:
+                self.statusBar().showMessage(summary)
+            except Exception:
+                pass
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export LDAP", str(e))
 
     def import_from_database(self):
         """Initiate import flow from a database table."""

@@ -3,4 +3,5 @@ httpx
 keyring
 sqlalchemy
 pymysql
+ldap3
 # pymssql is optional for MSSQL support but may require additional system libraries.
