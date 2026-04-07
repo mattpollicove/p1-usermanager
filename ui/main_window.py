@@ -57,7 +57,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.71"
+APP_VERSION = "0.75"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 
 
@@ -156,6 +156,7 @@ Exporting Users:
 - Click "Export CSV" or "Export LDIF" to save users.
 - Choose to export all users or selected rows only.
 - Choose to export all columns or only visible columns.
+- Optionally require selected attributes to be populated; only users matching all selected populated-attribute filters are exported.
 - Check "Remember these choices" to save export preferences per-profile.
 - Database export: click "Export DB" on the toolbar (after defining a connection) to map PingOne attributes to target table columns; the table will be created if it does not already exist.
 - LDAP export: choose "Export → LDAP Directory" and map PingOne attributes to LDAP attributes; entries are created or updated by DN.
@@ -763,6 +764,34 @@ class MainWindow(QtWidgets.QMainWindow):
             # Show export options dialog
             self._show_export_menu()
 
+    def _get_last_transfer_method(self, direction: str) -> str:
+        """Return the last used import or export method for the active profile."""
+        key = f'last_{direction}_method'
+        try:
+            prof = self.profile_list.currentText()
+            cfg = self._read_config()
+            if prof and prof in cfg:
+                return cfg[prof].get(key) or ''
+        except Exception:
+            pass
+        return ''
+
+    def _save_last_transfer_method(self, direction: str, method: str):
+        """Persist the last used import or export method for the active profile."""
+        key = f'last_{direction}_method'
+        try:
+            prof = self.profile_list.currentText()
+            if not prof:
+                return
+            cfg = self._read_config()
+            if prof not in cfg:
+                cfg[prof] = {}
+            cfg[prof][key] = method
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
+
     def _launch_import_wizard(self):
         """Launch wizard-style import dialog with radio buttons for source selection."""
         from ui.dialogs import ImportWizardDialog
@@ -777,6 +806,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ldap_connections=ldaps,
             manage_db_callback=self.manage_db_connections,
             manage_ldap_callback=self.manage_ldap_connections,
+            last_method=self._get_last_transfer_method('import'),
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -786,15 +816,19 @@ class MainWindow(QtWidgets.QMainWindow):
         
         try:
             if source_type == 'csv':
+                self._save_last_transfer_method('import', 'csv')
                 self.import_from_csv()
             elif source_type == 'ldif':
+                self._save_last_transfer_method('import', 'ldif')
                 self.import_from_ldif()
             elif source_type == 'db':
+                self._save_last_transfer_method('import', 'db')
                 self.import_from_database_wizard(
                     connection_name=result.get('connection_name'),
                     query_mode=result.get('query_mode', 'table')
                 )
             elif source_type == 'ldap':
+                self._save_last_transfer_method('import', 'ldap')
                 self.import_from_ldap_directory_wizard(
                     connection_name=result.get('connection_name')
                 )
@@ -802,7 +836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
     def _show_export_menu(self):
-        """Show export options dialog for CSV, LDIF, or Database."""
+        """Show export options dialog for CSV, LDIF, Database, or LDAP Directory."""
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Export")
         dlg.setModal(True)
@@ -813,7 +847,14 @@ class MainWindow(QtWidgets.QMainWindow):
         rb_ldif = QtWidgets.QRadioButton("LDIF")
         rb_db = QtWidgets.QRadioButton("Database")
         rb_ldap = QtWidgets.QRadioButton("LDAP Directory")
-        rb_csv.setChecked(True)
+        # pre-select the last used export method
+        last_exp = self._get_last_transfer_method('export')
+        {
+            'csv': rb_csv,
+            'ldif': rb_ldif,
+            'db': rb_db,
+            'ldap': rb_ldap,
+        }.get(last_exp, rb_csv).setChecked(True)
         layout.addWidget(rb_csv)
         layout.addWidget(rb_ldif)
         layout.addWidget(rb_db)
@@ -828,12 +869,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if rb_csv.isChecked():
+            self._save_last_transfer_method('export', 'csv')
             self.export_to_csv()
         elif rb_ldif.isChecked():
+            self._save_last_transfer_method('export', 'ldif')
             self.export_to_ldif()
         elif rb_db.isChecked():
+            self._save_last_transfer_method('export', 'db')
             self.export_to_database()
         elif rb_ldap.isChecked():
+            self._save_last_transfer_method('export', 'ldap')
             self.export_to_ldap_directory()
 
     def _set_last_data_source(self, source: str):
@@ -1600,7 +1645,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
             selected = self.u_table.selectionModel().selectedRows()
             from ui.dialogs import ExportOptionsDialog
-            export_dlg = ExportOptionsDialog(bool(selected), only_visible_default, prefer_selected, self)
+            populated_attrs = self._get_populated_export_attributes(self.users_cache)
+            export_dlg = ExportOptionsDialog(
+                bool(selected),
+                only_visible_default,
+                prefer_selected,
+                self,
+                populated_attributes=populated_attrs,
+            )
             if export_dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
             opts = export_dlg.get_options()
@@ -1614,6 +1666,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     export_users = list(self.users_cache)
             else:
                 export_users = list(self.users_cache)
+
+            required_attrs = opts.get('required_populated_attributes') or []
+            filtered_out = 0
+            if required_attrs:
+                export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
 
             sample_entry = None
             ldap_attrs = [
@@ -1639,6 +1696,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
             all_ping_attrs = self._get_pingone_attributes()
             required_ping_attrs = {'username', 'email', 'name.given', 'name.family'}
+            # PingOne read-only / internal fields that must never be written to an LDAP schema
+            _pingone_ldap_blocked = {
+                'id', 'createdAt', 'updatedAt', 'account.status', 'mfaEnabled',
+                '_links', 'lifecycle.status', 'identityProvider.type',
+                'identityProvider.id',
+            }
             visible_ping_attrs = set()
             try:
                 for idx, col in enumerate(self.columns or []):
@@ -1649,7 +1712,9 @@ class MainWindow(QtWidgets.QMainWindow):
             allowed_ping_attrs = required_ping_attrs.union(visible_ping_attrs)
             ping_attrs = [
                 a for a in all_ping_attrs
-                if a in allowed_ping_attrs and not str(a).lower().startswith('population.')
+                if a in allowed_ping_attrs
+                and not str(a).lower().startswith('population.')
+                and str(a) not in _pingone_ldap_blocked
             ]
             for req in sorted(required_ping_attrs):
                 if req not in ping_attrs:
@@ -1695,6 +1760,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 flat = self._flatten_user(user)
                 attrs = {}
                 for ping_attr, ldap_attr in mapping.items():
+                    # Never write PingOne-internal system fields to LDAP entries
+                    if str(ping_attr) in _pingone_ldap_blocked:
+                        continue
+                    # Guard against LDAP target literally named 'id' (not a valid schema attr)
+                    if str(ldap_attr).strip().lower() == 'id':
+                        continue
                     val = flat.get(ping_attr)
                     if val is None or val == '':
                         continue
@@ -1727,6 +1798,8 @@ class MainWindow(QtWidgets.QMainWindow):
             summary = f"Created {result.get('created', 0)}, updated {result.get('updated', 0)} LDAP entries"
             if skipped:
                 summary += f"; skipped {skipped} users without {rdn_attr}"
+            if filtered_out:
+                summary += f"; filtered out {filtered_out} users by populated-attribute filter"
             errors = result.get('errors', []) or []
             if errors:
                 dlg = QtWidgets.QDialog(self)
@@ -3436,6 +3509,50 @@ class MainWindow(QtWidgets.QMainWindow):
             row = [flat.get(col, '') for col in columns]
             yield row
 
+    def _is_populated_export_value(self, value) -> bool:
+        """Return True when a flattened export value should be treated as populated."""
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, dict, set)):
+            return len(value) > 0
+        return True
+
+    def _get_populated_export_attributes(self, users: list) -> list:
+        """Return sorted flattened attribute names that are populated in at least one user."""
+        attrs = set()
+        for user in users or []:
+            try:
+                flat = self._flatten_user(user)
+                for key, value in flat.items():
+                    if key and self._is_populated_export_value(value):
+                        attrs.add(str(key))
+            except Exception:
+                pass
+        return sorted(attrs)
+
+    def _filter_users_by_populated_attributes(self, users: list, required_attrs: list) -> tuple:
+        """Filter users to those with all required flattened attributes populated."""
+        required = [str(a).strip() for a in (required_attrs or []) if str(a).strip()]
+        if not required:
+            return list(users or []), 0
+
+        filtered = []
+        for user in users or []:
+            try:
+                flat = self._flatten_user(user)
+            except Exception:
+                flat = {}
+            keep = True
+            for attr in required:
+                if not self._is_populated_export_value(flat.get(attr)):
+                    keep = False
+                    break
+            if keep:
+                filtered.append(user)
+        return filtered, max(0, len(users or []) - len(filtered))
+
     def _sanitize_db_column_name(self, name: str) -> str:
         """Return a SQL-friendly column name for new table creation."""
         raw = str(name or '').strip()
@@ -3567,6 +3684,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     except Exception:
                         flat[target] = v
                 else:
+                    # PingOne expects strings for scalar fields (e.g. employeeNumber,
+                    # address.postalCode). LDAP/DB sources may return integers when the
+                    # source schema treats numeric-looking values as numbers.
+                    if not isinstance(v, (bool, dict, list)):
+                        v = str(v)
                     flat[target] = v
 
             if phone_by_type:
@@ -3724,11 +3846,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # Validate create-users with server-side dry-run and validate updates locally
         val_errors = []
         # Clean users of any accidental empty-string keys before validation
+        coerced_total = 0
         for uu in users:
             try:
                 self._remove_empty_keys(uu)
+                coerced_total += self._coerce_numeric_scalars_to_strings(uu)
             except Exception:
                 pass
+        try:
+            if coerced_total:
+                self.statusBar().showMessage(
+                    f"Import normalization: converted {coerced_total} numeric scalar value(s) to strings.",
+                    5000,
+                )
+        except Exception:
+            pass
 
         # Validate creates locally (removed server dry-run validation)
         if create_users:
@@ -4084,7 +4216,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         selected = self.u_table.selectionModel().selectedRows()
         # Show options dialog so user can choose selected/all and visible/all columns
         from ui.dialogs import ExportOptionsDialog
-        dlg = ExportOptionsDialog(bool(selected), only_visible_default, prefer_selected, self)
+        populated_attrs = self._get_populated_export_attributes(self.users_cache)
+        dlg = ExportOptionsDialog(
+            bool(selected),
+            only_visible_default,
+            prefer_selected,
+            self,
+            populated_attributes=populated_attrs,
+        )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
         opts = dlg.get_options()
@@ -4127,6 +4266,11 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             else:
                 export_users = list(self.users_cache)
 
+            required_attrs = opts.get('required_populated_attributes') or []
+            filtered_out = 0
+            if required_attrs:
+                export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
+
             import csv
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -4135,6 +4279,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     writer.writerow([str(v) for v in row])
             self._set_last_data_source(f"File {path}")
             msg = f"Exported {len(export_users)} users to {path}"
+            if filtered_out:
+                msg += f" (filtered out {filtered_out} by populated-attribute filter)"
             self.status_label.setText(msg)
             try:
                 self.statusBar().showMessage(msg)
@@ -4168,7 +4314,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
         selected = self.u_table.selectionModel().selectedRows()
         from ui.dialogs import ExportOptionsDialog
-        dlg = ExportOptionsDialog(bool(selected), only_visible_default, prefer_selected, self)
+        populated_attrs = self._get_populated_export_attributes(self.users_cache)
+        dlg = ExportOptionsDialog(
+            bool(selected),
+            only_visible_default,
+            prefer_selected,
+            self,
+            populated_attributes=populated_attrs,
+        )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
         opts = dlg.get_options()
@@ -4208,6 +4361,11 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             else:
                 export_users = list(self.users_cache)
 
+            required_attrs = opts.get('required_populated_attributes') or []
+            filtered_out = 0
+            if required_attrs:
+                export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
+
             with open(path, 'w', encoding='utf-8') as f:
                 for u in export_users:
                     flat = self._flatten_user(u)
@@ -4231,6 +4389,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     f.write('\n')
             self._set_last_data_source(f"File {path}")
             msg = f"Exported {len(export_users)} users to {path}"
+            if filtered_out:
+                msg += f" (filtered out {filtered_out} by populated-attribute filter)"
             self.status_label.setText(msg)
             try:
                 self.statusBar().showMessage(msg)
@@ -4261,25 +4421,66 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             if isinstance(v, str):
                 # Be tolerant of CSV-escaped JSON (e.g. doubled quotes)
                 s = v.strip()
-                try:
-                    parsed = json.loads(s)
-                    cur[parts[-1]] = parsed
-                    continue
-                except Exception:
-                    pass
-                # Try to normalize doubled quotes often produced by CSV quoting
-                if '""' in s:
+                # Only parse structured JSON values. Parsing scalar tokens like
+                # "75038" would cast them to ints and violate PingOne's string
+                # expectations for fields such as address.postalCode.
+                if s.startswith('{') or s.startswith('['):
                     try:
-                        parsed = json.loads(s.replace('""', '"'))
+                        parsed = json.loads(s)
                         cur[parts[-1]] = parsed
                         continue
                     except Exception:
                         pass
+                    # Try to normalize doubled quotes often produced by CSV quoting
+                    if '""' in s:
+                        try:
+                            parsed = json.loads(s.replace('""', '"'))
+                            cur[parts[-1]] = parsed
+                            continue
+                        except Exception:
+                            pass
                 # Fallback: store raw string
                 cur[parts[-1]] = v
             else:
                 cur[parts[-1]] = v
         return result
+
+    def _coerce_numeric_scalars_to_strings(self, obj, path: str = "") -> int:
+        """Recursively coerce numeric scalars to strings in import payloads."""
+        converted = 0
+        try:
+            if isinstance(obj, dict):
+                for key in list(obj.keys()):
+                    val = obj.get(key)
+                    child_path = f"{path}.{key}" if path else str(key)
+                    if isinstance(val, (dict, list)):
+                        converted += self._coerce_numeric_scalars_to_strings(val, child_path)
+                    elif isinstance(val, bytes):
+                        try:
+                            obj[key] = val.decode('utf-8')
+                        except Exception:
+                            obj[key] = str(val)
+                        converted += 1
+                    elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                        obj[key] = str(val)
+                        converted += 1
+            elif isinstance(obj, list):
+                for idx, val in enumerate(obj):
+                    child_path = f"{path}[{idx}]" if path else f"[{idx}]"
+                    if isinstance(val, (dict, list)):
+                        converted += self._coerce_numeric_scalars_to_strings(val, child_path)
+                    elif isinstance(val, bytes):
+                        try:
+                            obj[idx] = val.decode('utf-8')
+                        except Exception:
+                            obj[idx] = str(val)
+                        converted += 1
+                    elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                        obj[idx] = str(val)
+                        converted += 1
+        except Exception:
+            pass
+        return converted
 
     def _remove_empty_keys(self, obj):
         """Recursively remove empty-string keys from dicts/lists in-place."""

@@ -2292,9 +2292,18 @@ class LDAPMappingDialog(DatabaseMappingDialog):
 class ExportOptionsDialog(QtWidgets.QDialog):
     """Dialog to choose export options: selected vs all rows, visible vs all columns.
 
-    Returns a dict: { 'rows': 'selected'|'all', 'only_visible_columns': bool, 'remember': bool }
+    Returns a dict:
+    { 'rows': 'selected'|'all', 'only_visible_columns': bool, 'remember': bool,
+      'required_populated_attributes': List[str] }
     """
-    def __init__(self, has_selection: bool, only_visible_default: bool = True, prefer_selected_default: bool = True, parent=None):
+    def __init__(
+        self,
+        has_selection: bool,
+        only_visible_default: bool = True,
+        prefer_selected_default: bool = True,
+        parent=None,
+        populated_attributes: Optional[List[str]] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle('Export Options')
         self.setModal(True)
@@ -2327,6 +2336,29 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self.only_visible_cb.setChecked(bool(only_visible_default))
         layout.addWidget(self.only_visible_cb)
 
+        self.attr_filter_group = QtWidgets.QGroupBox('Filter by populated attributes (optional)')
+        self.attr_filter_group.setCheckable(True)
+        self.attr_filter_group.setChecked(False)
+        group_layout = QtWidgets.QVBoxLayout(self.attr_filter_group)
+
+        note = QtWidgets.QLabel(
+            'When enabled, export includes only users where all selected attributes are populated.'
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet('color: #666;')
+        group_layout.addWidget(note)
+
+        self.attr_list = QtWidgets.QListWidget()
+        self.attr_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.attr_list.setMinimumHeight(130)
+        for attr in sorted(set(populated_attributes or [])):
+            self.attr_list.addItem(str(attr))
+        if self.attr_list.count() == 0:
+            self.attr_filter_group.setEnabled(False)
+            self.attr_filter_group.setTitle('Filter by populated attributes (none available)')
+        group_layout.addWidget(self.attr_list)
+        layout.addWidget(self.attr_filter_group)
+
         self.remember_cb = QtWidgets.QCheckBox('Remember these choices for this profile')
         self.remember_cb.setChecked(False)
         layout.addWidget(self.remember_cb)
@@ -2345,10 +2377,14 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
     def get_options(self) -> dict:
         rows = 'selected' if self.rb_sel.isChecked() and self.rb_sel.isEnabled() else 'all'
+        required_populated_attributes = []
+        if self.attr_filter_group.isEnabled() and self.attr_filter_group.isChecked():
+            required_populated_attributes = [i.text() for i in self.attr_list.selectedItems() if i.text()]
         return {
             'rows': rows,
             'only_visible_columns': bool(self.only_visible_cb.isChecked()),
-            'remember': bool(self.remember_cb.isChecked())
+            'remember': bool(self.remember_cb.isChecked()),
+            'required_populated_attributes': required_populated_attributes,
         }
 
 
@@ -2831,6 +2867,7 @@ class ImportWizardDialog(QtWidgets.QDialog):
         ldap_connections: dict = None,
         manage_db_callback=None,
         manage_ldap_callback=None,
+        last_method: str = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Import Data - Wizard")
@@ -2841,6 +2878,7 @@ class ImportWizardDialog(QtWidgets.QDialog):
         self.ldap_connections = ldap_connections or {}
         self.manage_db_callback = manage_db_callback
         self.manage_ldap_callback = manage_ldap_callback
+        self.last_method = last_method or 'csv'
         self.current_step = 0
         self.selected_connection = None
         self.result = {}
@@ -2924,7 +2962,13 @@ class ImportWizardDialog(QtWidgets.QDialog):
         self.rb_ldif = QtWidgets.QRadioButton("LDIF File")
         self.rb_db = QtWidgets.QRadioButton("Database")
         self.rb_ldap = QtWidgets.QRadioButton("LDAP Directory")
-        self.rb_csv.setChecked(True)
+        # pre-select the last used method
+        {
+            'csv': self.rb_csv,
+            'ldif': self.rb_ldif,
+            'db': self.rb_db,
+            'ldap': self.rb_ldap,
+        }.get(self.last_method, self.rb_csv).setChecked(True)
         
         self.content_layout.addWidget(self.rb_csv)
         self.content_layout.addWidget(self.rb_ldif)

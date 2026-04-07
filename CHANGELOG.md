@@ -3,8 +3,18 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [0.75] - 2026-04-07
 ### Added
-- Bumped application version to `0.71`.
+- Bumped application version to `0.75`.
+- LDAP import: coerce numeric scalar values (e.g. `employeeNumber`, `address.postalCode`) to strings so PingOne does not reject them with `400 INVALID_DATA`.
+- Import normalization: `_unflatten_user` no longer JSON-parses plain scalar strings, preventing numeric strings being recast to integers; added recursive `_coerce_numeric_scalars_to_strings` sweep before every import API call.
+- Export filter: `ExportOptionsDialog` now includes an optional "Filter by populated attributes" section; selecting attributes limits the export to users where all chosen attributes are populated (CSV, LDIF, and LDAP Directory exports).
+- LDAP export: PingOne-internal system fields (`id`, `createdAt`, `updatedAt`, etc.) are excluded from the mapping dialog and from built LDAP entries; LDAP target attribute literally named `id` is also blocked.
+- Import/Export method memory: last used import method (CSV / LDIF / DB / LDAP) and last used export method are persisted per-profile and pre-selected on next open.
+- Fixed corrupted import in `app.py` (stray `/ ` prefix on `from ui.main_window import MainWindow`).
+- Pre-change checklist added to `DEVELOPMENT_RULES.md` with guards derived from all past issues.
+### Previous (0.71)
 - New "New Connection" toolbar button: clears environment ID, client ID, and client secret fields and prompts user to save after entering values.
 - Ability to skip automatic connection attempts when loading profiles from disk to avoid spurious "Auth Failed" messages.
 - Improved connection testing and error reporting when validating credentials (shows detailed error message).

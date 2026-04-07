@@ -17,15 +17,25 @@ This file tracks issues that have been encountered and resolved. When making cod
 
 ### Current (Active/Pending)
 
-- **Date**: TBD
-- **Issue**: Phone number mapping in DatabaseMappingDialog may lose type distinctions (mobile/work/home) if not explicitly mapped.
-- **Root Cause**: If mapping defaults to generic 'phoneNumbers' instead of 'phoneNumbers.mobile/work/home', imported phone data loses type classification.
-- **Solution**: Ensure phone columns are mapped to explicit typed targets like `phoneNumbers.mobile` rather than untyped `phoneNumbers`.
-- **Files Affected**: `ui/dialogs.py` (DatabaseMappingDialog class, _expand_phone_numbers method ~L1546)
-- **Prevention**: Always prefer explicit typed phone attributes in import mappings.
-- **Status**: PENDING AUDIT (already has phone type expansion logic but needs verification)
+_None at this time._
 
 ### Resolved
+
+- **Date**: 2026-04-06
+- **Issue**: LDAP import failed with PingOne `400 INVALID_DATA` — `employeeNumber must be a STRING object` / `address.postalCode must be a STRING object`.
+- **Root Cause**: Two conversion points produced numeric payloads: (1) `_normalize_attr_value` in `ldap_utils.py` could return raw non-string scalars from LDAP values. (2) `_unflatten_user` attempted `json.loads()` on _all_ strings; scalar strings like `"75038"` were parsed to integer `75038`, reintroducing numeric types for fields like `address.postalCode`.
+- **Solution**: (1) Fixed `_normalize_attr_value` to always return strings for scalar values (plus bytes → UTF-8 decode). (2) Hardened `_unflatten_user` to JSON-parse only structured values (`{...}` / `[...]`), never plain scalar strings. (3) Added recursive import-time coercion that converts numeric scalars to strings across nested payloads before validation/API calls.
+- **Files Affected**: `api/ldap_utils.py` (`_normalize_attr_value`), `ui/main_window.py` (`_convert_rows_to_users`)
+- **Prevention**: Add to LDAP/DB import checklist: scalar PingOne fields (e.g. `employeeNumber`, `address.postalCode`) must be strings. Never run JSON parsing on plain scalar strings in unflattening logic. Always coerce numeric scalars to strings recursively before validation/send. Test with LDAP directories that emit integer-syntax attributes.
+- **Status**: RESOLVED (2026-04-06)
+
+- **Date**: 2026-04-06
+- **Issue**: Phone number mapping in DatabaseMappingDialog could lose type distinctions (mobile/work/home) if not explicitly mapped.
+- **Root Cause**: Risk that mapping might default to generic `phoneNumbers` instead of `phoneNumbers.mobile/work/home`, causing imported phone data to lose type classification.
+- **Solution**: Audited `_expand_phone_numbers` (dialogs.py ~L2103), `_build_import_rows` (dialogs.py ~L2031), `get_mapping` (dialogs.py ~L2169), and DB-row-to-user conversion (main_window.py ~L3490). All correctly use `::` encoding for phone source keys and `phoneNumbers.<type>` targets. Phone types are preserved end-to-end.
+- **Files Affected**: `ui/dialogs.py`, `ui/main_window.py`
+- **Prevention**: Always prefer explicit typed phone attributes (`phoneNumbers.mobile/work/home`) in import mappings. Verify that `source_key` in `_build_import_rows` stores `col::type` for phone rows, and that `get_mapping()` reads back the `UserRole` data (not display text) when collecting results.
+- **Status**: RESOLVED (code verified correct 2026-04-06)
 
 - **Date**: 2026-03-31
 - **Issue**: Column order/layout could be lost after a user refresh.

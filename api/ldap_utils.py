@@ -152,8 +152,19 @@ def _normalize_attr_value(value):
         if not value:
             return ""
         if len(value) == 1:
-            return value[0]
+            v = value[0]
+            if isinstance(v, bytes):
+                try:
+                    return v.decode('utf-8')
+                except Exception:
+                    return str(v)
+            return v if isinstance(v, str) else str(v)
         return "; ".join(str(v) for v in value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode('utf-8')
+        except Exception:
+            return str(value)
     return value
 
 
