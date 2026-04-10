@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.79] - 2026-04-10
+### Added
+- Bumped application version to `0.79`.
+- User-management troubleshooting improvements: dedicated `USER_MGMT_EDIT_*` logging, filtered log viewer, modeless log windows, and live API capture refresh/event counters.
+- User update success notifications with per-profile mute preference and a Settings toggle to re-enable them.
+
+### Changed
+- Edit User and User Management updates now sanitize PUT payloads, preserve nested attributes correctly, and avoid sending read-only PingOne fields.
+- User Management columns now default to UUID, first name, last name, email, phone, work telephone, title, and population, while hiding link/JSON reference columns by default.
+- PingOne work email maps to `mail` and work telephone maps to `workTelephone` in User Management.
+- API capture and log viewers now open as separate non-modal windows that can stay open while the app continues running.
+
+### Fixed
+- Email cells in User Management now open the Edit User dialog for editing instead of performing no action.
+- Keyring backend failures on macOS no longer crash startup; the app falls back gracefully and shows a status-bar warning when secure secret storage is unavailable.
+
 ## [0.75] - 2026-04-07
 ### Added
 - Bumped application version to `0.75`.

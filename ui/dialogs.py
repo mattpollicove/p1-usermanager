@@ -5,6 +5,7 @@ table columns, and viewing/editing JSON payloads.
 """
 
 import json
+import copy
 import sys
 import platform
 from pathlib import Path
@@ -390,7 +391,18 @@ class EditUserDialog(QtWidgets.QDialog):
         ensure_dialog_caption_fit(self)
     
     def _get_all_populated_attributes(self, user_data):
-        """Return populated attributes as (key, value) rows for display."""
+        """Return populated attributes as (key, value) rows for display.
+
+        Results are sorted alphabetically by the flattened attribute key.
+        Attributes whose values look like HTTP links or JSON objects/arrays
+        are excluded to keep the view clean.
+        """
+        _LINK_PREFIXES = ('http://', 'https://', '{', '[')
+
+        def _is_link_or_json(text: str) -> bool:
+            t = text.strip().lower()
+            return any(t.startswith(p.lower()) for p in _LINK_PREFIXES)
+
         def format_dict(d, prefix=""):
             result = []
             for key, value in sorted(d.items()):
@@ -405,28 +417,41 @@ class EditUserDialog(QtWidgets.QDialog):
                             if isinstance(item, dict):
                                 result.extend(format_dict(item, item_key))
                             elif item is not None and item != "":
-                                result.append((item_key, str(item)))
+                                s = str(item)
+                                if not _is_link_or_json(s):
+                                    result.append((item_key, s))
                 elif value is not None and value != "":
-                    result.append((full_key, str(value)))
+                    s = str(value)
+                    if not _is_link_or_json(s):
+                        result.append((full_key, s))
             return result
 
-        return format_dict(user_data)
+        raw = format_dict(user_data)
+        # Guarantee global alphabetical order by flattened key name.
+        return sorted(raw, key=lambda t: t[0].lower())
     
     def get_data(self):
         """Return the updated user data from the dialog."""
-        # Build a minimal user update payload containing only fields that
-        # the UI allows editing. This keeps updates concise and reduces
-        # risk of accidentally overwriting unrelated attributes.
+        # Start from existing user data so a PUT update preserves
+        # populated attributes that are not editable in this dialog.
+        data = copy.deepcopy(self.user_data) if isinstance(self.user_data, dict) else {}
+
         pop_name = self.population.currentText()
         pop_id = next((k for k, v in self.pop_map.items() if v == pop_name), '')
-        data = {
-            "username": self.username.text(),
-            "email": self.email.text(),
-            "name": {"given": self.first_name.text(), "family": self.last_name.text()},
-            "population": {"id": pop_id}
+
+        data["username"] = self.username.text()
+        data["email"] = self.email.text()
+        data["name"] = {
+            "given": self.first_name.text(),
+            "family": self.last_name.text(),
         }
+        data["population"] = {"id": pop_id}
+
         if self.phone.text():
             data["phoneNumbers"] = [{"number": self.phone.text(), "type": "mobile"}]
+        else:
+            data.pop("phoneNumbers", None)
+
         address = {}
         if self.street.text():
             address["streetAddress"] = self.street.text()
@@ -440,6 +465,8 @@ class EditUserDialog(QtWidgets.QDialog):
             address["country"] = self.country.text()
         if address:
             data["address"] = address
+        else:
+            data.pop("address", None)
         return data
 
 
@@ -2289,6 +2316,61 @@ class LDAPMappingDialog(DatabaseMappingDialog):
         ensure_dialog_caption_fit(self)
 
 
+class _ReorderableTableWidget(QtWidgets.QTableWidget):
+    """QTableWidget with row-level drag-and-drop reordering.
+
+    Works alongside the Move Up / Move Down buttons in ExportOptionsDialog.
+    Check-states and all column data are preserved across drops.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(QtCore.Qt.MoveAction)
+
+    def dropEvent(self, event):
+        if event.source() is not self:
+            event.ignore()
+            return
+
+        src_row = self.currentRow()
+        if src_row < 0:
+            event.ignore()
+            return
+
+        # Derive target row from the drop position.
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()
+        index = self.indexAt(pos)
+        drop_row = index.row() if index.isValid() else self.rowCount() - 1
+
+        if drop_row < 0 or drop_row == src_row:
+            event.ignore()
+            return
+
+        cols = self.columnCount()
+        row_data = [self.takeItem(src_row, col) for col in range(cols)]
+
+        self.removeRow(src_row)
+        # Adjust target index after removal when dragging downward.
+        if src_row < drop_row:
+            drop_row -= 1
+
+        self.insertRow(drop_row)
+        for col, item in enumerate(row_data):
+            if item is None:
+                item = QtWidgets.QTableWidgetItem('')
+            self.setItem(drop_row, col, item)
+
+        self.selectRow(drop_row)
+        event.accept()
+
+
 class ExportOptionsDialog(QtWidgets.QDialog):
     """Dialog to choose export options: selected vs all rows, visible vs all columns.
 
@@ -2303,13 +2385,14 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         prefer_selected_default: bool = True,
         parent=None,
         populated_attributes: Optional[List[str]] = None,
+        populated_attribute_samples: Optional[dict] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle('Export Options')
         self.setModal(True)
         layout = QtWidgets.QVBoxLayout(self)
 
-        self.setMinimumSize(420, 180)
+        self.setMinimumSize(520, 260)
         self.row_group = QtWidgets.QButtonGroup(self)
         self.rb_sel = QtWidgets.QRadioButton('Export only selected rows')
         self.rb_all = QtWidgets.QRadioButton('Export all rows')
@@ -2325,7 +2408,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             self.rb_all.setChecked(True)
 
         if not has_selection:
-            note = QtWidgets.QLabel('No rows selected — "Export only selected rows" is disabled.')
+            note = QtWidgets.QLabel('No rows selected - "Export only selected rows" is disabled.')
             note.setStyleSheet('color: #666;')
             layout.addWidget(note)
 
@@ -2342,21 +2425,81 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         group_layout = QtWidgets.QVBoxLayout(self.attr_filter_group)
 
         note = QtWidgets.QLabel(
-            'When enabled, export includes only users where all selected attributes are populated.'
+            'Enable and check attributes below. Their top-to-bottom order controls filter order.'
         )
         note.setWordWrap(True)
         note.setStyleSheet('color: #666;')
         group_layout.addWidget(note)
 
-        self.attr_list = QtWidgets.QListWidget()
-        self.attr_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-        self.attr_list.setMinimumHeight(130)
-        for attr in sorted(set(populated_attributes or [])):
-            self.attr_list.addItem(str(attr))
-        if self.attr_list.count() == 0:
+        attrs = [str(a) for a in (populated_attributes or []) if str(a)]
+        samples = populated_attribute_samples or {}
+
+        self.attr_table = _ReorderableTableWidget(len(attrs), 3)
+        self.attr_table.setHorizontalHeaderLabels(['Include', 'Attribute', 'Sample Value'])
+        self.attr_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.attr_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.attr_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.attr_table.setAlternatingRowColors(True)
+        self.attr_table.verticalHeader().setVisible(False)
+        self.attr_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.attr_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.attr_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        self.attr_table.setMinimumHeight(170)
+        self.attr_table.setToolTip('Drag rows to reorder, or use Move Up / Move Down')
+
+        for row, attr in enumerate(attrs):
+            check_item = QtWidgets.QTableWidgetItem('')
+            check_item.setFlags(
+                QtCore.Qt.ItemIsEnabled |
+                QtCore.Qt.ItemIsSelectable |
+                QtCore.Qt.ItemIsUserCheckable
+            )
+            check_item.setCheckState(QtCore.Qt.Unchecked)
+            self.attr_table.setItem(row, 0, check_item)
+
+            attr_item = QtWidgets.QTableWidgetItem(attr)
+            attr_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.attr_table.setItem(row, 1, attr_item)
+
+            sample_text = str(samples.get(attr, '')) if samples.get(attr, '') is not None else ''
+            sample_item = QtWidgets.QTableWidgetItem(sample_text)
+            sample_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+            self.attr_table.setItem(row, 2, sample_item)
+
+        if self.attr_table.rowCount() > 0:
+            self.attr_table.selectRow(0)
+
+        group_layout.addWidget(self.attr_table)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.select_all_btn = QtWidgets.QPushButton('Select All')
+        self.select_all_btn.clicked.connect(self._select_all_attributes)
+        controls.addWidget(self.select_all_btn)
+
+        self.clear_all_btn = QtWidgets.QPushButton('Clear All')
+        self.clear_all_btn.clicked.connect(self._clear_all_attributes)
+        controls.addWidget(self.clear_all_btn)
+
+        controls.addStretch(1)
+
+        self.move_up_btn = QtWidgets.QPushButton('Move Up')
+        self.move_up_btn.clicked.connect(lambda: self._move_selected_attribute_row(-1))
+        controls.addWidget(self.move_up_btn)
+
+        self.move_down_btn = QtWidgets.QPushButton('Move Down')
+        self.move_down_btn.clicked.connect(lambda: self._move_selected_attribute_row(1))
+        controls.addWidget(self.move_down_btn)
+
+        group_layout.addLayout(controls)
+
+        if self.attr_table.rowCount() == 0:
             self.attr_filter_group.setEnabled(False)
             self.attr_filter_group.setTitle('Filter by populated attributes (none available)')
-        group_layout.addWidget(self.attr_list)
+            self.select_all_btn.setEnabled(False)
+            self.clear_all_btn.setEnabled(False)
+            self.move_up_btn.setEnabled(False)
+            self.move_down_btn.setEnabled(False)
+
         layout.addWidget(self.attr_filter_group)
 
         self.remember_cb = QtWidgets.QCheckBox('Remember these choices for this profile')
@@ -2375,11 +2518,61 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         layout.addWidget(btns)
         ensure_dialog_caption_fit(self)
 
+    def _selected_attr_row(self) -> int:
+        row = self.attr_table.currentRow()
+        if row >= 0:
+            return row
+        selected = self.attr_table.selectionModel().selectedRows()
+        if selected:
+            return selected[0].row()
+        return -1
+
+    def _select_all_attributes(self):
+        for row in range(self.attr_table.rowCount()):
+            item = self.attr_table.item(row, 0)
+            if item:
+                item.setCheckState(QtCore.Qt.Checked)
+
+    def _clear_all_attributes(self):
+        for row in range(self.attr_table.rowCount()):
+            item = self.attr_table.item(row, 0)
+            if item:
+                item.setCheckState(QtCore.Qt.Unchecked)
+
+    def _move_selected_attribute_row(self, delta: int):
+        row = self._selected_attr_row()
+        if row < 0:
+            return
+        target = row + int(delta)
+        if target < 0 or target >= self.attr_table.rowCount() or target == row:
+            return
+
+        values = []
+        for col in range(self.attr_table.columnCount()):
+            item = self.attr_table.takeItem(row, col)
+            if not item:
+                item = QtWidgets.QTableWidgetItem('')
+            values.append(item)
+
+        self.attr_table.removeRow(row)
+        self.attr_table.insertRow(target)
+        for col, item in enumerate(values):
+            self.attr_table.setItem(target, col, item)
+        self.attr_table.selectRow(target)
+
     def get_options(self) -> dict:
         rows = 'selected' if self.rb_sel.isChecked() and self.rb_sel.isEnabled() else 'all'
         required_populated_attributes = []
         if self.attr_filter_group.isEnabled() and self.attr_filter_group.isChecked():
-            required_populated_attributes = [i.text() for i in self.attr_list.selectedItems() if i.text()]
+            for row in range(self.attr_table.rowCount()):
+                include_item = self.attr_table.item(row, 0)
+                attr_item = self.attr_table.item(row, 1)
+                if not include_item or not attr_item:
+                    continue
+                if include_item.checkState() == QtCore.Qt.Checked:
+                    attr = attr_item.text().strip()
+                    if attr:
+                        required_populated_attributes.append(attr)
         return {
             'rows': rows,
             'only_visible_columns': bool(self.only_visible_cb.isChecked()),

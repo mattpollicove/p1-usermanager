@@ -1,4 +1,5 @@
 import json
+import copy
 from pathlib import Path
 from datetime import datetime
 import asyncio
@@ -18,8 +19,33 @@ _PROJECT_ROOT = _THIS_FILE.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import keyring
 from PySide6 import QtWidgets, QtCore, QtGui
+
+KEYRING_AVAILABLE = True
+KEYRING_UNAVAILABLE_REASON = ""
+
+try:
+    import keyring  # type: ignore
+except Exception as _keyring_import_error:
+    KEYRING_AVAILABLE = False
+    KEYRING_UNAVAILABLE_REASON = str(_keyring_import_error)
+
+    class _UnavailableKeyring:
+        """Fallback keyring shim when backend initialization/import fails."""
+
+        def _raise(self):
+            raise RuntimeError(f"Keyring unavailable: {_keyring_import_error}")
+
+        def get_password(self, *_args, **_kwargs):
+            self._raise()
+
+        def set_password(self, *_args, **_kwargs):
+            self._raise()
+
+        def delete_password(self, *_args, **_kwargs):
+            self._raise()
+
+    keyring = _UnavailableKeyring()
 
 import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker, BulkUpdateWorker
@@ -57,7 +83,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.75"
+APP_VERSION = "0.79"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 
 
@@ -225,24 +251,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.threadpool = QtCore.QThreadPool()
         self.config_file, self.users_cache, self.pop_map = Path("profiles.json"), [], {}
         self.columns = []
-        # Default column order: UUID, first name, last name, email, population.
+        # Default column order: UUID, first name, last name, email, phone,
+        # work telephone, title, population.
         # This matches the requested default and ensures the UUID is always visible
         # as the left-most column.
-        self.default_columns = ['id', 'name.given', 'name.family', 'email', 'population.name']
+        self.default_columns = ['id', 'name.given', 'name.family', 'email', 'phoneNumbers', 'workTelephone', 'title', 'population.name']
         self.selected_columns = self.default_columns.copy()
         self.all_columns = set()
         self.json_editing_enabled = False
         self.use_friendly_names = True
         self.pingone_console_url = DEFAULT_PINGONE_CONSOLE_URL
         self._closing = False
-        self.hide_raw_http_columns = False
+        self.hide_raw_http_columns = True
+        self.show_user_update_success = True
         self.column_widths = {}
+        self._open_log_windows = {}
         self.friendly_names = {
             'username': 'Username',
             'name.given': 'First Name',
             'name.family': 'Last Name',
             'email': 'Email',
+            'mail': 'Mail',
             'phoneNumbers': 'Phone',
+            'workTelephone': 'Work Telephone',
+            'title': 'Title',
             'population.name': 'Population',
             'id': 'UUID',
             'name': 'Name',
@@ -251,7 +283,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.init_ui()
         self.load_profiles_from_disk()
         self.load_theme_preference()
+        self._show_keyring_startup_warning()
         # Don't restore geometry here - do it in showEvent after window is shown
+
+    def _show_keyring_startup_warning(self):
+        """Show a startup warning when keyring support is unavailable."""
+        if KEYRING_AVAILABLE:
+            return
+        msg = "Keyring unavailable: saved client secrets may not persist on this system."
+        try:
+            self.status_label.setText(msg)
+        except Exception:
+            pass
+        try:
+            self.statusBar().showMessage(msg, 15000)
+        except Exception:
+            pass
 
     def showEvent(self, event):
         """Override showEvent to restore geometry after window is fully initialized."""
@@ -330,11 +377,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.enable_api_logging_action.setCheckable(True)
         self.enable_api_logging_action.setChecked(False)
         self.enable_api_logging_action.triggered.connect(self.toggle_api_logging)
+        self.show_user_update_success_action = settings_menu.addAction("Show User Update Success Messages")
+        self.show_user_update_success_action.setCheckable(True)
+        self.show_user_update_success_action.setChecked(True)
+        self.show_user_update_success_action.triggered.connect(self.on_show_user_update_success_toggled)
         self.capture_api_action = settings_menu.addAction("Capture API Calls...")
         self.capture_api_action.triggered.connect(self.show_api_capture_dialog)
         # Show where logs are written on disk (also available under Logs menu)
         self.show_logs_action = settings_menu.addAction("Show Log Files...")
         self.show_logs_action.triggered.connect(self.show_log_files)
+        self.view_user_mgmt_logs_action = settings_menu.addAction("View User Mgmt Edit Logs...")
+        self.view_user_mgmt_logs_action.triggered.connect(self.view_user_mgmt_edit_log)
         settings_menu.addSeparator()
         self.set_console_url_action = settings_menu.addAction("Set PingOne Console URL...")
         self.set_console_url_action.triggered.connect(self.set_pingone_console_url)
@@ -343,6 +396,8 @@ class MainWindow(QtWidgets.QMainWindow):
         logs_menu = menubar.addMenu("Logs")
         self.logs_show_action = logs_menu.addAction("Show Log Files...")
         self.logs_show_action.triggered.connect(self.show_log_files)
+        self.logs_show_user_mgmt_action = logs_menu.addAction("View User Mgmt Edit Logs...")
+        self.logs_show_user_mgmt_action.triggered.connect(self.view_user_mgmt_edit_log)
         self.logs_clear_all = logs_menu.addAction("Clear All Logs")
         self.logs_clear_all.triggered.connect(self.clear_all_logs)
         self.logs_archive = logs_menu.addAction("Archive Logs...")
@@ -484,7 +539,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(self.search_bar)
 
         self.hide_raw_http_columns_cb = QtWidgets.QCheckBox("Hide Links")
-        self.hide_raw_http_columns_cb.setChecked(False)
+        self.hide_raw_http_columns_cb.setChecked(True)
         self.hide_raw_http_columns_cb.setToolTip("Hide columns whose names start with '{' or 'http'")
         self.hide_raw_http_columns_cb.stateChanged.connect(self.on_hide_raw_http_columns_toggled)
         toolbar.addWidget(self.hide_raw_http_columns_cb)
@@ -1130,9 +1185,15 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             try:
-                hide_cols = bool(p[name].get('hide_raw_http_columns', False))
+                hide_cols = bool(p[name].get('hide_raw_http_columns', True))
                 self.hide_raw_http_columns = hide_cols
                 self.hide_raw_http_columns_cb.setChecked(hide_cols)
+            except Exception:
+                pass
+            try:
+                show_success = bool(p[name].get('show_user_update_success', True))
+                self.show_user_update_success = show_success
+                self.show_user_update_success_action.setChecked(show_success)
             except Exception:
                 pass
             try:
@@ -1156,6 +1217,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Save per-profile UI options
             p[name]['status_show_api_calls'] = bool(getattr(self, 'show_api_calls_cb', QtWidgets.QCheckBox()).isChecked())
             p[name]['hide_raw_http_columns'] = bool(getattr(self, 'hide_raw_http_columns_cb', QtWidgets.QCheckBox()).isChecked())
+            p[name]['show_user_update_success'] = bool(getattr(self, 'show_user_update_success_action', QtGui.QAction()).isChecked())
             # also update last working profile so auto-connect will remember this one
             meta = p.get('__meta__', {})
             meta['last_working_profile'] = name
@@ -1195,8 +1257,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 cfg[name] = {}
             cfg[name]['status_show_api_calls'] = bool(self.show_api_calls_cb.isChecked())
             cfg[name]['hide_raw_http_columns'] = bool(self.hide_raw_http_columns_cb.isChecked())
+            cfg[name]['show_user_update_success'] = bool(self.show_user_update_success_action.isChecked())
             with open(self.config_file, 'w') as f:
                 json.dump(cfg, f, indent=4)
+        except Exception:
+            pass
+
+    def on_show_user_update_success_toggled(self, state):
+        """Enable/disable success notifications after user update writes."""
+        try:
+            self.show_user_update_success = bool(state) if isinstance(state, (int, bool)) else bool(self.show_user_update_success_action.isChecked())
+            self.save_profile_option()
+        except Exception:
+            pass
+
+    def _notify_user_update_success(self, user_id: str, field_name: str):
+        """Show a small success notification for user updates with mute option."""
+        field = str(field_name or '').strip() or '<unknown>'
+        msg = f"Updated user {user_id} ({field}) in PingOne."
+        self.status_label.setText(msg)
+        try:
+            self.statusBar().showMessage(msg, 5000)
+        except Exception:
+            pass
+
+        if not bool(getattr(self, 'show_user_update_success', True)):
+            return
+
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setWindowTitle("Update Succeeded")
+        box.setText(msg)
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        mute_cb = QtWidgets.QCheckBox("Do not show this again")
+        box.setCheckBox(mute_cb)
+        box.exec()
+
+        try:
+            if mute_cb.isChecked():
+                self.show_user_update_success = False
+                self.show_user_update_success_action.setChecked(False)
+                self.save_profile_option()
         except Exception:
             pass
 
@@ -1205,11 +1306,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.hide_raw_http_columns:
             return False
         name = str(column_name or '').lstrip().lower()
-        if name.startswith('{') or name.startswith('http'):
+        if name.startswith('{') or name.startswith('http') or name.startswith('['):
             return True
 
-        # Also hide columns whose displayed values are link-like/JSON-like.
-        # This matches the "Hide Links" intent for dynamically-named columns.
+        # Also hide columns whose displayed values are link-like/JSON references.
+        # Check the first non-empty value found in the user cache.
         try:
             if self.users_cache:
                 for user in self.users_cache[:200]:
@@ -1217,7 +1318,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     text = str(val or '').lstrip().lower()
                     if not text:
                         continue
-                    return text.startswith('{') or text.startswith('http')
+                    return text.startswith('{') or text.startswith('http') or text.startswith('[')
         except Exception:
             pass
         return False
@@ -1280,13 +1381,59 @@ class MainWindow(QtWidgets.QMainWindow):
             dlg = EditUserDialog(user_obj, self.pop_map, self)
             if dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
-            new_data = dlg.get_data()
+            new_data = self._sanitize_user_update_payload(dlg.get_data())
             # Spawn worker to update user
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             self.prog.show()
             worker = UserUpdateWorker(client, user_id, new_data)
-            worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
-            worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Error", m)))
+
+            # Always emit user-management update markers for troubleshooting.
+            try:
+                req_preview = json.dumps(new_data) if isinstance(new_data, (dict, list)) else str(new_data)
+                if len(req_preview) > 3000:
+                    req_preview = req_preview[:3000] + '...'
+                marker = f"USER_MGMT_EDIT_REQUEST user_id={user_id} field=<dialog> payload={req_preview}"
+                api_client.write_connection_log(marker)
+                api_client.api_logger.info(marker)
+            except Exception:
+                pass
+
+            def _on_edit_finished(result):
+                try:
+                    returned_user = result.get('user') if isinstance(result, dict) else result
+                    resp_preview = json.dumps(returned_user) if isinstance(returned_user, (dict, list)) else str(returned_user)
+                    if len(resp_preview) > 3000:
+                        resp_preview = resp_preview[:3000] + '...'
+                    marker = f"USER_MGMT_EDIT_RESPONSE user_id={user_id} field=<dialog> response={resp_preview}"
+                    api_client.write_connection_log(marker)
+                    api_client.api_logger.info(marker)
+                except Exception:
+                    pass
+                self.prog.hide()
+                self.refresh_users()
+                changed = []
+                try:
+                    if isinstance(new_data, dict):
+                        changed = sorted([str(k) for k in new_data.keys() if str(k)])
+                except Exception:
+                    changed = []
+                label = ", ".join(changed[:3]) if changed else "dialog"
+                if len(changed) > 3:
+                    label += ", ..."
+                self._notify_user_update_success(user_id, label)
+
+            def _on_edit_error(message):
+                try:
+                    marker = f"USER_MGMT_EDIT_ERROR user_id={user_id} field=<dialog> error={message}"
+                    api_client.write_connection_log(marker)
+                    api_client.api_logger.error(marker)
+                except Exception:
+                    pass
+                self.prog.hide()
+                QtWidgets.QMessageBox.critical(self, "Error", message)
+
+            worker.signals.finished.connect(_on_edit_finished)
+            worker.signals.error.connect(_on_edit_error)
             self.threadpool.start(worker)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Edit User Error", str(e))
@@ -1646,12 +1793,14 @@ class MainWindow(QtWidgets.QMainWindow):
             selected = self.u_table.selectionModel().selectedRows()
             from ui.dialogs import ExportOptionsDialog
             populated_attrs = self._get_populated_export_attributes(self.users_cache)
+            populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
             export_dlg = ExportOptionsDialog(
                 bool(selected),
                 only_visible_default,
                 prefer_selected,
                 self,
                 populated_attributes=populated_attrs,
+                populated_attribute_samples=populated_attr_samples,
             )
             if export_dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
@@ -2651,7 +2800,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     json.dump(cfg, f, indent=4)
                 
                 # Save credentials to keyring
-                import keyring
                 env_id, client_id, secret = new_credentials
                 try:
                     if secret:
@@ -2720,7 +2868,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 # Save credentials to keyring if provided
                 if new_profile and new_credentials:
-                    import keyring
                     env_id, client_id, secret = new_credentials
                     try:
                         if secret:
@@ -2761,7 +2908,6 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Clean up keyring entries for deleted profiles
             if deleted:
-                import keyring
                 for profile_name in deleted:
                     try:
                         keyring.delete_password("pingone_usermanager", profile_name)
@@ -2824,6 +2970,45 @@ class MainWindow(QtWidgets.QMainWindow):
         if 'population.id' in populated_keys:
             populated_keys.discard('population.id')
             populated_keys.add('population.name')
+
+        # PingOne work-email aliases should appear as `mail` in User Management.
+        _work_aliases = {'workEmail', 'workemail', 'trilogieWorkEmail'}
+        if any(a in populated_keys for a in _work_aliases):
+            for a in _work_aliases:
+                populated_keys.discard(a)
+            populated_keys.add('mail')
+
+        # PingOne work-telephone aliases should appear as `workTelephone`.
+        _work_tel_aliases = {'workTelephone', 'workTel', 'trilogieWorkTel'}
+        has_work_phone = False
+        for u in users or []:
+            try:
+                for a in _work_tel_aliases:
+                    v = u.get(a, '')
+                    if isinstance(v, str) and v.strip():
+                        has_work_phone = True
+                        break
+                if has_work_phone:
+                    break
+                phones = u.get('phoneNumbers', [])
+                if isinstance(phones, list):
+                    for ph in phones:
+                        if not isinstance(ph, dict):
+                            continue
+                        ptype = str(ph.get('type', '')).strip().lower()
+                        pnum = str(ph.get('number', '')).strip()
+                        if ptype == 'work' and pnum:
+                            has_work_phone = True
+                            break
+                if has_work_phone:
+                    break
+            except Exception:
+                pass
+        if any(a in populated_keys for a in _work_tel_aliases) or has_work_phone:
+            for a in _work_tel_aliases:
+                populated_keys.discard(a)
+            populated_keys.add('workTelephone')
+
         return sorted(populated_keys)
 
     def _collect_keys(self, obj, prefix, keys, depth=0, max_depth=3):
@@ -2841,6 +3026,55 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_value(self, user, key):
         """Get value from user dict using dot notation."""
+        # Special case: phoneNumbers - extract the first number as a readable string.
+        if key == 'phoneNumbers':
+            try:
+                phones = user.get('phoneNumbers', [])
+                if isinstance(phones, list) and phones:
+                    first = phones[0]
+                    if isinstance(first, dict):
+                        return str(first.get('number', '') or '')
+                    return str(first) if first else ''
+            except Exception:
+                pass
+            return ''
+        # Alias PingOne work-email fields to `mail` in the grid.
+        if key == 'mail':
+            try:
+                if isinstance(user.get('mail'), str) and user.get('mail').strip():
+                    return user.get('mail').strip()
+            except Exception:
+                pass
+            for alt in ('workEmail', 'workemail', 'trilogieWorkEmail'):
+                try:
+                    v = user.get(alt, '')
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                except Exception:
+                    pass
+            return ''
+        # Alias PingOne work telephone fields to `workTelephone` in the grid.
+        if key == 'workTelephone':
+            for alt in ('workTelephone', 'workTel', 'trilogieWorkTel'):
+                try:
+                    v = user.get(alt, '')
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                except Exception:
+                    pass
+            try:
+                phones = user.get('phoneNumbers', [])
+                if isinstance(phones, list):
+                    for ph in phones:
+                        if not isinstance(ph, dict):
+                            continue
+                        ptype = str(ph.get('type', '')).strip().lower()
+                        pnum = str(ph.get('number', '')).strip()
+                        if ptype == 'work' and pnum:
+                            return pnum
+            except Exception:
+                pass
+            return ''
         parts = key.split('.')
         current = user
         try:
@@ -2857,6 +3091,130 @@ class MainWindow(QtWidgets.QMainWindow):
             return str(current) if current else ''
         except:
             return ''
+
+    def _set_user_value(self, user: dict, key: str, value):
+        """Set a user value by key, supporting dotted paths for nested fields."""
+        if not isinstance(user, dict):
+            return
+        key = str(key or '').strip()
+        if not key:
+            return
+
+        # Keep `mail` mapped to whichever work-email field exists in payload.
+        if key == 'mail':
+            target = None
+            for alt in ('workEmail', 'workemail', 'trilogieWorkEmail', 'mail'):
+                if alt in user:
+                    target = alt
+                    break
+            user[target or 'mail'] = value
+            return
+
+        # Keep work telephone mapped to whichever work-tel field exists.
+        if key == 'workTelephone':
+            target = None
+            for alt in ('workTelephone', 'workTel', 'trilogieWorkTel'):
+                if alt in user:
+                    target = alt
+                    break
+            val = str(value or '').strip()
+            if target:
+                user[target] = val
+                return
+
+            # Fallback to typed phoneNumbers entry if no dedicated field exists.
+            phones = user.get('phoneNumbers') if isinstance(user.get('phoneNumbers'), list) else []
+            if not isinstance(phones, list):
+                phones = []
+            updated = False
+            for ph in phones:
+                if not isinstance(ph, dict):
+                    continue
+                if str(ph.get('type', '')).strip().lower() == 'work':
+                    ph['number'] = val
+                    updated = True
+                    break
+            if not updated and val:
+                phones.append({'type': 'work', 'number': val})
+            if phones:
+                user['phoneNumbers'] = phones
+            elif 'phoneNumbers' in user:
+                user.pop('phoneNumbers', None)
+            return
+
+        # Common display/edit aliases that need shape-aware writes.
+        if key == 'phoneNumbers' and isinstance(value, str):
+            val = value.strip()
+            if val:
+                user['phoneNumbers'] = [{'type': 'mobile', 'number': val}]
+            else:
+                user.pop('phoneNumbers', None)
+            return
+
+        if key == 'population.name':
+            name = str(value or '').strip()
+            pop_id = self.pop_map.get(name, '')
+            pop = user.get('population') if isinstance(user.get('population'), dict) else {}
+            if pop_id:
+                pop['id'] = pop_id
+            elif name:
+                pop['name'] = name
+            user['population'] = pop
+            return
+
+        if key == 'population.id':
+            pop = user.get('population') if isinstance(user.get('population'), dict) else {}
+            pop['id'] = value
+            user['population'] = pop
+            return
+
+        if '.' not in key:
+            user[key] = value
+            return
+
+        parts = key.split('.')
+        cur = user
+        for part in parts[:-1]:
+            nxt = cur.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[part] = nxt
+            cur = nxt
+        cur[parts[-1]] = value
+
+    def _sanitize_user_update_payload(self, payload: dict) -> dict:
+        """Remove read-only/internal fields before sending a user PUT update."""
+        if not isinstance(payload, dict):
+            return {}
+
+        out = copy.deepcopy(payload)
+        blocked_top_level = {
+            'id',
+            '_links',
+            'account',
+            'environment',
+            'lifecycle',
+            'identityProvider',
+            'createdAt',
+            'updatedAt',
+            'lastSignOn',
+            'mfaEnabled',
+            'verifyStatus',
+        }
+        for key in blocked_top_level:
+            out.pop(key, None)
+
+        # Keep only writable population shape.
+        pop = out.get('population')
+        if isinstance(pop, dict):
+            pop_id = pop.get('id')
+            out['population'] = {'id': pop_id} if pop_id else {}
+            if not out['population']:
+                out.pop('population', None)
+        elif pop is not None:
+            out.pop('population', None)
+
+        return out
 
     def delete_selected_users(self):
         rows = self.u_table.selectionModel().selectedRows()
@@ -2971,11 +3329,27 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Logging", f"Failed to set log level: {e}")
 
-    def _show_log_viewer(self, title: str, path: Path, log_kind: str):
+    def _show_log_viewer(self, title: str, path: Path, log_kind: str, include_filter: str = ""):
         """Show a log viewer with Set Level, Reset, and Save commands."""
         p = Path(path)
+        key = (str(p.resolve() if p.exists() else p), str(include_filter or ''))
+
+        # Reuse existing viewer window for the same log/filter combination.
+        existing = self._open_log_windows.get(key)
+        if existing is not None:
+            try:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except Exception:
+                self._open_log_windows.pop(key, None)
+
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(title)
+        dlg.setModal(False)
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dlg.setWindowFlag(QtCore.Qt.Window, True)
         lay = QtWidgets.QVBoxLayout(dlg)
 
         cmd_row = QtWidgets.QHBoxLayout()
@@ -2996,6 +3370,11 @@ class MainWindow(QtWidgets.QMainWindow):
         path_line.setReadOnly(True)
         lay.addWidget(path_line)
 
+        if include_filter:
+            filter_line = QtWidgets.QLineEdit(f"Filter: {include_filter}")
+            filter_line.setReadOnly(True)
+            lay.addWidget(filter_line)
+
         te = QtWidgets.QTextEdit()
         te.setReadOnly(True)
         lay.addWidget(te)
@@ -3003,7 +3382,11 @@ class MainWindow(QtWidgets.QMainWindow):
         def refresh_text():
             try:
                 if p.exists():
-                    te.setPlainText(p.read_text(encoding='utf-8', errors='replace'))
+                    content = p.read_text(encoding='utf-8', errors='replace')
+                    if include_filter:
+                        lines = [ln for ln in content.splitlines() if include_filter in ln]
+                        content = "\n".join(lines)
+                    te.setPlainText(content)
                 else:
                     te.setPlainText(f"Log file does not exist yet: {p}")
                 te.moveCursor(QtGui.QTextCursor.End)
@@ -3037,11 +3420,20 @@ class MainWindow(QtWidgets.QMainWindow):
         reset_btn.clicked.connect(reset_and_refresh)
         save_btn.clicked.connect(save_copy)
         refresh_btn.clicked.connect(refresh_text)
-        close_btn.clicked.connect(dlg.accept)
+        close_btn.clicked.connect(dlg.close)
+
+        def _on_destroyed(*_args):
+            try:
+                self._open_log_windows.pop(key, None)
+            except Exception:
+                pass
+
+        dlg.destroyed.connect(_on_destroyed)
+        self._open_log_windows[key] = dlg
 
         refresh_text()
         dlg.resize(980, 520)
-        dlg.exec()
+        dlg.show()
 
     def show_log_files(self):
         """Display a small dialog listing the log files and allow opening them."""
@@ -3094,10 +3486,34 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.resize(800, 120)
         dlg.exec()
 
+    def view_user_mgmt_edit_log(self):
+        """Open connection log filtered to USER_MGMT_EDIT_ entries."""
+        p = getattr(api_client, 'CONNECTION_LOG', Path('connection_errors.log'))
+        self._show_log_viewer(
+            "Connection Log - User Mgmt Edit Entries",
+            p,
+            "connection",
+            include_filter="USER_MGMT_EDIT_",
+        )
+
     def show_api_capture_dialog(self):
         """Open a dialog to start/stop a live API-capture session and view events."""
+        key = ("__api_capture__", "")
+        existing = self._open_log_windows.get(key)
+        if existing is not None:
+            try:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except Exception:
+                self._open_log_windows.pop(key, None)
+
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("API Capture")
+        dlg.setModal(False)
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dlg.setWindowFlag(QtCore.Qt.Window, True)
         lay = QtWidgets.QVBoxLayout(dlg)
         te = QtWidgets.QTextEdit(); te.setReadOnly(True)
         btn_row = QtWidgets.QHBoxLayout()
@@ -3113,20 +3529,28 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_row.addWidget(set_level_btn)
         btn_row.addWidget(reset_btn)
         btn_row.addWidget(save_btn)
+        stats_lbl = QtWidgets.QLabel("Refreshes: 0 | Events: 0")
+        btn_row.addWidget(stats_lbl)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
         lay.addLayout(btn_row); lay.addWidget(te)
 
         timer = QtCore.QTimer(dlg)
         timer.setInterval(500)
+        refresh_count = 0
+        event_count = 0
 
         def poll_events():
+            nonlocal refresh_count, event_count
             try:
+                refresh_count += 1
                 events = api_client.get_and_clear_live_events()
                 if events:
+                    event_count += len(events)
                     te.moveCursor(QtGui.QTextCursor.End)
                     te.insertPlainText("\n".join(events) + "\n")
                     te.moveCursor(QtGui.QTextCursor.End)
+                stats_lbl.setText(f"Refreshes: {refresh_count} | Events: {event_count}")
             except Exception:
                 pass
 
@@ -3138,7 +3562,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.enable_api_logging_action.setChecked(True)
             api_client.set_api_logging(True)
             start_btn.setEnabled(False); stop_btn.setEnabled(True)
-            te.clear(); timer.start()
+            te.clear()
+            nonlocal refresh_count, event_count
+            refresh_count = 0
+            event_count = 0
+            stats_lbl.setText("Refreshes: 0 | Events: 0")
+            timer.start()
 
         def stop():
             timer.stop()
@@ -3161,7 +3590,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Save Failed", str(e))
 
         def reset_capture():
+            nonlocal refresh_count, event_count
             te.clear()
+            refresh_count = 0
+            event_count = 0
+            stats_lbl.setText("Refreshes: 0 | Events: 0")
 
         def set_level():
             self._prompt_set_log_level("api")
@@ -3171,10 +3604,19 @@ class MainWindow(QtWidgets.QMainWindow):
         set_level_btn.clicked.connect(set_level)
         reset_btn.clicked.connect(reset_capture)
         save_btn.clicked.connect(save)
-        close_btn.clicked.connect(lambda: (stop(), dlg.accept()))
+        close_btn.clicked.connect(lambda: (stop(), dlg.close()))
+
+        def _on_destroyed(*_args):
+            try:
+                self._open_log_windows.pop(key, None)
+            except Exception:
+                pass
+
+        dlg.destroyed.connect(_on_destroyed)
+        self._open_log_windows[key] = dlg
 
         dlg.resize(900, 400)
-        dlg.exec()
+        dlg.show()
 
     def reset_log_file(self, path: Path):
         """Truncate the given log file after confirmation."""
@@ -3531,6 +3973,38 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         return sorted(attrs)
+
+    def _get_populated_export_attribute_samples(self, users: list, attrs: list) -> dict:
+        """Return first non-empty sample value per flattened attribute."""
+        sample_map = {}
+        attr_order = [str(a) for a in (attrs or []) if str(a)]
+        if not attr_order:
+            return sample_map
+
+        wanted = set(attr_order)
+        for user in users or []:
+            missing = wanted.difference(sample_map.keys())
+            if not missing:
+                break
+            try:
+                flat = self._flatten_user(user)
+            except Exception:
+                flat = {}
+            for attr in list(missing):
+                value = flat.get(attr)
+                if not self._is_populated_export_value(value):
+                    continue
+                if isinstance(value, (dict, list, tuple, set)):
+                    try:
+                        text = json.dumps(value, ensure_ascii=False)
+                    except Exception:
+                        text = str(value)
+                else:
+                    text = str(value)
+                if len(text) > 140:
+                    text = text[:140] + '...'
+                sample_map[attr] = text
+        return sample_map
 
     def _filter_users_by_populated_attributes(self, users: list, required_attrs: list) -> tuple:
         """Filter users to those with all required flattened attributes populated."""
@@ -4026,14 +4500,62 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update a specific field of a user via API."""
         user = next((u for u in self.users_cache if u['id'] == user_id), None)
         if user:
-            user[col_name] = new_data
+            payload = copy.deepcopy(user)
+            self._set_user_value(payload, col_name, new_data)
+
+            # Cleanup legacy malformed keys from older direct-assignment behavior
+            # (e.g. top-level 'name.given' created in cache by prior edits).
+            for k in list(payload.keys()):
+                if isinstance(k, str) and '.' in k:
+                    payload.pop(k, None)
+
+            payload = self._sanitize_user_update_payload(payload)
+
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             # Spawn a UserUpdateWorker to perform the API PUT off the UI
             # thread; the worker will refresh the UI upon success.
             self.prog.show()
-            worker = UserUpdateWorker(client, user_id, user)
-            worker.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
-            worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Error", m)))
+            worker = UserUpdateWorker(client, user_id, payload)
+
+            # Targeted request/response logging for user-management edits.
+            # This captures the exact payload sent and the object returned.
+            try:
+                req_preview = json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload)
+                if len(req_preview) > 3000:
+                    req_preview = req_preview[:3000] + '...'
+                marker = f"USER_MGMT_EDIT_REQUEST user_id={user_id} field={col_name} payload={req_preview}"
+                api_client.write_connection_log(marker)
+                api_client.api_logger.info(marker)
+            except Exception:
+                pass
+
+            def _on_update_finished(result):
+                try:
+                    returned_user = result.get('user') if isinstance(result, dict) else result
+                    resp_preview = json.dumps(returned_user) if isinstance(returned_user, (dict, list)) else str(returned_user)
+                    if len(resp_preview) > 3000:
+                        resp_preview = resp_preview[:3000] + '...'
+                    marker = f"USER_MGMT_EDIT_RESPONSE user_id={user_id} field={col_name} response={resp_preview}"
+                    api_client.write_connection_log(marker)
+                    api_client.api_logger.info(marker)
+                except Exception:
+                    pass
+                self.prog.hide()
+                self.refresh_users()
+                self._notify_user_update_success(user_id, col_name)
+
+            def _on_update_error(message):
+                try:
+                    marker = f"USER_MGMT_EDIT_ERROR user_id={user_id} field={col_name} error={message}"
+                    api_client.write_connection_log(marker)
+                    api_client.api_logger.error(marker)
+                except Exception:
+                    pass
+                self.prog.hide()
+                QtWidgets.QMessageBox.critical(self, "Error", message)
+
+            worker.signals.finished.connect(_on_update_finished)
+            worker.signals.error.connect(_on_update_error)
             self.threadpool.start(worker)
 
     def _show_text_help_dialog(self, title: str, content: str):
@@ -4217,12 +4739,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         # Show options dialog so user can choose selected/all and visible/all columns
         from ui.dialogs import ExportOptionsDialog
         populated_attrs = self._get_populated_export_attributes(self.users_cache)
+        populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
         dlg = ExportOptionsDialog(
             bool(selected),
             only_visible_default,
             prefer_selected,
             self,
             populated_attributes=populated_attrs,
+            populated_attribute_samples=populated_attr_samples,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -4315,12 +4839,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         selected = self.u_table.selectionModel().selectedRows()
         from ui.dialogs import ExportOptionsDialog
         populated_attrs = self._get_populated_export_attributes(self.users_cache)
+        populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
         dlg = ExportOptionsDialog(
             bool(selected),
             only_visible_default,
             prefer_selected,
             self,
             populated_attributes=populated_attrs,
+            populated_attribute_samples=populated_attr_samples,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -5174,16 +5700,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         id_col = self.columns.index('id') if 'id' in self.columns else -1
         if id_col == -1: return
         user_id = self.u_table.item(row, id_col).text()
-        # Only open editor when double-clicking the UUID or username columns
-        if col_name in ('id', 'username'):
+        # Open editor when double-clicking UUID, username, or email.
+        # Email no longer launches mailto, but remains editable via dialog.
+        if col_name in ('id', 'username', 'email'):
             self.u_table.selectRow(row)
             self.edit_user()
             return
-        elif col_name == 'email':
-            email = item.text()
-            url = f"mailto:{email}"
-            if QtWidgets.QMessageBox.question(self, "Open Email", f"Compose email to {email}?") == QtWidgets.QMessageBox.Yes:
-                QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
         # Prefer using the original user payload for JSON-like attributes
         # (e.g. `name`, `address`) rather than the stringified table value.
         data = item.data(QtCore.Qt.UserRole)
