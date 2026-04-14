@@ -83,7 +83,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.79"
+APP_VERSION = "0.8"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 
 
@@ -124,6 +124,8 @@ Database Import/Export:
 - Use File → Manage DB Connections (or the button in Configuration tab) to define connections.
 - Supported types: MSSQL and MariaDB/MySQL. Provide JDBC/ODBC driver path if needed.
 - After defining a connection you can import or export data via the toolbar buttons on the User Management tab.
+- Mapping dialogs support common aliases and core fields including middle name, employee type, and address targets.
+- Mapping choices include custom PingOne attributes discovered from tenant user data.
 - LDAP directories are also supported via Manage LDAP Connections.
 - Use the Configuration action "Open PingOne Console" to launch the active environment in your browser.
 
@@ -165,6 +167,16 @@ Importing Users:
 - Click "Import CSV" or "Import LDIF" to bulk-create or update users.
 - The mapping dialog lets you map file headers to PingOne attributes:
   • Required fields: username, email, name.given, name.family
+    • Common additional fields: name.middle (middle name), employeeType/type, and address fields
+    • Address targets include: address.streetAddress, address.locality, address.region, address.postalCode, address.countryCode
+    • Common source aliases auto-suggest to targets (examples):
+        - middlename/middleinitial -> name.middle
+        - employeetype/employmenttype -> employeeType
+        - street/streetaddress/addressline1 -> address.streetAddress
+        - city -> address.locality
+        - state/province/region -> address.region
+        - zip/zipcode/postalcode -> address.postalCode
+        - country -> address.countryCode
   • The 'enabled' field is a dropdown (true/false)
   • You can assign a fixed population to all imported users
   • Check "Remember mapping for this profile" to save mappings
@@ -173,7 +185,7 @@ Importing Users:
 - Imported attributes not currently shown are automatically added to the grid columns after import.
 - For DB imports/exports, you can save custom queries and mapping selections in DB connection settings; saved queries auto-reuse their saved mappings.
 - LDAP mappings can also be saved per LDAP connection for reuse.
-- During import preparation, PingOne attributes are refreshed from live user data so custom attributes appear in mapping choices.
+- During import preparation, PingOne attributes are refreshed from live user data so custom attributes defined in your PingOne tenant appear in mapping choices.
 - Usernames are normalized (whitespace trimmed, case-insensitive comparison).
 - If a username already exists on the server, the import updates that user instead of creating a duplicate.
 - Local JSON Schema validation is performed if jsonschema is installed and user_schema.json exists.
@@ -185,6 +197,7 @@ Exporting Users:
 - Optionally require selected attributes to be populated; only users matching all selected populated-attribute filters are exported.
 - Check "Remember these choices" to save export preferences per-profile.
 - Database export: click "Export DB" on the toolbar (after defining a connection) to map PingOne attributes to target table columns; the table will be created if it does not already exist.
+- Export mapping includes standard fields (for example name.middle, employeeType, and address fields) and custom attributes discovered from your PingOne data.
 - LDAP export: choose "Export → LDAP Directory" and map PingOne attributes to LDAP attributes; entries are created or updated by DN.
 
 Deleting Users:
@@ -300,6 +313,142 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def show_about_dialog(self):
+        """Show application About information."""
+        keyring_line = "Available" if KEYRING_AVAILABLE else "Unavailable"
+        lines = [
+            f"{APP_NAME} v{APP_VERSION}",
+            "",
+            "Desktop administration tool for PingOne environments.",
+            "",
+            "Highlights:",
+            "- User management and bulk operations",
+            "- Import/export for CSV, LDIF, database, and LDAP",
+            "- Live API capture and log viewers",
+            "",
+            f"Keyring: {keyring_line}",
+        ]
+        if not KEYRING_AVAILABLE:
+            lines.append("Saved client secrets may not persist on this system.")
+        QtWidgets.QMessageBox.about(self, f"About {APP_NAME}", "\n".join(lines))
+
+    def show_preferences_dialog(self):
+        """Show a consolidated preferences dialog instead of a help screen."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Preferences")
+        dlg.setModal(True)
+        dlg.resize(520, 420)
+
+        lay = QtWidgets.QVBoxLayout(dlg)
+
+        form_box = QtWidgets.QGroupBox("General")
+        form = QtWidgets.QFormLayout(form_box)
+
+        json_cb = QtWidgets.QCheckBox("Enable JSON Editing")
+        json_cb.setChecked(self.enable_json_edit_action.isChecked())
+
+        friendly_cb = QtWidgets.QCheckBox("Use Friendly Column Names")
+        friendly_cb.setChecked(self.use_friendly_names_action.isChecked())
+
+        dark_cb = QtWidgets.QCheckBox("Dark Mode")
+        dark_cb.setChecked(self.dark_mode_action.isChecked())
+
+        success_cb = QtWidgets.QCheckBox("Show User Update Success Messages")
+        success_cb.setChecked(self.show_user_update_success_action.isChecked())
+
+        hide_links_cb = QtWidgets.QCheckBox("Hide Link / JSON Reference Columns")
+        hide_links_cb.setChecked(self.hide_raw_http_columns_cb.isChecked())
+
+        show_api_status_cb = QtWidgets.QCheckBox("Show Live API Calls In Status Bar")
+        show_api_status_cb.setChecked(self.show_api_calls_cb.isChecked())
+
+        api_log_cb = QtWidgets.QCheckBox("Log All API Activity")
+        api_log_cb.setChecked(self.enable_api_logging_action.isChecked())
+
+        cred_log_cb = QtWidgets.QCheckBox("Enable Credentials Logging")
+        cred_log_cb.setChecked(self.enable_credentials_logging_action.isChecked())
+
+        validation_combo = QtWidgets.QComboBox()
+        validation_combo.addItem("None", "none")
+        validation_combo.addItem("Server Dry-Run", "server")
+        validation_combo.addItem("Local Schema Validation", "local")
+        if self.use_server_dryrun_action.isChecked():
+            validation_combo.setCurrentIndex(validation_combo.findData("server"))
+        elif self.use_local_schema_action.isChecked():
+            validation_combo.setCurrentIndex(validation_combo.findData("local"))
+        else:
+            validation_combo.setCurrentIndex(validation_combo.findData("none"))
+
+        form.addRow(json_cb)
+        form.addRow(friendly_cb)
+        form.addRow(dark_cb)
+        form.addRow(success_cb)
+        form.addRow(hide_links_cb)
+        form.addRow(show_api_status_cb)
+        form.addRow(api_log_cb)
+        form.addRow(cred_log_cb)
+        form.addRow("Validation:", validation_combo)
+        lay.addWidget(form_box)
+
+        tools_box = QtWidgets.QGroupBox("Shortcuts")
+        tools_lay = QtWidgets.QHBoxLayout(tools_box)
+        open_logs_btn = QtWidgets.QPushButton("Open Log Files")
+        open_logs_btn.clicked.connect(self.show_log_files)
+        open_capture_btn = QtWidgets.QPushButton("Open API Capture")
+        open_capture_btn.clicked.connect(self.show_api_capture_dialog)
+        console_url_btn = QtWidgets.QPushButton("Set Console URL")
+        console_url_btn.clicked.connect(self.set_pingone_console_url)
+        tools_lay.addWidget(open_logs_btn)
+        tools_lay.addWidget(open_capture_btn)
+        tools_lay.addWidget(console_url_btn)
+        lay.addWidget(tools_box)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        self.enable_json_edit_action.setChecked(json_cb.isChecked())
+        self.toggle_json_editing()
+
+        self.use_friendly_names_action.setChecked(friendly_cb.isChecked())
+        self.toggle_friendly_names()
+
+        self.dark_mode_action.setChecked(dark_cb.isChecked())
+        self.toggle_theme()
+
+        self.show_user_update_success_action.setChecked(success_cb.isChecked())
+        self.on_show_user_update_success_toggled(self.show_user_update_success_action.isChecked())
+
+        self.hide_raw_http_columns_cb.setChecked(hide_links_cb.isChecked())
+        self.show_api_calls_cb.setChecked(show_api_status_cb.isChecked())
+
+        self.enable_api_logging_action.setChecked(api_log_cb.isChecked())
+        self.toggle_api_logging()
+
+        self.enable_credentials_logging_action.setChecked(cred_log_cb.isChecked())
+        self.toggle_credentials_logging()
+
+        mode = validation_combo.currentData()
+        self.use_server_dryrun_action.setChecked(mode == "server")
+        self.use_local_schema_action.setChecked(mode == "local")
+        if mode == "server":
+            self.toggle_server_dryrun()
+        elif mode == "local":
+            self.toggle_local_schema()
+        else:
+            msg = "Validation: none"
+            self.status_label.setText(msg)
+            try:
+                self.statusBar().showMessage(msg)
+            except Exception:
+                pass
+
+        self.save_profile_option()
+
     def showEvent(self, event):
         """Override showEvent to restore geometry after window is fully initialized."""
         super().showEvent(event)
@@ -335,6 +484,12 @@ class MainWindow(QtWidgets.QMainWindow):
             quit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
         
         settings_menu = menubar.addMenu("Settings")
+        self.preferences_action = settings_menu.addAction("Preferences...")
+        self.preferences_action.triggered.connect(self.show_preferences_dialog)
+        self.preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Comma))
+        if IS_MACOS:
+            self.preferences_action.setMenuRole(QtGui.QAction.MenuRole.PreferencesRole)
+        settings_menu.addSeparator()
         self.enable_json_edit_action = settings_menu.addAction("Enable JSON Editing")
         self.enable_json_edit_action.setCheckable(True)
         self.enable_json_edit_action.setChecked(False)
@@ -383,11 +538,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_user_update_success_action.triggered.connect(self.on_show_user_update_success_toggled)
         self.capture_api_action = settings_menu.addAction("Capture API Calls...")
         self.capture_api_action.triggered.connect(self.show_api_capture_dialog)
-        # Show where logs are written on disk (also available under Logs menu)
-        self.show_logs_action = settings_menu.addAction("Show Log Files...")
-        self.show_logs_action.triggered.connect(self.show_log_files)
-        self.view_user_mgmt_logs_action = settings_menu.addAction("View User Mgmt Edit Logs...")
-        self.view_user_mgmt_logs_action.triggered.connect(self.view_user_mgmt_edit_log)
         settings_menu.addSeparator()
         self.set_console_url_action = settings_menu.addAction("Set PingOne Console URL...")
         self.set_console_url_action.triggered.connect(self.set_pingone_console_url)
@@ -416,6 +566,11 @@ class MainWindow(QtWidgets.QMainWindow):
         full_help_action.triggered.connect(self.show_full_help)
         app_help_action = help_menu.addAction("Application Help")
         app_help_action.triggered.connect(self.show_app_help)
+        help_menu.addSeparator()
+        self.about_action = help_menu.addAction("About PingOne UserManager")
+        self.about_action.triggered.connect(self.show_about_dialog)
+        if IS_MACOS:
+            self.about_action.setMenuRole(QtGui.QAction.MenuRole.AboutRole)
         
         # --- Config Tab ---
         env_tab = QtWidgets.QWidget(); env_lay = QtWidgets.QVBoxLayout(env_tab)
@@ -2320,7 +2475,6 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         if 'population.id' in attrs:
-            attrs.discard('population.id')
             attrs.add('population.name')
         return sorted(attrs)
 
@@ -2565,6 +2719,11 @@ class MainWindow(QtWidgets.QMainWindow):
                             QtWidgets.QMessageBox.warning(self, "Migrate Legacy Columns", f"Migration failed: {e}")
 
             ping_attrs = self._get_pingone_attributes()
+            try:
+                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+                ping_attrs = self._get_pingone_attributes_for_import(client)
+            except Exception:
+                pass
             sample_p1 = {}
             try:
                 selected = self.u_table.selectionModel().selectedRows()
@@ -2668,6 +2827,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Return schema-informed PingOne attribute names for mapping dialogs."""
         attrs = set()
 
+        def _is_mappable_attr(name: str) -> bool:
+            token = str(name or '').strip()
+            if not token:
+                return False
+            return not (token.startswith('_links') or token.startswith('_embedded'))
+
         def _walk_schema(node, prefix=''):
             if not isinstance(node, dict):
                 return
@@ -2688,12 +2853,37 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         extras = {
-            'username', 'email', 'name.given', 'name.family',
+            'username', 'email', 'name.given', 'name.middle', 'name.family',
             'population.id', 'population.name',
             'phoneNumbers.mobile', 'phoneNumbers.work', 'phoneNumbers.home',
-            'title', 'organization', 'enabled', 'id',
+            'address',
+            'address.streetAddress', 'address.street',
+            'address.locality', 'address.city',
+            'address.region', 'address.state',
+            'address.postalCode', 'address.zip',
+            'address.countryCode', 'address.country',
+            'address.formatted',
+            'employeeType', 'type',
+            'title', 'department', 'organization',
+            'enabled', 'id',
         }
         attrs.update(extras)
+
+        # Include custom attributes present on already-loaded PingOne users.
+        # This keeps mapping dialogs aware of tenant-specific schema extensions.
+        try:
+            for user in (self.users_cache or []):
+                if not isinstance(user, dict):
+                    continue
+                self._collect_keys(user, '', attrs, depth=0, max_depth=6)
+                flat_user = self._flatten_user(user)
+                for key in flat_user.keys():
+                    if _is_mappable_attr(key):
+                        attrs.add(str(key))
+        except Exception:
+            pass
+
+        attrs = {a for a in attrs if _is_mappable_attr(a)}
         return sorted(attrs)
 
     def connect_only(self):
@@ -5099,11 +5289,17 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             except Exception:
                 pass
 
+            pingone_attrs = self._get_pingone_attributes()
+            try:
+                pingone_attrs = self._get_pingone_attributes_for_import(client)
+            except Exception:
+                pass
+
             map_dialog = AttributeMappingDialog(headers, self, pop_map=pops,
                                                initial_mapping=initial_mapping,
                                                initial_fixed_pop_id=initial_fixed,
                                                initial_fixed_enabled=initial_enabled,
-                                               pingone_attrs=self._get_pingone_attributes(),
+                                               pingone_attrs=pingone_attrs,
                                                sample_row=(raw_rows[0] if raw_rows else None))
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:
                 return
@@ -5184,6 +5380,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             except Exception:
                 initial_mapping = None
                 initial_fixed = None
+            pingone_attrs = self._get_pingone_attributes()
+            try:
+                pingone_attrs = self._get_pingone_attributes_for_import(client)
+            except Exception:
+                pass
+
             map_dialog = AttributeMappingDialog(
                 first_flat_keys,
                 self,
@@ -5191,7 +5393,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 initial_mapping=initial_mapping,
                 initial_fixed_pop_id=initial_fixed,
                 initial_fixed_enabled=initial_enabled,
-                pingone_attrs=self._get_pingone_attributes(),
+                pingone_attrs=pingone_attrs,
                 sample_row=first_sample,
             )
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:

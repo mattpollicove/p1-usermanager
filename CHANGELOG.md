@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8] - 2026-04-14
+### Added
+- Bumped application version to `0.8`.
+- Import/export mapping now includes middle name, employee type, address targets, and custom PingOne attributes discovered from live tenant data.
+- In-app help text now explicitly documents new mapping aliases and fields for CSV/LDIF/DB/LDAP workflows.
+
 ## [0.79] - 2026-04-10
 ### Added
 - Bumped application version to `0.79`.

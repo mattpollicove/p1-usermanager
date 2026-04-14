@@ -739,10 +739,13 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         self.sample_row = sample_row or {}
 
         base_attrs = [
-            'username', 'email', 'name.given', 'name.family',
+            'username', 'email', 'name.given', 'name.middle', 'name.family',
             'population.id', 'population.name', 'enabled',
             'phoneNumbers.mobile', 'phoneNumbers.work', 'phoneNumbers.home',
-            'title', 'organization', 'id',
+            'employeeType', 'type',
+            'address.streetAddress', 'address.locality', 'address.region',
+            'address.postalCode', 'address.countryCode', 'address.country',
+            'title', 'department', 'organization', 'id',
         ]
         self.pingone_attrs = sorted({*(pingone_attrs or []), *base_attrs})
 
@@ -874,6 +877,8 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         alias_map = {
             'firstname': 'name.given',
             'givenname': 'name.given',
+            'middlename': 'name.middle',
+            'middleinitial': 'name.middle',
             'lastname': 'name.family',
             'familyname': 'name.family',
             'uid': 'username',
@@ -883,10 +888,28 @@ class AttributeMappingDialog(QtWidgets.QDialog):
             'mobilephone': 'phoneNumbers.mobile',
             'workphone': 'phoneNumbers.work',
             'homephone': 'phoneNumbers.home',
+            'employeetype': 'employeeType',
+            'employmenttype': 'employeeType',
+            'street': 'address.streetAddress',
+            'streetaddress': 'address.streetAddress',
+            'addressline1': 'address.streetAddress',
+            'city': 'address.locality',
+            'state': 'address.region',
+            'province': 'address.region',
+            'region': 'address.region',
+            'postalcode': 'address.postalCode',
+            'zipcode': 'address.postalCode',
+            'zip': 'address.postalCode',
+            'country': 'address.countryCode',
             'population': 'population.id',
         }
         if normalized_source in alias_map:
-            return alias_map[normalized_source]
+            candidate = alias_map[normalized_source]
+            candidate_norm = self._normalize_mapping_token(candidate)
+            for attr in self.pingone_attrs:
+                if self._normalize_mapping_token(attr) == candidate_norm:
+                    return attr
+            return candidate
 
         for attr in self.pingone_attrs:
             if self._normalize_mapping_token(attr) == normalized_source:
@@ -2037,6 +2060,37 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         normalized_source = self._normalize_mapping_token(column_name)
         if not normalized_source:
             return ''
+
+        alias_map = {
+            'firstname': 'name.given',
+            'givenname': 'name.given',
+            'middlename': 'name.middle',
+            'middleinitial': 'name.middle',
+            'lastname': 'name.family',
+            'familyname': 'name.family',
+            'uid': 'username',
+            'employeetype': 'employeeType',
+            'employmenttype': 'employeeType',
+            'street': 'address.streetAddress',
+            'streetaddress': 'address.streetAddress',
+            'addressline1': 'address.streetAddress',
+            'city': 'address.locality',
+            'state': 'address.region',
+            'province': 'address.region',
+            'region': 'address.region',
+            'postalcode': 'address.postalCode',
+            'zipcode': 'address.postalCode',
+            'zip': 'address.postalCode',
+            'country': 'address.countryCode',
+            'population': 'population.id',
+        }
+        if normalized_source in alias_map:
+            candidate = alias_map[normalized_source]
+            candidate_norm = self._normalize_mapping_token(candidate)
+            for attr in self.pingone_attrs:
+                if self._normalize_mapping_token(attr) == candidate_norm:
+                    return attr
+            return candidate
 
         for attr in self.pingone_attrs:
             if self._normalize_mapping_token(attr) == normalized_source:
