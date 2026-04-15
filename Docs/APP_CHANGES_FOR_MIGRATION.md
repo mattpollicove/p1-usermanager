@@ -7,7 +7,32 @@ such changes are made. Each entry should include:
 - **Date**: YYYY-MM-DD
 - **Files changed**: list of paths
 - **Platforms affected**: Windows, Linux, both, or others
-- **Description**: what was changed (old → new, include code snippets if helpful)
+- **Description**: what was changed (old -> new, include code snippets if helpful)
 - **Notes**: any platform-specific considerations or remaining work
 
+---
 
+- **Date**: 2026-04-14
+- **Files changed**: app.py
+- **Platforms affected**: macOS, Windows, Linux
+- **Description**: Set explicit Qt application naming at startup so native app/menu labels use the product name instead of the Python interpreter name.
+  - Old:
+    - `app = QtWidgets.QApplication([])`
+  - New:
+    - `app = QtWidgets.QApplication([])`
+    - `app.setApplicationName("PingOne User Manager")`
+    - `app.setApplicationDisplayName("PingOne User Manager")`
+- **Notes**: On macOS this updates the menu-bar app title for script runs. Packaged app bundles should still define bundle metadata (`CFBundleName` / `CFBundleDisplayName`) for full consistency.
+
+- **Date**: 2026-04-14
+- **Files changed**: ui/main_window.py
+- **Platforms affected**: macOS, Windows, Linux
+- **Description**: Restored a dedicated Preferences entry that opens a Settings window, and kept Configuration Help only in the Help menu.
+  - Old:
+    - Configuration Help had been assigned the application-preferences shortcut/path.
+    - Preference actions were exposed directly in a Preferences menu.
+  - New:
+    - `Preferences...` opens the dedicated settings dialog.
+    - `Configuration Help` remains in the Help menu only.
+    - Runtime preference controls live in the settings dialog instead of a separate Preferences menu.
+- **Notes**: On macOS, `Preferences...` should use the application menu role. Other platforms will show the same dialog from the File menu unless later moved into a platform-specific menu layout.

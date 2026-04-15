@@ -49,6 +49,7 @@ except Exception as _keyring_import_error:
 
 import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker, BulkUpdateWorker
+from tps_tracker import TPSTracker
 from ui.dialogs import (
     EditUserDialog,
     ColumnSelectDialog,
@@ -112,7 +113,7 @@ Profile Settings:
 - Credentials (Env ID, Client ID, Secret) are saved per-profile.
 - Column selection and order are saved per-profile.
 - Import/export preferences are saved per-profile when "Remember" is checked.
-- The last active profile can auto-connect on startup (see Settings menu).
+- The last active profile can auto-connect on startup (see Preferences).
 
 Managing Profiles:
 - Use File → Manage Profiles (Cmd/Ctrl+Shift+M) to view all saved profiles.
@@ -132,13 +133,16 @@ Database Import/Export:
 Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
 - Displays connection status and recent operation results.
-- API call logging can be toggled from the Settings menu.
-- Use Settings -> Show Log Files to open log viewers with in-window controls.
+- API call logging can be toggled from the Preferences dialog.
+- Use Logs -> Show Log Files to open log viewers with in-window controls.
 
-Settings Menu:
-- Dark Mode: Toggle between light and dark themes (Cmd+D / Ctrl+D).
+Preferences:
+- Access via File → Preferences (Cmd/Ctrl+,) or the application menu on macOS.
+- Contains all application settings and runtime options.
+- Dark Mode: Toggle between light and dark themes (Cmd/Ctrl+D).
 - Set PingOne Console URL: Configure the base console URL used by the
     "Open PingOne Console" action.
+- Auto-connect: Automatically connect to the last working profile on startup.
 - Theme preference is saved and restored on startup.
 - Dark mode applies a comfortable color scheme for low-light environments.
 
@@ -206,7 +210,7 @@ Deleting Users:
 - Progress is shown for bulk deletions.
 
 Logging & Log Viewers:
-- Settings -> Show Log Files opens the log index dialog.
+- Logs -> Show Log Files opens the log index dialog.
 - Each log viewer window provides command buttons: Set Log Level, Reset Log, Save Log As, and Refresh.
 - API Capture window also includes Set Log Level, Reset, and Save controls.
 - Use Logs -> Clear All Logs to truncate all known logs.
@@ -333,121 +337,148 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.about(self, f"About {APP_NAME}", "\n".join(lines))
 
     def show_preferences_dialog(self):
-        """Show a consolidated preferences dialog instead of a help screen."""
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("Preferences")
-        dlg.setModal(True)
-        dlg.resize(520, 420)
+        """Show the dedicated settings window for runtime application options."""
+        try:
+            # Create simple test dialog first
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle("Preferences")
+            dlg.setModal(True)
+            dlg.resize(560, 520)
 
-        lay = QtWidgets.QVBoxLayout(dlg)
+            lay = QtWidgets.QVBoxLayout(dlg)
 
-        form_box = QtWidgets.QGroupBox("General")
-        form = QtWidgets.QFormLayout(form_box)
+            form_box = QtWidgets.QGroupBox("General Settings")
+            form = QtWidgets.QFormLayout(form_box)
 
-        json_cb = QtWidgets.QCheckBox("Enable JSON Editing")
-        json_cb.setChecked(self.enable_json_edit_action.isChecked())
+            auto_connect_cb = QtWidgets.QCheckBox("Auto-connect to last working profile on startup")
+            auto_connect_cb.setChecked(self.auto_connect_cb.isChecked() if hasattr(self, 'auto_connect_cb') else False)
 
-        friendly_cb = QtWidgets.QCheckBox("Use Friendly Column Names")
-        friendly_cb.setChecked(self.use_friendly_names_action.isChecked())
+            json_cb = QtWidgets.QCheckBox("Enable JSON Editing")
+            json_cb.setChecked(self.enable_json_edit_action.isChecked())
 
-        dark_cb = QtWidgets.QCheckBox("Dark Mode")
-        dark_cb.setChecked(self.dark_mode_action.isChecked())
+            friendly_cb = QtWidgets.QCheckBox("Use Friendly Column Names")
+            friendly_cb.setChecked(self.use_friendly_names_action.isChecked())
 
-        success_cb = QtWidgets.QCheckBox("Show User Update Success Messages")
-        success_cb.setChecked(self.show_user_update_success_action.isChecked())
+            dark_cb = QtWidgets.QCheckBox("Dark Mode")
+            dark_cb.setChecked(self.dark_mode_action.isChecked())
 
-        hide_links_cb = QtWidgets.QCheckBox("Hide Link / JSON Reference Columns")
-        hide_links_cb.setChecked(self.hide_raw_http_columns_cb.isChecked())
+            success_cb = QtWidgets.QCheckBox("Show User Update Success Messages")
+            success_cb.setChecked(self.show_user_update_success_action.isChecked())
 
-        show_api_status_cb = QtWidgets.QCheckBox("Show Live API Calls In Status Bar")
-        show_api_status_cb.setChecked(self.show_api_calls_cb.isChecked())
+            hide_links_cb = QtWidgets.QCheckBox("Hide Link / JSON Reference Columns")
+            hide_links_cb.setChecked(self.hide_raw_http_columns_cb.isChecked() if hasattr(self, 'hide_raw_http_columns_cb') else True)
 
-        api_log_cb = QtWidgets.QCheckBox("Log All API Activity")
-        api_log_cb.setChecked(self.enable_api_logging_action.isChecked())
+            show_api_status_cb = QtWidgets.QCheckBox("Show Live API Calls In Status Bar")
+            show_api_status_cb.setChecked(self.show_api_calls_cb.isChecked() if hasattr(self, 'show_api_calls_cb') else False)
 
-        cred_log_cb = QtWidgets.QCheckBox("Enable Credentials Logging")
-        cred_log_cb.setChecked(self.enable_credentials_logging_action.isChecked())
+            api_log_cb = QtWidgets.QCheckBox("Log All API Activity")
+            api_log_cb.setChecked(self.enable_api_logging_action.isChecked())
 
-        validation_combo = QtWidgets.QComboBox()
-        validation_combo.addItem("None", "none")
-        validation_combo.addItem("Server Dry-Run", "server")
-        validation_combo.addItem("Local Schema Validation", "local")
-        if self.use_server_dryrun_action.isChecked():
-            validation_combo.setCurrentIndex(validation_combo.findData("server"))
-        elif self.use_local_schema_action.isChecked():
-            validation_combo.setCurrentIndex(validation_combo.findData("local"))
-        else:
-            validation_combo.setCurrentIndex(validation_combo.findData("none"))
+            cred_log_cb = QtWidgets.QCheckBox("Enable Credentials Logging")
+            cred_log_cb.setChecked(self.enable_credentials_logging_action.isChecked())
 
-        form.addRow(json_cb)
-        form.addRow(friendly_cb)
-        form.addRow(dark_cb)
-        form.addRow(success_cb)
-        form.addRow(hide_links_cb)
-        form.addRow(show_api_status_cb)
-        form.addRow(api_log_cb)
-        form.addRow(cred_log_cb)
-        form.addRow("Validation:", validation_combo)
-        lay.addWidget(form_box)
+            validation_combo = QtWidgets.QComboBox()
+            validation_combo.addItem("None", "none")
+            validation_combo.addItem("Server Dry-Run", "server")
+            validation_combo.addItem("Local Schema Validation", "local")
+            if self.use_server_dryrun_action.isChecked():
+                validation_combo.setCurrentIndex(validation_combo.findData("server"))
+            elif self.use_local_schema_action.isChecked():
+                validation_combo.setCurrentIndex(validation_combo.findData("local"))
+            else:
+                validation_combo.setCurrentIndex(validation_combo.findData("none"))
 
-        tools_box = QtWidgets.QGroupBox("Shortcuts")
-        tools_lay = QtWidgets.QHBoxLayout(tools_box)
-        open_logs_btn = QtWidgets.QPushButton("Open Log Files")
-        open_logs_btn.clicked.connect(self.show_log_files)
-        open_capture_btn = QtWidgets.QPushButton("Open API Capture")
-        open_capture_btn.clicked.connect(self.show_api_capture_dialog)
-        console_url_btn = QtWidgets.QPushButton("Set Console URL")
-        console_url_btn.clicked.connect(self.set_pingone_console_url)
-        tools_lay.addWidget(open_logs_btn)
-        tools_lay.addWidget(open_capture_btn)
-        tools_lay.addWidget(console_url_btn)
-        lay.addWidget(tools_box)
+            form.addRow(auto_connect_cb)
+            form.addRow(json_cb)
+            form.addRow(friendly_cb)
+            form.addRow(dark_cb)
+            form.addRow(success_cb)
+            form.addRow(hide_links_cb)
+            form.addRow(show_api_status_cb)
+            form.addRow(api_log_cb)
+            form.addRow(cred_log_cb)
+            form.addRow("Validation:", validation_combo)
+            lay.addWidget(form_box)
 
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
+            tools_box = QtWidgets.QGroupBox("Actions")
+            tools_lay = QtWidgets.QHBoxLayout(tools_box)
+            open_logs_btn = QtWidgets.QPushButton("Open Log Files")
+            open_logs_btn.clicked.connect(self.show_log_files)
+            open_capture_btn = QtWidgets.QPushButton("Open API Capture")
+            open_capture_btn.clicked.connect(self.show_api_capture_dialog)
+            revert_columns_btn = QtWidgets.QPushButton("Revert Columns")
+            revert_columns_btn.clicked.connect(self.revert_to_default_columns)
+            console_url_btn = QtWidgets.QPushButton("Set Console URL")
+            console_url_btn.clicked.connect(self.set_pingone_console_url)
+            tools_lay.addWidget(open_logs_btn)
+            tools_lay.addWidget(open_capture_btn)
+            tools_lay.addWidget(revert_columns_btn)
+            tools_lay.addWidget(console_url_btn)
+            lay.addWidget(tools_box)
 
-        if dlg.exec() != QtWidgets.QDialog.Accepted:
-            return
+            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            lay.addWidget(btns)
 
-        self.enable_json_edit_action.setChecked(json_cb.isChecked())
-        self.toggle_json_editing()
+            result = dlg.exec()
+            
+            if result != QtWidgets.QDialog.DialogCode.Accepted:
+                return
 
-        self.use_friendly_names_action.setChecked(friendly_cb.isChecked())
-        self.toggle_friendly_names()
+            # Apply auto-connect setting
+            if hasattr(self, 'auto_connect_cb'):
+                self.auto_connect_cb.setChecked(auto_connect_cb.isChecked())
+                self.save_app_settings()
 
-        self.dark_mode_action.setChecked(dark_cb.isChecked())
-        self.toggle_theme()
+            self.enable_json_edit_action.setChecked(json_cb.isChecked())
+            self.toggle_json_editing()
 
-        self.show_user_update_success_action.setChecked(success_cb.isChecked())
-        self.on_show_user_update_success_toggled(self.show_user_update_success_action.isChecked())
+            self.use_friendly_names_action.setChecked(friendly_cb.isChecked())
+            self.toggle_friendly_names()
 
-        self.hide_raw_http_columns_cb.setChecked(hide_links_cb.isChecked())
-        self.show_api_calls_cb.setChecked(show_api_status_cb.isChecked())
+            self.dark_mode_action.setChecked(dark_cb.isChecked())
+            self.toggle_theme()
 
-        self.enable_api_logging_action.setChecked(api_log_cb.isChecked())
-        self.toggle_api_logging()
+            self.show_user_update_success_action.setChecked(success_cb.isChecked())
+            self.on_show_user_update_success_toggled(self.show_user_update_success_action.isChecked())
 
-        self.enable_credentials_logging_action.setChecked(cred_log_cb.isChecked())
-        self.toggle_credentials_logging()
+            if hasattr(self, 'hide_raw_http_columns_cb'):
+                self.hide_raw_http_columns_cb.setChecked(hide_links_cb.isChecked())
+            if hasattr(self, 'show_api_calls_cb'):
+                self.show_api_calls_cb.setChecked(show_api_status_cb.isChecked())
 
-        mode = validation_combo.currentData()
-        self.use_server_dryrun_action.setChecked(mode == "server")
-        self.use_local_schema_action.setChecked(mode == "local")
-        if mode == "server":
-            self.toggle_server_dryrun()
-        elif mode == "local":
-            self.toggle_local_schema()
-        else:
-            msg = "Validation: none"
-            self.status_label.setText(msg)
-            try:
-                self.statusBar().showMessage(msg)
-            except Exception:
-                pass
+            self.enable_api_logging_action.setChecked(api_log_cb.isChecked())
+            self.toggle_api_logging()
 
-        self.save_profile_option()
+            self.enable_credentials_logging_action.setChecked(cred_log_cb.isChecked())
+            self.toggle_credentials_logging()
+
+            mode = validation_combo.currentData()
+            self.use_server_dryrun_action.setChecked(mode == "server")
+            self.use_local_schema_action.setChecked(mode == "local")
+            if mode == "server":
+                self.toggle_server_dryrun()
+            elif mode == "local":
+                self.toggle_local_schema()
+            else:
+                msg = "Validation: none"
+                self.status_label.setText(msg)
+                try:
+                    self.statusBar().showMessage(msg)
+                except Exception:
+                    pass
+
+            self.save_profile_option()
+        
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Preferences Error",
+                f"An error occurred while saving preferences:\n{str(e)}"
+            )
 
     def showEvent(self, event):
         """Override showEvent to restore geometry after window is fully initialized."""
@@ -474,6 +505,13 @@ class MainWindow(QtWidgets.QMainWindow):
         manage_profiles_action = file_menu.addAction("Manage Profiles...")
         manage_profiles_action.triggered.connect(self.show_profile_manager)
         manage_profiles_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_M))
+        
+        # Preferences action - accessible via File menu and keyboard shortcut
+        self.preferences_action = QtGui.QAction("Preferences...", self)
+        self.preferences_action.triggered.connect(self.show_preferences_dialog)
+        self.preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Comma))
+        self.preferences_action.setToolTip(f"Open application preferences ({'Cmd' if IS_MACOS else 'Ctrl'}+,)")
+        file_menu.addAction(self.preferences_action)
         file_menu.addSeparator()
         quit_action = file_menu.addAction("Quit")
         quit_action.triggered.connect(self.close)
@@ -483,63 +521,63 @@ class MainWindow(QtWidgets.QMainWindow):
             # On macOS, the quit action should have the QuitRole to appear in app menu
             quit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
         
-        settings_menu = menubar.addMenu("Settings")
-        self.preferences_action = settings_menu.addAction("Preferences...")
-        self.preferences_action.triggered.connect(self.show_preferences_dialog)
-        self.preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Comma))
-        if IS_MACOS:
-            self.preferences_action.setMenuRole(QtGui.QAction.MenuRole.PreferencesRole)
-        settings_menu.addSeparator()
-        self.enable_json_edit_action = settings_menu.addAction("Enable JSON Editing")
+        self.enable_json_edit_action = QtGui.QAction("Enable JSON Editing", self)
         self.enable_json_edit_action.setCheckable(True)
         self.enable_json_edit_action.setChecked(False)
         self.enable_json_edit_action.triggered.connect(self.toggle_json_editing)
         self.enable_json_edit_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_J))
+        self.addAction(self.enable_json_edit_action)
         
-        self.use_friendly_names_action = settings_menu.addAction("Use Friendly Column Names")
+        self.use_friendly_names_action = QtGui.QAction("Use Friendly Column Names", self)
         self.use_friendly_names_action.setCheckable(True)
         self.use_friendly_names_action.setChecked(True)
         self.use_friendly_names_action.triggered.connect(self.toggle_friendly_names)
         self.use_friendly_names_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_F))
+        self.addAction(self.use_friendly_names_action)
+
         # Validation mode: server dry-run or local schema
-        settings_menu.addSeparator()
-        self.use_server_dryrun_action = settings_menu.addAction("Use Server Dry-Run")
+        self.use_server_dryrun_action = QtGui.QAction("Use Server Dry-Run", self)
         self.use_server_dryrun_action.setCheckable(True)
         self.use_server_dryrun_action.setChecked(True)
         self.use_server_dryrun_action.triggered.connect(self.toggle_server_dryrun)
-        self.use_local_schema_action = settings_menu.addAction("Use Local Schema Validation")
+
+        self.use_local_schema_action = QtGui.QAction("Use Local Schema Validation", self)
         self.use_local_schema_action.setCheckable(True)
         self.use_local_schema_action.setChecked(False)
         self.use_local_schema_action.triggered.connect(self.toggle_local_schema)
-        self.revert_columns_action = settings_menu.addAction("Revert to Default Columns")
+
+        self.revert_columns_action = QtGui.QAction("Revert to Default Columns", self)
         self.revert_columns_action.triggered.connect(self.revert_to_default_columns)
-        settings_menu.addSeparator()
+
         # Theme toggle
-        self.dark_mode_action = settings_menu.addAction("Dark Mode")
+        self.dark_mode_action = QtGui.QAction("Dark Mode", self)
         self.dark_mode_action.setCheckable(True)
         self.dark_mode_action.setChecked(False)
         self.dark_mode_action.triggered.connect(self.toggle_theme)
         self.dark_mode_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_D))
-        settings_menu.addSeparator()
+        self.addAction(self.dark_mode_action)
+
         # Credentials logging settings
-        self.enable_credentials_logging_action = settings_menu.addAction("Enable Credentials Logging")
+        self.enable_credentials_logging_action = QtGui.QAction("Enable Credentials Logging", self)
         self.enable_credentials_logging_action.setCheckable(True)
         self.enable_credentials_logging_action.setChecked(True)
         self.enable_credentials_logging_action.triggered.connect(self.toggle_credentials_logging)
-        settings_menu.addSeparator()
+
         # API logging toggle (log all API activity)
-        self.enable_api_logging_action = settings_menu.addAction("Log All API Activity")
+        self.enable_api_logging_action = QtGui.QAction("Log All API Activity", self)
         self.enable_api_logging_action.setCheckable(True)
         self.enable_api_logging_action.setChecked(False)
         self.enable_api_logging_action.triggered.connect(self.toggle_api_logging)
-        self.show_user_update_success_action = settings_menu.addAction("Show User Update Success Messages")
+
+        self.show_user_update_success_action = QtGui.QAction("Show User Update Success Messages", self)
         self.show_user_update_success_action.setCheckable(True)
         self.show_user_update_success_action.setChecked(True)
         self.show_user_update_success_action.triggered.connect(self.on_show_user_update_success_toggled)
-        self.capture_api_action = settings_menu.addAction("Capture API Calls...")
+
+        self.capture_api_action = QtGui.QAction("Capture API Calls...", self)
         self.capture_api_action.triggered.connect(self.show_api_capture_dialog)
-        settings_menu.addSeparator()
-        self.set_console_url_action = settings_menu.addAction("Set PingOne Console URL...")
+
+        self.set_console_url_action = QtGui.QAction("Set PingOne Console URL...", self)
         self.set_console_url_action.triggered.connect(self.set_pingone_console_url)
 
         # Separate Logs submenu for quick actions (reset, clear, archive)
@@ -553,7 +591,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logs_archive = logs_menu.addAction("Archive Logs...")
         self.logs_archive.triggered.connect(self.archive_logs)
         
+        # Add a Settings menu for easy access to preferences
+        settings_menu = menubar.addMenu("Settings")
+        print(f"Created Settings menu: {settings_menu}")
+        settings_preferences_action = settings_menu.addAction("Preferences...")
+        settings_preferences_action.triggered.connect(self.show_preferences_dialog)
+        settings_preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_Comma))
+        print(f"Added Preferences to Settings menu")
+        
         help_menu = menubar.addMenu("Help")
+        
+        # Add Preferences to Help menu for easy discoverability
+        help_preferences_action = help_menu.addAction("Preferences...")
+        help_preferences_action.triggered.connect(self.show_preferences_dialog)
+        help_preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Comma))
+        print(f"Added Preferences to Help menu")
+        help_menu.addSeparator()
+        
         config_help_action = help_menu.addAction("Configuration Help")
         config_help_action.triggered.connect(self.show_config_help)
         user_help_action = help_menu.addAction("User Management Help")
@@ -638,6 +692,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "View Connection Log",
             "Manage DB Connections",
             "Manage LDAP Connections",
+            "Open Preferences",
         ])
         self.config_action_combo.setToolTip("Select a configuration action")
         self.config_action_execute_btn = QtWidgets.QPushButton("Execute")
@@ -671,11 +726,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shortcut_test_credentials = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_T), self)
         self.shortcut_test_credentials.activated.connect(self.test_credentials)
 
-        # Per-profile option: show live API calls in status bar
+        # Per-profile option: show live API calls in status bar (managed in Settings dialog)
         self.show_api_calls_cb = QtWidgets.QCheckBox('Show live API calls in status bar')
         self.show_api_calls_cb.setChecked(False)
         self.show_api_calls_cb.stateChanged.connect(self.on_show_api_calls_toggled)
-        cred_form.addRow(self.show_api_calls_cb)
+        # Checkbox removed from UI - configured in Settings dialog
         
         self.lbl_stats = QtWidgets.QLabel("Users: -- | Populations: --")
         env_lay.addWidget(prof_group); env_lay.addWidget(cred_group); env_lay.addWidget(self.lbl_stats); env_lay.addStretch()
@@ -693,11 +748,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         toolbar.addWidget(self.search_bar)
 
+        # Hide Links checkbox removed from toolbar - configured in Settings dialog
         self.hide_raw_http_columns_cb = QtWidgets.QCheckBox("Hide Links")
         self.hide_raw_http_columns_cb.setChecked(True)
         self.hide_raw_http_columns_cb.setToolTip("Hide columns whose names start with '{' or 'http'")
         self.hide_raw_http_columns_cb.stateChanged.connect(self.on_hide_raw_http_columns_toggled)
-        toolbar.addWidget(self.hide_raw_http_columns_cb)
 
         self.command_combo = QtWidgets.QComboBox()
         self.command_combo.addItems([
@@ -839,6 +894,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "View Connection Log": self.view_connection_log,
             "Manage DB Connections": self.manage_db_connections,
             "Manage LDAP Connections": self.manage_ldap_connections,
+            "Open Preferences": self.show_preferences_dialog,
         }
         fn = handlers.get(action)
         if fn:
@@ -1949,6 +2005,17 @@ class MainWindow(QtWidgets.QMainWindow):
             from ui.dialogs import ExportOptionsDialog
             populated_attrs = self._get_populated_export_attributes(self.users_cache)
             populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
+            metadata_cols = self._get_metadata_columns(self.users_cache)
+            
+            # Load saved excluded metadata from profile
+            excluded_metadata = []
+            try:
+                cfg = self._read_config()
+                if profile_name and profile_name in cfg:
+                    excluded_metadata = cfg[profile_name].get('export_excluded_metadata', [])
+            except Exception:
+                pass
+            
             export_dlg = ExportOptionsDialog(
                 bool(selected),
                 only_visible_default,
@@ -1956,10 +2023,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 self,
                 populated_attributes=populated_attrs,
                 populated_attribute_samples=populated_attr_samples,
+                metadata_columns=metadata_cols,
+                excluded_metadata=excluded_metadata,
             )
             if export_dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
             opts = export_dlg.get_options()
+            
+            # Persist choices if requested
+            if opts.get('remember') and profile_name:
+                try:
+                    cfg = self._read_config()
+                    if profile_name not in cfg:
+                        cfg[profile_name] = {}
+                    cfg[profile_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
+                    cfg[profile_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
+                    cfg[profile_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                except Exception:
+                    pass
 
             if opts.get('rows') == 'selected' and selected:
                 id_col = self.columns.index('id') if 'id' in self.columns else -1
@@ -2006,19 +2089,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 '_links', 'lifecycle.status', 'identityProvider.type',
                 'identityProvider.id',
             }
-            visible_ping_attrs = set()
-            try:
-                for idx, col in enumerate(self.columns or []):
-                    if idx < self.u_table.columnCount() and not self.u_table.isColumnHidden(idx):
-                        visible_ping_attrs.add(str(col))
-            except Exception:
-                visible_ping_attrs = set(self.columns or [])
-            allowed_ping_attrs = required_ping_attrs.union(visible_ping_attrs)
+            
+            # Apply export options to filter PingOne attributes
+            if opts.get('only_visible_columns'):
+                # Use only visible columns
+                visible_ping_attrs = set()
+                try:
+                    for idx, col in enumerate(self.columns or []):
+                        if idx < self.u_table.columnCount() and not self.u_table.isColumnHidden(idx):
+                            visible_ping_attrs.add(str(col))
+                except Exception:
+                    visible_ping_attrs = set(self.columns or [])
+                allowed_ping_attrs = required_ping_attrs.union(visible_ping_attrs)
+            else:
+                # Use all attributes
+                allowed_ping_attrs = set(all_ping_attrs)
+            
+            # Filter out excluded metadata and blocked fields
+            excluded_metadata_set = set(opts.get('excluded_metadata', []))
             ping_attrs = [
                 a for a in all_ping_attrs
                 if a in allowed_ping_attrs
                 and not str(a).lower().startswith('population.')
                 and str(a) not in _pingone_ldap_blocked
+                and str(a) not in excluded_metadata_set
             ]
             for req in sorted(required_ping_attrs):
                 if req not in ping_attrs:
@@ -2058,6 +2152,11 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             rdn_attr = rdn_aliases.get(rdn_attr.lower(), rdn_attr)
             object_classes = conn.get('object_classes') or ['top', 'person', 'organizationalPerson', 'inetOrgPerson']
+            
+            # Start TPS tracking
+            tracker = TPSTracker()
+            tracker.start()
+            
             entries = []
             skipped = 0
             for user in export_users:
@@ -2082,6 +2181,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 base_dn = (conn.get('base_dn', '') or '').strip()
                 dn = f"{rdn_attr}={rdn_value},{base_dn}" if base_dn else f"{rdn_attr}={rdn_value}"
                 entries.append({'dn': dn, 'attributes': attrs, 'object_classes': object_classes})
+                tracker.record_transaction()
 
             if not entries:
                 QtWidgets.QMessageBox.information(self, "Export LDAP", "No exportable users found after mapping.")
@@ -2098,6 +2198,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 timeout=int(conn.get('timeout', 30) or 30),
                 auto_create_parents=bool(conn.get('auto_create_parents', True)),
             )
+            
+            # Finish tracking and get statistics
+            tracker.finish()
+            tps_stats = tracker.get_statistics()
 
             summary = f"Created {result.get('created', 0)}, updated {result.get('updated', 0)} LDAP entries"
             if skipped:
@@ -2128,6 +2232,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage(summary)
             except Exception:
                 pass
+            
+            # Show TPS report
+            self._show_tps_report(tps_stats, "LDAP Export")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export LDAP", str(e))
 
@@ -2680,12 +2787,79 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Export DB", "Unable to connect with provided credentials.")
                 return
+            
+            # Show export options dialog to let user choose which fields to export
+            if not self.users_cache:
+                QtWidgets.QMessageBox.information(self, "Export DB", "No users to export.")
+                return
+            
+            profile_name = self.profile_list.currentText()
+            prefer_selected = True
+            only_visible_default = True
+            try:
+                cfg = self._read_config()
+                if profile_name and profile_name in cfg:
+                    prefer_selected = cfg[profile_name].get('export_prefer_selected', prefer_selected)
+                    only_visible_default = cfg[profile_name].get('export_only_visible_columns', only_visible_default)
+            except Exception:
+                pass
+            
+            selected = self.u_table.selectionModel().selectedRows()
+            from ui.dialogs import ExportOptionsDialog
+            populated_attrs = self._get_populated_export_attributes(self.users_cache)
+            populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
+            metadata_cols = self._get_metadata_columns(self.users_cache)
+            
+            # Load saved excluded metadata from profile
+            excluded_metadata = []
+            try:
+                cfg = self._read_config()
+                if profile_name and profile_name in cfg:
+                    excluded_metadata = cfg[profile_name].get('export_excluded_metadata', [])
+            except Exception:
+                pass
+            
+            export_dlg = ExportOptionsDialog(
+                bool(selected),
+                only_visible_default,
+                prefer_selected,
+                self,
+                populated_attributes=populated_attrs,
+                populated_attribute_samples=populated_attr_samples,
+                metadata_columns=metadata_cols,
+                excluded_metadata=excluded_metadata,
+            )
+            if export_dlg.exec() != QtWidgets.QDialog.Accepted:
+                return
+            opts = export_dlg.get_options()
+            
+            # Persist choices if requested
+            if opts.get('remember') and profile_name:
+                try:
+                    cfg = self._read_config()
+                    if profile_name not in cfg:
+                        cfg[profile_name] = {}
+                    cfg[profile_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
+                    cfg[profile_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
+                    cfg[profile_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                except Exception:
+                    pass
+            
             # fetch column names if table exists, otherwise use empty list
             cols = []
             try:
                 cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
             except Exception:
                 cols = []
+            
+            # Filter out metadata columns from existing table columns
+            # This prevents metadata fields from being included in exports
+            if cols:
+                metadata_cols_all = self._get_metadata_columns(self.users_cache) if self.users_cache else []
+                metadata_set = set(metadata_cols_all)
+                cols = [c for c in cols if str(c) not in metadata_set]
 
             # Offer one-click migration for legacy dotted column names.
             dotted_cols = [c for c in cols if '.' in str(c)]
@@ -2712,6 +2886,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                 conn['type'], conn['host'], conn['port'], conn['database'],
                                 conn['user'], conn['password'], table, conn.get('driver')
                             )
+                            # Filter metadata columns after migration too
+                            if cols:
+                                metadata_cols_all = self._get_metadata_columns(self.users_cache) if self.users_cache else []
+                                metadata_set = set(metadata_cols_all)
+                                cols = [c for c in cols if str(c) not in metadata_set]
                             QtWidgets.QMessageBox.information(self, "Migrate Legacy Columns", "Column rename migration completed.")
                         except NotImplementedError as e:
                             QtWidgets.QMessageBox.information(self, "Migrate Legacy Columns", str(e))
@@ -2724,9 +2903,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 ping_attrs = self._get_pingone_attributes_for_import(client)
             except Exception:
                 pass
+            
+            # Filter PingOne attributes based on export options
+            if opts.get('only_visible_columns'):
+                # Use only visible columns
+                visible_attrs = set(self.columns or [])
+                ping_attrs = [attr for attr in ping_attrs if attr in visible_attrs]
+            
+            # Filter out excluded metadata fields
+            excluded_metadata_set = set(opts.get('excluded_metadata', []))
+            ping_attrs_filtered = [attr for attr in ping_attrs if attr not in excluded_metadata_set]
+            
             sample_p1 = {}
             try:
-                selected = self.u_table.selectionModel().selectedRows()
                 sample_user = None
                 if selected:
                     id_col = self.columns.index('id') if 'id' in self.columns else -1
@@ -2740,9 +2929,13 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 sample_p1 = {}
             initial_mapping = conn.get('db_export_mapping', {})
+            # Filter excluded metadata fields from saved mapping
+            if initial_mapping:
+                excluded_metadata_set = set(opts.get('excluded_metadata', []))
+                initial_mapping = {k: v for k, v in initial_mapping.items() if k not in excluded_metadata_set}
             dlg = DatabaseMappingDialog(
-                cols or ping_attrs,
-                ping_attrs,
+                cols or ping_attrs_filtered,
+                ping_attrs_filtered,
                 direction='export',
                 sample_row=sample_p1,
                 initial_mapping=initial_mapping,
@@ -2753,25 +2946,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not mapping:
                     QtWidgets.QMessageBox.information(self, "Export DB", "No attributes were mapped; export cancelled.")
                     return
+                
+                # Final safeguard: filter out any excluded metadata fields from the mapping
+                excluded_metadata_set = set(opts.get('excluded_metadata', []))
+                mapping = {k: v for k, v in mapping.items() if k not in excluded_metadata_set}
+                
+                if not mapping:
+                    QtWidgets.QMessageBox.information(self, "Export DB", "All mapped attributes were metadata fields; export cancelled.")
+                    return
+                
                 if dlg.remember_mapping():
                     self._save_db_connection_settings(name, {'db_export_mapping': mapping})
-                effective_mapping = dict(mapping)
+                
+                # Always sanitize column names for SQL compatibility (both new and existing tables)
+                effective_mapping = {}
                 renamed_columns = {}
-                # When creating a new table, normalize invalid SQL identifiers.
-                if not cols:
-                    effective_mapping = {}
-                    used_names = set()
-                    for ping_attr, target_col in mapping.items():
-                        base_name = self._sanitize_db_column_name(target_col)
-                        candidate = base_name
-                        suffix = 2
-                        while candidate in used_names:
-                            candidate = f"{base_name}_{suffix}"
-                            suffix += 1
-                        used_names.add(candidate)
-                        effective_mapping[ping_attr] = candidate
-                        if candidate != target_col:
-                            renamed_columns[target_col] = candidate
+                used_names = set()
+                for ping_attr, target_col in mapping.items():
+                    base_name = self._sanitize_db_column_name(target_col)
+                    candidate = base_name
+                    suffix = 2
+                    while candidate in used_names:
+                        candidate = f"{base_name}_{suffix}"
+                        suffix += 1
+                    used_names.add(candidate)
+                    effective_mapping[ping_attr] = candidate
+                    if candidate != target_col:
+                        renamed_columns[target_col] = candidate
+                
                 if renamed_columns:
                     details = "\n".join(f"{old} -> {new}" for old, new in renamed_columns.items())
                     QtWidgets.QMessageBox.information(
@@ -2779,12 +2981,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Export DB",
                         "Adjusted column names for SQL compatibility:\n\n" + details,
                     )
-                # compute list of users to export
-                if not self.users_cache:
-                    QtWidgets.QMessageBox.information(self, "Export DB", "No users to export.")
-                    return
-                selected = self.u_table.selectionModel().selectedRows()
-                if selected:
+                # compute list of users to export based on export options
+                if opts.get('rows') == 'selected' and selected:
                     id_col = self.columns.index('id') if 'id' in self.columns else -1
                     if id_col != -1:
                         ids = [self.u_table.item(r.row(), id_col).text() for r in selected]
@@ -2793,6 +2991,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         export_users = list(self.users_cache)
                 else:
                     export_users = list(self.users_cache)
+                
+                required_attrs = opts.get('required_populated_attributes') or []
+                filtered_out = 0
+                if required_attrs:
+                    export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
+                
+                # Start TPS tracking
+                tracker = TPSTracker()
+                tracker.start()
+                
                 # build rows for insertion based on mapping
                 rows = []
                 for u in export_users:
@@ -2807,17 +3015,43 @@ class MainWindow(QtWidgets.QMainWindow):
                                 pass
                         row[col] = val
                     rows.append(row)
+                    tracker.record_transaction()
+                
+                # Finish tracking and get statistics
+                tracker.finish()
+                tps_stats = tracker.get_statistics()
+                
                 # ensure table exists and insert
                 try:
+                    # Create table if it doesn't exist
                     db_utils.create_table_if_not_exists(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver')
                     )
+                    
+                    # Add any missing columns to existing table
+                    added_cols = db_utils.add_missing_columns(
+                        conn['type'], conn['host'], conn['port'], conn['database'],
+                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver')
+                    )
+                    
+                    if added_cols:
+                        cols_list = ", ".join(added_cols[:5])
+                        if len(added_cols) > 5:
+                            cols_list += f" (and {len(added_cols) - 5} more)"
+                        self.statusBar().showMessage(f"Added {len(added_cols)} missing columns to table: {cols_list}", 5000)
+                    
+                    # Insert the data
                     db_utils.insert_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], table, rows, conn.get('driver')
                     )
-                    QtWidgets.QMessageBox.information(self, "Export DB", f"Exported {len(rows)} users to table {table}.")
+                    msg = f"Exported {len(rows)} users to table {table}."
+                    if filtered_out:
+                        msg += f"\n\n(Filtered out {filtered_out} users by populated-attribute filter)"
+                    QtWidgets.QMessageBox.information(self, "Export DB", msg)
+                    # Show TPS report
+                    self._show_tps_report(tps_stats, "Database Export")
                 except Exception as e:
                     QtWidgets.QMessageBox.critical(self, "Export DB", f"Export failed: {e}")
         except Exception as e:
@@ -3416,7 +3650,28 @@ class MainWindow(QtWidgets.QMainWindow):
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             self.prog.show()
             w = BulkDeleteWorker(client, uids)
-            w.signals.finished.connect(lambda r: (self.prog.hide(), self.refresh_users()))
+            w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
+            
+            def on_delete_done(res):
+                self.prog.hide()
+                deleted = res.get('deleted', 0)
+                total = res.get('total', 0)
+                tps_stats = res.get('tps_stats')
+                
+                # Show TPS report if available
+                if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+                    self._show_tps_report(tps_stats, "Delete")
+                
+                # Show result message
+                msg = f"Deleted {deleted}/{total} users"
+                try:
+                    self.statusBar().showMessage(msg, 5000)
+                except Exception:
+                    pass
+                
+                self.refresh_users()
+            
+            w.signals.finished.connect(on_delete_done)
             self.threadpool.start(w)
 
     def filter_table(self):
@@ -4151,6 +4406,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return len(value) > 0
         return True
 
+    def _get_metadata_columns(self, users: list) -> list:
+        """Return sorted list of metadata column names (those starting with '_')."""
+        metadata_cols = set()
+        for user in users or []:
+            try:
+                flat = self._flatten_user(user)
+                for key in flat.keys():
+                    if key and str(key).startswith('_'):
+                        metadata_cols.add(str(key))
+            except Exception:
+                pass
+        return sorted(metadata_cols)
+
+    def _filter_metadata_columns(self, columns: list, excluded_metadata: list) -> list:
+        """Filter out metadata columns from the column list based on exclusion list."""
+        if not excluded_metadata:
+            return list(columns)
+        excluded_set = set(str(m) for m in excluded_metadata)
+        return [c for c in columns if str(c) not in excluded_set]
+
     def _get_populated_export_attributes(self, users: list) -> list:
         """Return sorted flattened attribute names that are populated in at least one user."""
         attrs = set()
@@ -4613,9 +4888,15 @@ class MainWindow(QtWidgets.QMainWindow):
             updated_on_retry = res.get('updated_on_retry', 0)
             total = res.get('total', 0)
             errors = res.get('errors', []) or []
+            tps_stats = res.get('tps_stats')
             summary = f"Created {created}/{total} users"
             if updated_on_retry:
                 summary += f"; Updated on retry {updated_on_retry}"
+            
+            # Show TPS report if available
+            if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+                self._show_tps_report(tps_stats, "Import")
+            
             if created == 0 and updated_on_retry == 0 and errors:
                 dlg = QtWidgets.QDialog(self)
                 dlg.setWindowTitle("Import Result")
@@ -4930,6 +5211,17 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         from ui.dialogs import ExportOptionsDialog
         populated_attrs = self._get_populated_export_attributes(self.users_cache)
         populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
+        metadata_cols = self._get_metadata_columns(self.users_cache)
+        
+        # Load saved excluded metadata from profile
+        excluded_metadata = []
+        try:
+            cfg = self._read_config()
+            if prof_name and prof_name in cfg:
+                excluded_metadata = cfg[prof_name].get('export_excluded_metadata', [])
+        except Exception:
+            pass
+        
         dlg = ExportOptionsDialog(
             bool(selected),
             only_visible_default,
@@ -4937,6 +5229,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             self,
             populated_attributes=populated_attrs,
             populated_attribute_samples=populated_attr_samples,
+            metadata_columns=metadata_cols,
+            excluded_metadata=excluded_metadata,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -4949,6 +5243,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     cfg[prof_name] = {}
                 cfg[prof_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
+                cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
                 with open(self.config_file, 'w') as f:
                     json.dump(cfg, f, indent=4)
             except Exception:
@@ -4959,6 +5254,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             cols = self.columns or self.selected_columns
         else:
             cols = sorted(self.all_columns)
+        
+        # Filter out excluded metadata columns
+        cols = self._filter_metadata_columns(cols, opts.get('excluded_metadata', []))
 
         # compute export users
         try:
@@ -4986,11 +5284,21 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
 
             import csv
+            # Start TPS tracking
+            tracker = TPSTracker()
+            tracker.start()
+            
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(cols)
                 for row in self._rows_from_users(export_users, cols):
                     writer.writerow([str(v) for v in row])
+                    tracker.record_transaction()
+            
+            # Finish tracking and get statistics
+            tracker.finish()
+            tps_stats = tracker.get_statistics()
+            
             self._set_last_data_source(f"File {path}")
             msg = f"Exported {len(export_users)} users to {path}"
             if filtered_out:
@@ -5000,6 +5308,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 self.statusBar().showMessage(msg)
             except Exception:
                 pass
+            
+            # Show TPS report
+            self._show_tps_report(tps_stats, "CSV Export")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", str(e))
 
@@ -5030,6 +5341,17 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         from ui.dialogs import ExportOptionsDialog
         populated_attrs = self._get_populated_export_attributes(self.users_cache)
         populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
+        metadata_cols = self._get_metadata_columns(self.users_cache)
+        
+        # Load saved excluded metadata from profile
+        excluded_metadata = []
+        try:
+            cfg = self._read_config()
+            if prof_name and prof_name in cfg:
+                excluded_metadata = cfg[prof_name].get('export_excluded_metadata', [])
+        except Exception:
+            pass
+        
         dlg = ExportOptionsDialog(
             bool(selected),
             only_visible_default,
@@ -5037,6 +5359,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             self,
             populated_attributes=populated_attrs,
             populated_attribute_samples=populated_attr_samples,
+            metadata_columns=metadata_cols,
+            excluded_metadata=excluded_metadata,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -5048,6 +5372,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     cfg[prof_name] = {}
                 cfg[prof_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
+                cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
                 with open(self.config_file, 'w') as f:
                     json.dump(cfg, f, indent=4)
             except Exception:
@@ -5057,6 +5382,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             cols_check = self.columns or self.selected_columns
         else:
             cols_check = sorted(self.all_columns)
+        
+        # Filter out excluded metadata columns
+        cols_check = self._filter_metadata_columns(cols_check, opts.get('excluded_metadata', []))
 
         try:
             if opts.get('rows') == 'selected' and selected:
@@ -5082,6 +5410,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             if required_attrs:
                 export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
 
+            # Start TPS tracking
+            tracker = TPSTracker()
+            tracker.start()
+            
             with open(path, 'w', encoding='utf-8') as f:
                 for u in export_users:
                     flat = self._flatten_user(u)
@@ -5103,6 +5435,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                             continue
                         f.write(f"{k}: {v}\n")
                     f.write('\n')
+                    tracker.record_transaction()
+            
+            # Finish tracking and get statistics
+            tracker.finish()
+            tps_stats = tracker.get_statistics()
+            
             self._set_last_data_source(f"File {path}")
             msg = f"Exported {len(export_users)} users to {path}"
             if filtered_out:
@@ -5110,6 +5448,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             self.status_label.setText(msg)
             try:
                 self.statusBar().showMessage(msg)
+                # Show TPS report
+                self._show_tps_report(tps_stats, "LDIF Export")
             except Exception:
                 pass
         except Exception as e:
@@ -5682,16 +6022,57 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                         updated_on_retry = res.get('updated_on_retry', 0)
                         total = res.get('total', 0)
                         errors = res.get('errors', []) or []
+                        create_tps_stats = res.get('tps_stats')
 
                         def _on_updates_done(res2):
                             self.prog.hide()
                             updated = res2.get('updated', 0)
                             total_upd = res2.get('total', 0)
                             upd_errors = res2.get('errors', []) or []
+                            update_tps_stats = res2.get('tps_stats')
                             result_msg = f"Created {created}/{total} users"
                             if updated_on_retry:
                                 result_msg += f"; Updated on retry {updated_on_retry}"
                             result_msg += f"; Updated {updated}/{total_upd} users"
+                            
+                            # Combine TPS stats from create and update operations
+                            combined_tps = None
+                            if create_tps_stats or update_tps_stats:
+                                combined_tps = {
+                                    'total_transactions': 0,
+                                    'total_duration': 0.0,
+                                    'average_tps': 0.0,
+                                    'mean_tps': 0.0,
+                                    'peak_tps': 0.0,
+                                }
+                                if create_tps_stats:
+                                    combined_tps['total_transactions'] += create_tps_stats.get('total_transactions', 0)
+                                    combined_tps['total_duration'] += create_tps_stats.get('total_duration', 0.0)
+                                    combined_tps['peak_tps'] = max(combined_tps['peak_tps'], create_tps_stats.get('peak_tps', 0.0))
+                                if update_tps_stats:
+                                    combined_tps['total_transactions'] += update_tps_stats.get('total_transactions', 0)
+                                    combined_tps['total_duration'] += update_tps_stats.get('total_duration', 0.0)
+                                    combined_tps['peak_tps'] = max(combined_tps['peak_tps'], update_tps_stats.get('peak_tps', 0.0))
+                                
+                                # Recalculate average and mean
+                                if combined_tps['total_duration'] > 0:
+                                    combined_tps['average_tps'] = combined_tps['total_transactions'] / combined_tps['total_duration']
+                                # Mean is approximated as weighted average
+                                total_weight = 0
+                                weighted_sum = 0
+                                if create_tps_stats and create_tps_stats.get('total_duration', 0) > 0:
+                                    weighted_sum += create_tps_stats.get('mean_tps', 0) * create_tps_stats.get('total_duration', 0)
+                                    total_weight += create_tps_stats.get('total_duration', 0)
+                                if update_tps_stats and update_tps_stats.get('total_duration', 0) > 0:
+                                    weighted_sum += update_tps_stats.get('mean_tps', 0) * update_tps_stats.get('total_duration', 0)
+                                    total_weight += update_tps_stats.get('total_duration', 0)
+                                if total_weight > 0:
+                                    combined_tps['mean_tps'] = weighted_sum / total_weight
+                            
+                            # Show TPS report if available
+                            if combined_tps and combined_tps.get('total_transactions', 0) > 0:
+                                self._show_tps_report(combined_tps, "Import")
+                            
                             errors_combined = errors + upd_errors
                             if errors_combined:
                                 dlg = QtWidgets.QDialog(self)
@@ -5749,7 +6130,13 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                             updated = res.get('updated', 0)
                             total_upd = res.get('total', 0)
                             upd_errors = res.get('errors', []) or []
+                            tps_stats = res.get('tps_stats')
                             result_msg = f"Updated {updated}/{total_upd} users"
+                            
+                            # Show TPS report if available
+                            if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+                                self._show_tps_report(tps_stats, "Import")
+                            
                             if upd_errors:
                                 dlg = QtWidgets.QDialog(self)
                                 dlg.setWindowTitle("Import Result")
@@ -5842,6 +6229,67 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 f.write(f"[{ts}] {message}\n")
         except Exception:
             pass
+
+    def _show_tps_report(self, tps_stats: dict, operation_name: str = "Operation"):
+        """Display a TPS (Transactions Per Second) report dialog.
+        
+        Args:
+            tps_stats: Dictionary with TPS statistics from TPSTracker
+            operation_name: Name of the operation (e.g., "Import", "Export")
+        """
+        if not tps_stats:
+            return
+        
+        total_transactions = tps_stats.get('total_transactions', 0)
+        total_duration = tps_stats.get('total_duration', 0.0)
+        average_tps = tps_stats.get('average_tps', 0.0)
+        mean_tps = tps_stats.get('mean_tps', 0.0)
+        peak_tps = tps_stats.get('peak_tps', 0.0)
+        
+        # Create dialog
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(f"{operation_name} - TPS Report")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        
+        # Title label
+        title = QtWidgets.QLabel(f"<b>{operation_name} Performance Report</b>")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        lay.addWidget(title)
+        
+        # Statistics
+        stats_text = f"""
+<table style="margin: 10px;">
+<tr><td><b>Total Transactions:</b></td><td>{total_transactions}</td></tr>
+<tr><td><b>Total Duration:</b></td><td>{total_duration:.2f} seconds</td></tr>
+<tr><td></td><td></td></tr>
+<tr><td><b>Average TPS:</b></td><td>{average_tps:.2f} transactions/second</td></tr>
+<tr><td><b>Mean TPS:</b></td><td>{mean_tps:.2f} transactions/second</td></tr>
+<tr><td><b>Peak TPS:</b></td><td>{peak_tps:.0f} transactions/second</td></tr>
+</table>
+"""
+        stats_label = QtWidgets.QLabel(stats_text)
+        stats_label.setTextFormat(QtCore.Qt.RichText)
+        stats_label.setAlignment(QtCore.Qt.AlignLeft)
+        lay.addWidget(stats_label)
+        
+        # Explanation
+        explanation = QtWidgets.QLabel(
+            "<i>Average TPS = Total transactions ÷ Total duration<br>"
+            "Mean TPS = Average of all 1-second window values<br>"
+            "Peak TPS = Maximum transactions in any 1-second window</i>"
+        )
+        explanation.setTextFormat(QtCore.Qt.RichText)
+        explanation.setWordWrap(True)
+        lay.addWidget(explanation)
+        
+        # Close button
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        
+        # Size the dialog
+        dlg.resize(450, 300)
+        dlg.exec()
 
     def on_connection_error(self, message: str):
         self.prog.hide()

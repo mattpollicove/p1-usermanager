@@ -21,6 +21,30 @@ _None at this time._
 
 ### Resolved
 
+- **Date**: 2026-04-15
+- **Issue**: Database export failed with `pymysql.err.OperationalError: (1054, "Unknown column 'lifecycle_status' in 'INSERT INTO'")`. Export tried to insert data into columns that didn't exist in the target table.
+- **Root Cause**: The `create_table_if_not_exists` function only creates tables if they don't exist, but doesn't add missing columns to existing tables. When a saved mapping includes columns not present in the current table schema, or when exporting to a table created with fewer columns, the INSERT fails.
+- **Solution**: Added `add_missing_columns()` function to `db_utils.py` that detects and adds missing columns to existing tables using ALTER TABLE statements. The export flow now: (1) creates table if needed, (2) adds any missing columns to existing table, (3) inserts data. Users see a status bar notification showing which columns were added.
+- **Files Affected**: `api/db_utils.py` (new add_missing_columns function), `ui/main_window.py` (export_to_database method)
+- **Prevention**: When exporting to databases, always ensure the target table schema matches the mapping. Auto-add missing columns with ALTER TABLE before INSERT operations. Add checklist item: "Database exports auto-add missing columns to existing tables."
+- **Status**: RESOLVED (2026-04-15)
+
+- **Date**: 2026-04-15
+- **Issue**: Database export failed with `pymysql.err.OperationalError: (1054, "Unknown column 'account.canAuthenticate' in 'INSERT INTO'")`. Dotted column names like `account.canAuthenticate`, `identityProvider.type` were being used in SQL INSERT statements.
+- **Root Cause**: Column name sanitization (converting dots to underscores) only ran when creating new tables (`if not cols` block). When exporting to existing tables, the mapping used dotted names directly in SQL statements, which are invalid SQL identifiers.
+- **Solution**: Moved column sanitization logic outside the `if not cols` conditional so it always runs for both new and existing tables. Now all target column names are sanitized via `_sanitize_db_column_name()` before being used in SQL statements.
+- **Files Affected**: `ui/main_window.py` (export_to_database method)
+- **Prevention**: Always sanitize database column names for SQL compatibility regardless of whether the table is new or existing. Add checklist item: "Database export column names sanitized for SQL (dots → underscores)."
+- **Status**: RESOLVED (2026-04-15)
+
+- **Date**: 2026-04-15
+- **Issue**: Database export failed with `pymysql.err.OperationalError: (1054, "Unknown column '_embedded' in 'INSERT INTO'")`. Metadata fields (`_embedded`, `_links.*`, etc.) were being included in database exports causing SQL errors.
+- **Root Cause**: Database exports bypassed the ExportOptionsDialog (which filters metadata) and went directly to DatabaseMappingDialog. Existing table columns could contain metadata fields from previous exports. Saved mappings could also contain metadata field references. Metadata was present in four places: (1) existing table columns, (2) post-migration table columns, (3) initial saved mappings, (4) final mapping after dialog confirmation.
+- **Solution**: Added comprehensive metadata filtering at all four points: (1) Filter existing table columns immediately after fetching, (2) Filter columns after migration completes, (3) Filter saved initial_mapping before passing to dialog, (4) Final safeguard filter on effective_mapping after user confirms. Also filtered PingOne attributes list to exclude metadata before populating mapping dialog choices.
+- **Files Affected**: `ui/main_window.py` (export_to_database method with four filtering checkpoints)
+- **Prevention**: When exporting to external systems (databases, LDAP, etc.), always filter API metadata fields (`_embedded`, `_links`) from both source attributes and target columns at every stage: initial column lists, saved mappings, and final effective mappings. Add checklist item: "Metadata fields filtered from external exports."
+- **Status**: RESOLVED (2026-04-15)
+
 - **Date**: 2026-04-06
 - **Issue**: LDAP import failed with PingOne `400 INVALID_DATA` — `employeeNumber must be a STRING object` / `address.postalCode must be a STRING object`.
 - **Root Cause**: Two conversion points produced numeric payloads: (1) `_normalize_attr_value` in `ldap_utils.py` could return raw non-string scalars from LDAP values. (2) `_unflatten_user` attempted `json.loads()` on _all_ strings; scalar strings like `"75038"` were parsed to integer `75038`, reintroducing numeric types for fields like `address.postalCode`.

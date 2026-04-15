@@ -749,49 +749,21 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         ]
         self.pingone_attrs = sorted({*(pingone_attrs or []), *base_attrs})
 
+        # Auto-filter checkbox for link attributes
+        self.auto_filter_links_cb = QtWidgets.QCheckBox("Auto-remove link attributes (URLs, JSON objects)")
+        self.auto_filter_links_cb.setChecked(True)
+        self.auto_filter_links_cb.setToolTip("Automatically filter out columns containing http://, https://, or starting with {")
+        self.auto_filter_links_cb.stateChanged.connect(self._rebuild_table)
+        layout.addWidget(self.auto_filter_links_cb)
+
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Column Name", "Sample Value", "PingOne Attribute"])
-        self.table.setRowCount(len(self.headers))
-
-        for i, hdr in enumerate(self.headers):
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(hdr))
-
-            val = self.sample_row.get(hdr, "") if isinstance(self.sample_row, dict) else ""
-            if isinstance(val, (dict, list)):
-                try:
-                    val = json.dumps(val)
-                except Exception:
-                    val = str(val)
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(val) if val is not None else ""))
-
-            combo = QtWidgets.QComboBox()
-            combo.setEditable(True)
-            combo.addItem("<None>")
-            combo.addItems(self.pingone_attrs)
-            combo.setPlaceholderText("Select or type attribute name")
-            apply_combo_typeahead(combo, self.pingone_attrs)
-            clear_none_on_interact(combo)
-            apply_mapping_combo_keys(self.table, combo, 2)
-
-            if initial_mapping and isinstance(initial_mapping, dict):
-                mapped = initial_mapping.get(hdr)
-                if mapped:
-                    idx = combo.findText(mapped)
-                    if idx != -1:
-                        combo.setCurrentIndex(idx)
-                    else:
-                        combo.setEditText(str(mapped))
-            else:
-                suggested = self._suggest_pingone_attr(hdr)
-                if suggested:
-                    idx = combo.findText(suggested)
-                    if idx != -1:
-                        combo.setCurrentIndex(idx)
-                    else:
-                        combo.setEditText(suggested)
-
-            self.table.setCellWidget(i, 2, combo)
+        # Enable multi-row selection
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        
+        self._populate_table()
 
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
@@ -947,6 +919,93 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         clear_none_on_interact(combo)
         apply_mapping_combo_keys(self.table, combo, 2)
         self.table.setCellWidget(row, 2, combo)
+
+    def _should_filter_column(self, col_name: str, sample_value: str = '') -> bool:
+        """Check if a column should be filtered out based on link content."""
+        if not self.auto_filter_links_cb.isChecked():
+            return False
+        
+        # Check column name
+        col_lower = str(col_name).lower()
+        if col_lower.startswith('_links') or col_lower.startswith('_embedded'):
+            return True
+        
+        # Check sample value for URLs or JSON
+        val_str = str(sample_value).strip()
+        if val_str.startswith('http://') or val_str.startswith('https://') or val_str.startswith('{'):
+            return True
+        
+        return False
+
+    def _rebuild_table(self):
+        """Rebuild table when filter state changes."""
+        self._populate_table()
+
+    def _populate_table(self):
+        """Populate the mapping table with headers and combos."""
+        # Store current mapping before rebuilding
+        current_mapping = {}
+        for row in range(self.table.rowCount()):
+            col_item = self.table.item(row, 0)
+            combo = self.table.cellWidget(row, 2)
+            if col_item and isinstance(combo, QtWidgets.QComboBox):
+                current_mapping[col_item.text()] = combo.currentText()
+        
+        # Filter headers if needed
+        headers_to_show = []
+        for hdr in self.headers:
+            val = self.sample_row.get(hdr, "") if isinstance(self.sample_row, dict) else ""
+            if isinstance(val, (dict, list)):
+                try:
+                    val = json.dumps(val)
+                except Exception:
+                    val = str(val)
+            if not self._should_filter_column(hdr, str(val)):
+                headers_to_show.append(hdr)
+        
+        self.table.setRowCount(len(headers_to_show))
+        
+        for i, hdr in enumerate(headers_to_show):
+            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(hdr))
+
+            val = self.sample_row.get(hdr, "") if isinstance(self.sample_row, dict) else ""
+            if isinstance(val, (dict, list)):
+                try:
+                    val = json.dumps(val)
+                except Exception:
+                    val = str(val)
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(val) if val is not None else ""))
+
+            combo = QtWidgets.QComboBox()
+            combo.setEditable(True)
+            combo.addItem("<None>")
+            combo.addItems(self.pingone_attrs)
+            combo.setPlaceholderText("Select or type attribute name")
+            apply_combo_typeahead(combo, self.pingone_attrs)
+            clear_none_on_interact(combo)
+            apply_mapping_combo_keys(self.table, combo, 2)
+
+            # Restore or apply mapping
+            if hdr in current_mapping:
+                combo.setCurrentText(current_mapping[hdr])
+            elif self.initial_mapping and isinstance(self.initial_mapping, dict):
+                mapped = self.initial_mapping.get(hdr)
+                if mapped:
+                    idx = combo.findText(mapped)
+                    if idx != -1:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setEditText(str(mapped))
+            else:
+                suggested = self._suggest_pingone_attr(hdr)
+                if suggested:
+                    idx = combo.findText(suggested)
+                    if idx != -1:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setEditText(suggested)
+
+            self.table.setCellWidget(i, 2, combo)
 
     def _delete_selected_rows(self):
         rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
@@ -1992,8 +2051,19 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         direction_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(direction_label)
 
+        # Auto-filter checkbox for link attributes
+        self.auto_filter_links_cb = QtWidgets.QCheckBox("Auto-remove link attributes (URLs, JSON objects)")
+        self.auto_filter_links_cb.setChecked(True)
+        self.auto_filter_links_cb.setToolTip("Automatically filter out columns containing http://, https://, or starting with {")
+        self.auto_filter_links_cb.stateChanged.connect(self._rebuild_rows)
+        layout.addWidget(self.auto_filter_links_cb)
+
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(3)
+        # Enable multi-row selection
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        
         if direction == 'import':
             headers = ["Column Name", "Sample Value", "PingOne Attribute"]
         else:
@@ -2108,9 +2178,46 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
                 return col
         return ''
 
+    def _should_filter_column(self, col_name: str, sample_value: str = '') -> bool:
+        """Check if a column should be filtered out based on link content."""
+        if not self.auto_filter_links_cb.isChecked():
+            return False
+        
+        # Check column name
+        col_lower = str(col_name).lower()
+        if col_lower.startswith('_links') or col_lower.startswith('_embedded'):
+            return True
+        
+        # Check sample value for URLs or JSON
+        val_str = str(sample_value).strip()
+        if val_str.startswith('http://') or val_str.startswith('https://') or val_str.startswith('{'):
+            return True
+        
+        return False
+
+    def _rebuild_rows(self):
+        """Rebuild table rows when filter state changes."""
+        if self.direction == 'import':
+            self._build_import_rows()
+        else:
+            self._build_export_rows()
+
     def _build_import_rows(self):
         # If sample_row has phoneNumbers with multiple types, expand them for clarity.
         expanded_cols = self._expand_phone_numbers(self.table_cols, self.sample_row)
+        
+        # Filter out link attributes if enabled
+        if self.auto_filter_links_cb.isChecked():
+            filtered_cols = []
+            for col_info in expanded_cols:
+                col = col_info['name']
+                sample_val = ''
+                if col in self.sample_row:
+                    sample_val = str(self.sample_row[col])
+                if not self._should_filter_column(col, sample_val):
+                    filtered_cols.append(col_info)
+            expanded_cols = filtered_cols
+        
         self.table.setRowCount(len(expanded_cols))
         for i, col_info in enumerate(expanded_cols):
             col = col_info['name']
@@ -2152,6 +2259,21 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
 
     def _build_export_rows(self):
         attrs = self.pingone_attrs or self.table_cols
+        
+        # Filter out link attributes if enabled
+        if self.auto_filter_links_cb.isChecked():
+            filtered_attrs = []
+            for attr in attrs:
+                sample_val = self.sample_row.get(attr, '')
+                if isinstance(sample_val, (dict, list)):
+                    try:
+                        sample_val = json.dumps(sample_val)
+                    except Exception:
+                        sample_val = str(sample_val)
+                if not self._should_filter_column(attr, str(sample_val)):
+                    filtered_attrs.append(attr)
+            attrs = filtered_attrs
+        
         self.table.setRowCount(len(attrs))
         for i, attr in enumerate(attrs):
             left_item = QtWidgets.QTableWidgetItem(attr)
@@ -2426,11 +2548,11 @@ class _ReorderableTableWidget(QtWidgets.QTableWidget):
 
 
 class ExportOptionsDialog(QtWidgets.QDialog):
-    """Dialog to choose export options: selected vs all rows, visible vs all columns.
+    """Dialog to choose export options: selected vs all rows, visible vs all columns, metadata fields.
 
     Returns a dict:
     { 'rows': 'selected'|'all', 'only_visible_columns': bool, 'remember': bool,
-      'required_populated_attributes': List[str] }
+      'required_populated_attributes': List[str], 'excluded_metadata': List[str] }
     """
     def __init__(
         self,
@@ -2440,6 +2562,8 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         parent=None,
         populated_attributes: Optional[List[str]] = None,
         populated_attribute_samples: Optional[dict] = None,
+        metadata_columns: Optional[List[str]] = None,
+        excluded_metadata: Optional[List[str]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle('Export Options')
@@ -2472,6 +2596,58 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         self.only_visible_cb = QtWidgets.QCheckBox('Export only visible columns')
         self.only_visible_cb.setChecked(bool(only_visible_default))
         layout.addWidget(self.only_visible_cb)
+
+        # Metadata fields section
+        metadata_cols = [str(m) for m in (metadata_columns or []) if str(m)]
+        excluded_set = set(str(e) for e in (excluded_metadata or []))
+        
+        if metadata_cols:
+            self.metadata_group = QtWidgets.QGroupBox('Metadata Fields')
+            self.metadata_group.setCheckable(False)
+            metadata_layout = QtWidgets.QVBoxLayout(self.metadata_group)
+            
+            metadata_note = QtWidgets.QLabel(
+                'Metadata fields are API-specific (_embedded, _links, etc.). '
+                'Uncheck fields to exclude them from export.'
+            )
+            metadata_note.setWordWrap(True)
+            metadata_note.setStyleSheet('color: #666; font-size: 10pt;')
+            metadata_layout.addWidget(metadata_note)
+            
+            # Create scrollable list for metadata fields
+            scroll_area = QtWidgets.QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setMaximumHeight(120)
+            scroll_widget = QtWidgets.QWidget()
+            scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
+            scroll_layout.setContentsMargins(5, 5, 5, 5)
+            
+            self.metadata_checkboxes = {}
+            for metadata_field in metadata_cols:
+                cb = QtWidgets.QCheckBox(metadata_field)
+                # By default, metadata is excluded (unchecked)
+                cb.setChecked(metadata_field not in excluded_set)
+                self.metadata_checkboxes[metadata_field] = cb
+                scroll_layout.addWidget(cb)
+            
+            scroll_layout.addStretch()
+            scroll_area.setWidget(scroll_widget)
+            metadata_layout.addWidget(scroll_area)
+            
+            # Select All / Deselect All buttons
+            metadata_buttons = QtWidgets.QHBoxLayout()
+            select_all_metadata_btn = QtWidgets.QPushButton('Select All')
+            deselect_all_metadata_btn = QtWidgets.QPushButton('Deselect All')
+            select_all_metadata_btn.clicked.connect(self._select_all_metadata)
+            deselect_all_metadata_btn.clicked.connect(self._deselect_all_metadata)
+            metadata_buttons.addWidget(select_all_metadata_btn)
+            metadata_buttons.addWidget(deselect_all_metadata_btn)
+            metadata_buttons.addStretch()
+            metadata_layout.addLayout(metadata_buttons)
+            
+            layout.addWidget(self.metadata_group)
+        else:
+            self.metadata_checkboxes = {}
 
         self.attr_filter_group = QtWidgets.QGroupBox('Filter by populated attributes (optional)')
         self.attr_filter_group.setCheckable(True)
@@ -2593,6 +2769,16 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             if item:
                 item.setCheckState(QtCore.Qt.Unchecked)
 
+    def _select_all_metadata(self):
+        """Check all metadata field checkboxes."""
+        for cb in self.metadata_checkboxes.values():
+            cb.setChecked(True)
+
+    def _deselect_all_metadata(self):
+        """Uncheck all metadata field checkboxes."""
+        for cb in self.metadata_checkboxes.values():
+            cb.setChecked(False)
+
     def _move_selected_attribute_row(self, delta: int):
         row = self._selected_attr_row()
         if row < 0:
@@ -2627,11 +2813,19 @@ class ExportOptionsDialog(QtWidgets.QDialog):
                     attr = attr_item.text().strip()
                     if attr:
                         required_populated_attributes.append(attr)
+        
+        # Collect excluded metadata fields (those that are unchecked)
+        excluded_metadata = []
+        for field, cb in self.metadata_checkboxes.items():
+            if not cb.isChecked():
+                excluded_metadata.append(field)
+        
         return {
             'rows': rows,
             'only_visible_columns': bool(self.only_visible_cb.isChecked()),
             'remember': bool(self.remember_cb.isChecked()),
             'required_populated_attributes': required_populated_attributes,
+            'excluded_metadata': excluded_metadata,
         }
 
 

@@ -320,6 +320,53 @@ def create_table_if_not_exists(db_type: str, host: str, port: int, database: str
             conn.execute(text(f"CREATE TABLE {q_table} ({cols_def})"))
 
 
+def add_missing_columns(db_type: str, host: str, port: int, database: str,
+                       user: str, password: str, table_name: str,
+                       required_columns: List[str],
+                       driver_path: Optional[str] = None) -> List[str]:
+    """Add missing columns to an existing table.
+    
+    Checks which columns from required_columns don't exist in the table,
+    and adds them as TEXT columns.
+    
+    Returns a list of column names that were added.
+    """
+    if not required_columns:
+        return []
+    
+    url = _make_url(db_type, host, port, database, user, password, driver_path)
+    connect_args = {}
+    if "mysql" in url.lower():
+        connect_args = {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5}
+    engine = create_engine(url, connect_args=connect_args if connect_args else None) if connect_args else create_engine(url)
+    
+    try:
+        inspector = inspect(engine)
+        if not inspector.has_table(table_name):
+            return []
+        
+        # Get existing columns
+        existing_cols = {c.get('name') for c in inspector.get_columns(table_name)}
+        
+        # Find missing columns
+        missing_cols = [col for col in required_columns if col not in existing_cols]
+        
+        if not missing_cols:
+            return []
+        
+        # Add missing columns
+        q_table = _quote_table_identifier(db_type, table_name)
+        with engine.begin() as conn:
+            for col in missing_cols:
+                q_col = _quote_identifier(db_type, col)
+                conn.execute(text(f"ALTER TABLE {q_table} ADD COLUMN {q_col} TEXT"))
+        
+        return missing_cols
+    except Exception:
+        # If we can't add columns, return empty list
+        return []
+
+
 def rename_table_columns(db_type: str, host: str, port: int, database: str,
                          user: str, password: str, table_name: str,
                          rename_map: dict,

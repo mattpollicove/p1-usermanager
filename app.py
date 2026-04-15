@@ -31,6 +31,8 @@ def run_app():
     # Create the QApplication and show the main window; return the
     # application's exit status so callers can raise SystemExit.
     app = QtWidgets.QApplication([])
+    app.setApplicationName("PingOne User Manager")
+    app.setApplicationDisplayName("PingOne User Manager")
     window = MainWindow()
     # Ensure shared AsyncClient is closed when the application exits.
     app.aboutToQuit.connect(api_client.close_async_client)

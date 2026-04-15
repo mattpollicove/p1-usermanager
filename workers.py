@@ -14,6 +14,7 @@ import httpx
 from PySide6 import QtCore
 
 import api.client as api_client
+from tps_tracker import TPSTracker
 
 """Background worker implementations.
 
@@ -144,6 +145,10 @@ class BulkDeleteWorker(QtCore.QRunnable):
         asyncio.run(self.execute())
 
     async def execute(self):
+        # Initialize TPS tracker
+        tps_tracker = TPSTracker()
+        tps_tracker.start()
+        
         token = await self.client.get_token()
         if not token:
             self.signals.error.emit("Auth Failed. Check credentials.")
@@ -156,6 +161,8 @@ class BulkDeleteWorker(QtCore.QRunnable):
             # This keeps load predictable and allows progress reporting.
             for i, uid in enumerate(self.user_ids):
                 delete_url = f"{self.client.base_url}/users/{uid}"
+                # Emit status update showing current deletion
+                self.signals.status.emit(f"Deleting user {i+1}/{len(self.user_ids)}: {uid}")
                 try:
                     if api_client.API_LOGGING_ENABLED:
                         api_client.api_logger.info(f"DELETE {delete_url}")
@@ -171,6 +178,7 @@ class BulkDeleteWorker(QtCore.QRunnable):
                         except Exception:
                             pass
                     success += 1
+                    tps_tracker.record_transaction()  # Record successful deletion
                 except Exception as e:
                     if api_client.API_LOGGING_ENABLED:
                         api_client.api_logger.error(f"DELETE {delete_url} - Failed: {str(e)}")
@@ -179,13 +187,22 @@ class BulkDeleteWorker(QtCore.QRunnable):
                         except Exception:
                             pass
                 self.signals.progress.emit(i + 1, len(self.user_ids))
+        
+        # Finalize TPS tracking
+        tps_tracker.finish()
+        tps_stats = tps_tracker.get_statistics()
+        
         if api_client.API_LOGGING_ENABLED:
             api_client.api_logger.info(f"Bulk delete completed: {success}/{len(self.user_ids)} users deleted")
             try:
                 api_client.write_connection_log(f"Bulk delete completed: {success}/{len(self.user_ids)} users deleted")
             except Exception:
                 pass
-        self.signals.finished.emit({"deleted": success, "total": len(self.user_ids)})
+        self.signals.finished.emit({
+            "deleted": success,
+            "total": len(self.user_ids),
+            "tps_stats": tps_stats,
+        })
 
 
 class BulkCreateWorker(QtCore.QRunnable):
@@ -230,6 +247,10 @@ class BulkCreateWorker(QtCore.QRunnable):
         asyncio.run(self.execute())
 
     async def execute(self):
+        # Initialize TPS tracker
+        tps_tracker = TPSTracker()
+        tps_tracker.start()
+        
         # Ensure we have a valid token before attempting creates
         token = await self.client.get_token()
         if not token:
@@ -260,6 +281,7 @@ class BulkCreateWorker(QtCore.QRunnable):
                 # Use client.create_user which handles auth and logging
                 await self.client.create_user(user)
                 created += 1
+                tps_tracker.record_transaction()  # Record successful transaction
             except Exception as e:
                 err_text = str(e)
                 username = user.get('username')
@@ -280,6 +302,7 @@ class BulkCreateWorker(QtCore.QRunnable):
                             await self.client.update_user(existing_id, user)
                             updated_on_retry += 1
                             retried = True
+                            tps_tracker.record_transaction()  # Record successful retry transaction
                             self.signals.status.emit(
                                 f"Retried as update for {username}"
                             )
@@ -311,6 +334,10 @@ class BulkCreateWorker(QtCore.QRunnable):
                             pass
             self.signals.progress.emit(i + 1, total)
 
+        # Finalize TPS tracking
+        tps_tracker.finish()
+        tps_stats = tps_tracker.get_statistics()
+        
         if api_client.API_LOGGING_ENABLED:
             api_client.api_logger.info(f"Bulk create completed: {created}/{total} users created")
             try:
@@ -324,6 +351,7 @@ class BulkCreateWorker(QtCore.QRunnable):
             "updated_on_retry": updated_on_retry,
             "total": total,
             "errors": errors,
+            "tps_stats": tps_stats,
         })
 
 
@@ -389,6 +417,10 @@ class BulkUpdateWorker(QtCore.QRunnable):
         asyncio.run(self.execute())
 
     async def execute(self):
+        # Initialize TPS tracker
+        tps_tracker = TPSTracker()
+        tps_tracker.start()
+        
         token = await self.client.get_token()
         if not token:
             self.signals.error.emit("Auth Failed. Check credentials.")
@@ -411,6 +443,7 @@ class BulkUpdateWorker(QtCore.QRunnable):
                             pass
                     await self.client.update_user(uid, data)
                     updated += 1
+                    tps_tracker.record_transaction()  # Record successful transaction
                 except Exception as e:
                     err_msg = f"User {uid}: {str(e)}"
                     errors.append(err_msg)
@@ -422,6 +455,10 @@ class BulkUpdateWorker(QtCore.QRunnable):
                             pass
                 self.signals.progress.emit(i + 1, total)
 
+        # Finalize TPS tracking
+        tps_tracker.finish()
+        tps_stats = tps_tracker.get_statistics()
+        
         if api_client.API_LOGGING_ENABLED:
             api_client.api_logger.info(f"Bulk update completed: {updated}/{total} users updated")
             try:
@@ -429,4 +466,9 @@ class BulkUpdateWorker(QtCore.QRunnable):
             except Exception:
                 pass
 
-        self.signals.finished.emit({"updated": updated, "total": total, "errors": errors})
+        self.signals.finished.emit({
+            "updated": updated,
+            "total": total,
+            "errors": errors,
+            "tps_stats": tps_stats,
+        })
