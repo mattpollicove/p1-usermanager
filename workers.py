@@ -161,7 +161,7 @@ class BulkDeleteWorker(QtCore.QRunnable):
             # This keeps load predictable and allows progress reporting.
             for i, uid in enumerate(self.user_ids):
                 delete_url = f"{self.client.base_url}/users/{uid}"
-                # Emit status update showing current deletion
+                # Emit status update showing current deletion with counter
                 self.signals.status.emit(f"Deleting user {i+1}/{len(self.user_ids)}: {uid}")
                 try:
                     if api_client.API_LOGGING_ENABLED:
@@ -268,8 +268,11 @@ class BulkCreateWorker(QtCore.QRunnable):
         # If validation passed for all users, proceed to create them sequentially
         for i, user in enumerate(self.users):
             try:
+                # Emit status with progress counter
+                uname = user.get('username') or user.get('id') or f"user_{i+1}"
+                self.signals.status.emit(f"Creating user {i+1}/{total}: {uname}")
                 if api_client.API_LOGGING_ENABLED:
-                    api_client.api_logger.info(f"Creating user: {user.get('username') or user.get('id')}")
+                    api_client.api_logger.info(f"Creating user {i+1}/{total}: {uname}")
                     try:
                         api_client.append_live_event(f"Creating user: {user.get('username') or user.get('id')}")
                     except Exception:
@@ -431,8 +434,10 @@ class BulkUpdateWorker(QtCore.QRunnable):
         async with httpx.AsyncClient(timeout=10.0) as session:
             for i, (uid, data) in enumerate(self.user_pairs):
                 try:
+                    # Emit status with progress counter
+                    self.signals.status.emit(f"Updating user {i+1}/{total}: {uid}")
                     if api_client.API_LOGGING_ENABLED:
-                        api_client.api_logger.info(f"Updating user: {uid}")
+                        api_client.api_logger.info(f"Updating user {i+1}/{total}: {uid}")
                         try:
                             api_client.append_live_event(f"Updating user: {uid}")
                         except Exception:

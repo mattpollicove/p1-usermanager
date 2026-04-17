@@ -1919,8 +1919,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Import LDAP", "No matching LDAP entries were found.")
             return
 
-        sample = rows[0]
-        source_fields = sorted([k for k in sample.keys() if k and k.lower() != 'dn'])
+        # Discover populated attributes from first 10 entries
+        source_fields = self._discover_populated_attributes_from_entries(rows, max_sample=10)
+        sample = rows[0] if rows else {}
 
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
         pops = {}
@@ -2292,26 +2293,48 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
                 return
-            # fetch columns and sample row
+            # fetch columns and discover populated attributes from first 10 rows
             try:
                 if source_mode == "Custom Query":
                     cols = db_utils.get_query_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], query_text, conn.get('driver')
                     )
-                    sample = db_utils.get_query_sample(
-                        conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], query_text, conn.get('driver')
-                    )
+                    # Get first 10 rows to discover populated attributes
+                    try:
+                        sample_rows = db_utils.get_query_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            limit=10
+                        )
+                        cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
+                        sample = sample_rows[0] if sample_rows else {}
+                    except Exception:
+                        # Fall back to single sample
+                        sample = db_utils.get_query_sample(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver')
+                        )
                 else:
                     cols = db_utils.get_table_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], table, conn.get('driver')
                     )
-                    sample = db_utils.get_table_sample(
-                        conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver')
-                    )
+                    # Get first 10 rows to discover populated attributes
+                    try:
+                        sample_rows = db_utils.get_table_rows(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver'),
+                            limit=10
+                        )
+                        cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
+                        sample = sample_rows[0] if sample_rows else {}
+                    except Exception:
+                        # Fall back to single sample
+                        sample = db_utils.get_table_sample(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver')
+                        )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
                 return
@@ -2630,29 +2653,58 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
                 return
             
-            # Fetch columns and convert any dotted names
+            # Fetch columns and discover populated attributes from first 10 rows
             try:
                 if query_text:
                     cols = db_utils.get_query_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], query_text, conn.get('driver')
                     )
-                    sample = db_utils.get_query_sample(
+                    # Get first 10 rows to discover populated attributes
+                    sample_rows = db_utils.get_query_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], query_text, conn.get('driver')
+                        conn['user'], conn['password'], query_text, conn.get('driver'),
+                        limit=10
                     )
+                    cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
+                    sample = sample_rows[0] if sample_rows else {}
                 else:
                     cols = db_utils.get_table_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
                         conn['user'], conn['password'], table, conn.get('driver')
                     )
-                    sample = db_utils.get_table_sample(
+                    # Get first 10 rows to discover populated attributes
+                    sample_rows = db_utils.get_table_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver')
+                        conn['user'], conn['password'], table, conn.get('driver'),
+                        limit=10
                     )
+                    cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
+                    sample = sample_rows[0] if sample_rows else {}
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
-                return
+                # Fall back to old method if new method fails
+                try:
+                    if query_text:
+                        cols = db_utils.get_query_columns(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver')
+                        )
+                        sample = db_utils.get_query_sample(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], query_text, conn.get('driver')
+                        )
+                    else:
+                        cols = db_utils.get_table_columns(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver')
+                        )
+                        sample = db_utils.get_table_sample(
+                            conn['type'], conn['host'], conn['port'], conn['database'],
+                            conn['user'], conn['password'], table, conn.get('driver')
+                        )
+                except Exception as inner_e:
+                    QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {inner_e}")
+                    return
             
             # Convert any dotted column names to underscore equivalents
             converted_cols = [self._convert_dotted_to_underscore(col) for col in cols]
@@ -3003,7 +3055,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 # build rows for insertion based on mapping
                 rows = []
-                for u in export_users:
+                total_users = len(export_users)
+                for idx, u in enumerate(export_users, 1):
                     flat = self._flatten_user(u)
                     row = {}
                     for ping_attr, col in effective_mapping.items():
@@ -3016,6 +3069,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         row[col] = val
                     rows.append(row)
                     tracker.record_transaction()
+                    # Update status every 10 users or on last user
+                    if idx % 10 == 0 or idx == total_users:
+                        try:
+                            self.status_label.setText(f"Preparing {idx}/{total_users} users for export...")
+                            self.statusBar().showMessage(f"Preparing {idx}/{total_users} users for export...")
+                        except Exception:
+                            pass
                 
                 # Finish tracking and get statistics
                 tracker.finish()
@@ -3637,6 +3697,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 out.pop('population', None)
         elif pop is not None:
             out.pop('population', None)
+
+        # Remove invalid address values - PingOne requires address to be a COMPLEX
+        # object with at least one sub-attribute, or omitted entirely.
+        # String values, empty objects, and None are all invalid.
+        addr = out.get('address')
+        if addr is None or addr == '' or addr == []:
+            out.pop('address', None)
+        elif isinstance(addr, str):
+            # Address was provided as a simple string - remove it since PingOne
+            # requires a complex object with sub-attributes like streetAddress, locality.
+            out.pop('address', None)
+        elif isinstance(addr, dict):
+            # Remove empty string values and None values from address
+            cleaned_addr = {k: v for k, v in addr.items() if v not in (None, '', [])}
+            if cleaned_addr:
+                out['address'] = cleaned_addr
+            else:
+                out.pop('address', None)
 
         return out
 
@@ -4644,6 +4722,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     user['username'] = user['username'].strip()
             except Exception:
                 pass
+            # Remove invalid address values - PingOne requires address to be a COMPLEX
+            # object with at least one sub-attribute, or omitted entirely.
+            # String values, empty objects, and None are all invalid.
+            try:
+                addr = user.get('address')
+                if addr is None or addr == '' or addr == []:
+                    user.pop('address', None)
+                elif isinstance(addr, str):
+                    # Address was mapped as a simple string - remove it since PingOne
+                    # requires a complex object with sub-attributes like streetAddress, locality.
+                    user.pop('address', None)
+                elif isinstance(addr, dict):
+                    # Remove empty string values and None values from address
+                    cleaned_addr = {k: v for k, v in addr.items() if v not in (None, '', [])}
+                    if cleaned_addr:
+                        user['address'] = cleaned_addr
+                    else:
+                        user.pop('address', None)
+            except Exception:
+                pass
             # apply fixed enabled setting if provided
             if fixed_enabled is not None:
                 user['enabled'] = bool(fixed_enabled)
@@ -5288,12 +5386,20 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             tracker = TPSTracker()
             tracker.start()
             
+            total_users = len(export_users)
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(cols)
-                for row in self._rows_from_users(export_users, cols):
+                for idx, row in enumerate(self._rows_from_users(export_users, cols), 1):
                     writer.writerow([str(v) for v in row])
                     tracker.record_transaction()
+                    # Update status every 10 rows or on last row
+                    if idx % 10 == 0 or idx == total_users:
+                        try:
+                            self.status_label.setText(f"Exporting {idx}/{total_users} users...")
+                            self.statusBar().showMessage(f"Exporting {idx}/{total_users} users...")
+                        except Exception:
+                            pass
             
             # Finish tracking and get statistics
             tracker.finish()
@@ -5414,8 +5520,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             tracker = TPSTracker()
             tracker.start()
             
+            total_users = len(export_users)
             with open(path, 'w', encoding='utf-8') as f:
-                for u in export_users:
+                for idx, u in enumerate(export_users, 1):
                     flat = self._flatten_user(u)
                     uid = flat.get('username') or flat.get('id') or ''
                     if not uid:
@@ -5436,6 +5543,13 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                         f.write(f"{k}: {v}\n")
                     f.write('\n')
                     tracker.record_transaction()
+                    # Update status every 10 users or on last user
+                    if idx % 10 == 0 or idx == total_users:
+                        try:
+                            self.status_label.setText(f"Exporting {idx}/{total_users} users...")
+                            self.statusBar().showMessage(f"Exporting {idx}/{total_users} users...")
+                        except Exception:
+                            pass
             
             # Finish tracking and get statistics
             tracker.finish()
@@ -5500,6 +5614,42 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             else:
                 cur[parts[-1]] = v
         return result
+
+    def _discover_populated_attributes_from_entries(self, entries: list, max_sample: int = 10) -> list:
+        """Discover which attributes are actually populated by examining first N entries.
+        
+        Returns a sorted list of attribute keys that have non-empty values in at least
+        one of the sampled entries. This helps show users only relevant attributes
+        for mapping instead of all possible columns.
+        """
+        if not entries:
+            return []
+        
+        sample_entries = entries[:max_sample]
+        populated_keys = set()
+        
+        for entry in sample_entries:
+            if not isinstance(entry, dict):
+                continue
+            for key, val in entry.items():
+                # Skip DN and other metadata keys
+                if not key or (isinstance(key, str) and key.lower() in ('dn', '')):
+                    continue
+                # Check if value is non-empty
+                if val is None or val == '' or val == [] or val == {}:
+                    continue
+                # Handle list values - check if list has non-empty items
+                if isinstance(val, list):
+                    has_content = any(
+                        item not in (None, '', [], {}) 
+                        for item in val
+                    )
+                    if has_content:
+                        populated_keys.add(key)
+                else:
+                    populated_keys.add(key)
+        
+        return sorted(populated_keys)
 
     def _coerce_numeric_scalars_to_strings(self, obj, path: str = "") -> int:
         """Recursively coerce numeric scalars to strings in import payloads."""
@@ -5576,6 +5726,11 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 reader = _csv.DictReader(f)
                 headers = reader.fieldnames or []
                 raw_rows = list(reader)
+
+            # Discover populated attributes from first 10 rows
+            populated_headers = self._discover_populated_attributes_from_entries(raw_rows, max_sample=10)
+            # Use populated headers but fall back to all headers if none found
+            headers = populated_headers if populated_headers else headers
 
             # Check if headers have dotted names that need adjustment
             adjusted_headers = [self._convert_dotted_to_underscore(h) for h in headers]
@@ -5681,22 +5836,29 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
             entries = [e.strip() for e in content.split('\n\n') if e.strip()]
-            # Show attribute mapping dialog using a synthetic header list
-            # derived from the first entry's keys (hyphens converted to dots)
-            first_flat_keys = []
-            first_sample = {}
-            if entries:
-                first = entries[0]
-                for line in first.splitlines():
+            
+            # Parse first 10 entries to discover populated attributes
+            sample_entries = []
+            for ent in entries[:10]:
+                flat = {}
+                for line in ent.splitlines():
                     if not line or ':' not in line:
                         continue
-                    key = line.split(':', 1)[0].strip()
-                    val = line.split(':', 1)[1].strip()
+                    key, val = line.split(':', 1)
+                    key = key.strip()
+                    val = val.strip()
+                    if key.lower() == 'dn':
+                        continue
+                    # convert hyphenated keys to dot-notation
                     if '-' in key and '.' not in key:
                         key = key.replace('-', '.')
-                    first_flat_keys.append(key)
-                    if key.lower() != 'dn' and key not in first_sample:
-                        first_sample[key] = val
+                    flat[key] = val
+                if flat:
+                    sample_entries.append(flat)
+            
+            # Discover which attributes are actually populated
+            first_flat_keys = self._discover_populated_attributes_from_entries(sample_entries, max_sample=10)
+            first_sample = sample_entries[0] if sample_entries else {}
             # Create API client early to fetch populations for mapping UI
             client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
             pops = {}
