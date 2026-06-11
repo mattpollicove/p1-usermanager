@@ -123,7 +123,8 @@ Managing Profiles:
 
 Database Import/Export:
 - Use File → Manage DB Connections (or the button in Configuration tab) to define connections.
-- Supported types: MSSQL and MariaDB/MySQL. Provide JDBC/ODBC driver path if needed.
+- Supported types: MSSQL, MySQL, and Oracle via JDBC only.
+- Provide JDBC Driver Path (.jar file) for the selected database type.
 - After defining a connection you can import or export data via the toolbar buttons on the User Management tab.
 - Mapping dialogs support common aliases and core fields including middle name, employee type, and address targets.
 - Mapping choices include custom PingOne attributes discovered from tenant user data.
@@ -206,7 +207,9 @@ Exporting Users:
 
 Deleting Users:
 - Select one or more rows and click "Delete Selected" or use the context menu.
+- Press Delete (or Backspace on macOS) in the user table to delete the selected/current row.
 - A confirmation dialog will appear before deletion.
+- In the confirmation dialog (or Preferences), you can choose whether to always prompt before deleting.
 - Progress is shown for bulk deletions.
 
 Logging & Log Viewers:
@@ -281,7 +284,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._closing = False
         self.hide_raw_http_columns = True
         self.show_user_update_success = True
+        self.prompt_before_delete = True
+        self._pending_user_tab_refresh = False
+        self._active_profile_name = ""
         self.column_widths = {}
+        # Cache keyring secrets in-memory for this app session to avoid
+        # repeated keychain unlock prompts when switching profiles.
+        self._secret_cache = {}
         self._open_log_windows = {}
         self.friendly_names = {
             'username': 'Username',
@@ -309,11 +318,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         msg = "Keyring unavailable: saved client secrets may not persist on this system."
         try:
-            self.status_label.setText(msg)
-        except Exception:
-            pass
-        try:
-            self.statusBar().showMessage(msg, 15000)
+            self._set_processing_message(msg, 15000)
         except Exception:
             pass
 
@@ -365,6 +370,9 @@ class MainWindow(QtWidgets.QMainWindow):
             success_cb = QtWidgets.QCheckBox("Show User Update Success Messages")
             success_cb.setChecked(self.show_user_update_success_action.isChecked())
 
+            prompt_delete_cb = QtWidgets.QCheckBox("Always Prompt Before Deleting Users")
+            prompt_delete_cb.setChecked(bool(getattr(self, 'prompt_before_delete', True)))
+
             hide_links_cb = QtWidgets.QCheckBox("Hide Link / JSON Reference Columns")
             hide_links_cb.setChecked(self.hide_raw_http_columns_cb.isChecked() if hasattr(self, 'hide_raw_http_columns_cb') else True)
 
@@ -393,6 +401,7 @@ class MainWindow(QtWidgets.QMainWindow):
             form.addRow(friendly_cb)
             form.addRow(dark_cb)
             form.addRow(success_cb)
+            form.addRow(prompt_delete_cb)
             form.addRow(hide_links_cb)
             form.addRow(show_api_status_cb)
             form.addRow(api_log_cb)
@@ -443,6 +452,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_user_update_success_action.setChecked(success_cb.isChecked())
             self.on_show_user_update_success_toggled(self.show_user_update_success_action.isChecked())
 
+            self.prompt_before_delete = bool(prompt_delete_cb.isChecked())
+
             if hasattr(self, 'hide_raw_http_columns_cb'):
                 self.hide_raw_http_columns_cb.setChecked(hide_links_cb.isChecked())
             if hasattr(self, 'show_api_calls_cb'):
@@ -463,9 +474,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.toggle_local_schema()
             else:
                 msg = "Validation: none"
-                self.status_label.setText(msg)
                 try:
-                    self.statusBar().showMessage(msg)
+                    self._set_processing_message(msg)
                 except Exception:
                     pass
 
@@ -505,6 +515,12 @@ class MainWindow(QtWidgets.QMainWindow):
         manage_profiles_action = file_menu.addAction("Manage Profiles...")
         manage_profiles_action.triggered.connect(self.show_profile_manager)
         manage_profiles_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_M))
+        
+        # Rollback last import action
+        rollback_import_action = file_menu.addAction("Rollback Last Import...")
+        rollback_import_action.triggered.connect(self.rollback_last_import)
+        rollback_import_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_R))
+        file_menu.addSeparator()
         
         # Preferences action - accessible via File menu and keyboard shortcut
         self.preferences_action = QtGui.QAction("Preferences...", self)
@@ -733,6 +749,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Checkbox removed from UI - configured in Settings dialog
         
         self.lbl_stats = QtWidgets.QLabel("Users: -- | Populations: --")
+        self.lbl_stats.setToolTip("Current Counts: Total number of users and populations loaded in the current environment")
         env_lay.addWidget(prof_group); env_lay.addWidget(cred_group); env_lay.addWidget(self.lbl_stats); env_lay.addStretch()
 
         # --- Users Tab ---
@@ -799,12 +816,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shortcut_columns.activated.connect(self.select_columns)
         self.shortcut_save_layout = QtGui.QShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_S), self)
         self.shortcut_save_layout.activated.connect(self.save_columns_to_config)
-        if IS_MACOS:
-            self.shortcut_delete_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self)
-        else:
-            self.shortcut_delete_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self)
-        self.shortcut_delete_users.activated.connect(self.delete_selected_users)
-        
         self.u_table = QtWidgets.QTableWidget(0, 0)
         self.u_table.setHorizontalHeaderLabels([])
         self.u_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -819,23 +830,108 @@ class MainWindow(QtWidgets.QMainWindow):
         self.u_table.horizontalHeader().setSectionsMovable(True)
         self.u_table.horizontalHeader().sectionMoved.connect(self.on_column_moved)
         self.u_table.horizontalHeader().sectionResized.connect(self.on_column_resized)
+
+        # Delete currently selected/current row from User Management table.
+        self.shortcut_delete_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self.u_table)
+        self.shortcut_delete_users.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        self.shortcut_delete_users.activated.connect(self.delete_selected_users)
+        self.shortcut_backspace_users = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self.u_table)
+        self.shortcut_backspace_users.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        self.shortcut_backspace_users.activated.connect(self.delete_selected_users)
         
-        self.prog = QtWidgets.QProgressBar(); self.prog.hide()
-        user_lay.addLayout(toolbar); user_lay.addWidget(self.prog); user_lay.addWidget(self.u_table)
+        # Progress bar with cancel button
+        self.prog = QtWidgets.QProgressBar()
+        self.prog.hide()
+        self.cancel_btn = QtWidgets.QPushButton("Cancel Import")
+        self.cancel_btn.hide()
+        self.cancel_btn.clicked.connect(self._cancel_operation)
+        self.cancel_requested = False
+        self.last_import_record = None  # Track last import for rollback
+        
+        prog_layout = QtWidgets.QHBoxLayout()
+        prog_layout.addWidget(self.prog)
+        prog_layout.addWidget(self.cancel_btn)
+        
+        user_lay.addLayout(toolbar)
+        user_lay.addLayout(prog_layout)
+        user_lay.addWidget(self.u_table)
         # Add a persistent status bar so messages are visible across tabs
         self.status_label = QtWidgets.QLabel("Ready")
         self.api_calls_label = QtWidgets.QLabel("")
+        self.api_calls_label.setToolTip("Live API activity: Shows real-time API calls as they are made to PingOne")
+        
         self.profile_name_label = QtWidgets.QLabel("")
+        self.profile_name_label.setToolTip("Current Profile: The active configuration profile with environment and credentials")
+        
         self.last_source_label = QtWidgets.QLabel("Last source: none")
+        self.last_source_label.setToolTip("Last Data Source: The most recent import or export source (CSV, LDIF, Database, or LDAP)")
+        
+        self.processing_label = QtWidgets.QLabel("")  # For import/export/processing messages
+        self.processing_label.setToolTip(
+            "Operation Status: Current import/export/processing activity\n\n"
+            "When you see 'X concurrent':\n"
+            "• Concurrent = Number of simultaneous API requests being made\n"
+            "• Higher concurrency (up to 10) = faster processing for large operations\n"
+            "• Used automatically when importing/deleting/updating >50-100 users"
+        )
+        
+        self.last_tps_label = QtWidgets.QLabel("")
+        self.last_tps_label.setToolTip(
+            "Transactions Per Second (TPS): Performance metric for the last bulk operation\n\n"
+            "Shows how many API transactions were completed per second\n"
+            "Higher TPS = better performance (typical range: 2-10 TPS depending on operation)"
+        )
+        
+        self.last_tps_stats = None  # Store last TPS stats for status bar
         user_lay.addWidget(self.status_label)
         user_lay.addWidget(self.api_calls_label)
         sb = QtWidgets.QStatusBar()
         self.setStatusBar(sb)
         # Mirror initial status and add permanent widgets to status bar
         try:
-            self.statusBar().showMessage(self.status_label.text())
+            # Don't use showMessage() - it appears at the start. Use processing_label instead.
+            
+            # Add permanent widgets with dividers
             self.statusBar().addPermanentWidget(self.profile_name_label)
+            
+            # Divider 1
+            divider1 = QtWidgets.QFrame()
+            divider1.setFrameShape(QtWidgets.QFrame.VLine)
+            divider1.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider1)
+            
             self.statusBar().addPermanentWidget(self.last_source_label)
+            
+            # Divider 2
+            divider2 = QtWidgets.QFrame()
+            divider2.setFrameShape(QtWidgets.QFrame.VLine)
+            divider2.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider2)
+            
+            self.statusBar().addPermanentWidget(self.processing_label)
+            
+            # Divider 3
+            divider3 = QtWidgets.QFrame()
+            divider3.setFrameShape(QtWidgets.QFrame.VLine)
+            divider3.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider3)
+            
+            self.statusBar().addPermanentWidget(self.lbl_stats)
+            
+            # Divider 4
+            divider4 = QtWidgets.QFrame()
+            divider4.setFrameShape(QtWidgets.QFrame.VLine)
+            divider4.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider4)
+            
+            self.statusBar().addPermanentWidget(self.last_tps_label)
+            
+            # Divider 5
+            divider5 = QtWidgets.QFrame()
+            divider5.setFrameShape(QtWidgets.QFrame.VLine)
+            divider5.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider5)
+            
             self.statusBar().addPermanentWidget(self.api_calls_label)
         except Exception:
             pass
@@ -852,6 +948,19 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         self.tabs.addTab(env_tab, "Configuration"); self.tabs.addTab(user_tab, "User Management")
+        self.tabs.currentChanged.connect(self.on_main_tab_changed)
+
+    def on_main_tab_changed(self, index):
+        """Refresh users when entering User Management after a config switch."""
+        try:
+            if index < 0:
+                return
+            tab_text = self.tabs.tabText(index)
+            if tab_text == "User Management" and self._pending_user_tab_refresh:
+                self._pending_user_tab_refresh = False
+                self.refresh_users()
+        except Exception:
+            pass
 
     def _get_native_file_dialog_options(self):
         """Return platform-appropriate file dialog options."""
@@ -995,7 +1104,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.save_app_settings()
                 try:
                     msg = f"PingOne Console URL updated: {self.pingone_console_url}"
-                    self.statusBar().showMessage(msg, 3000)
+                    self._set_processing_message(msg, 3000)
                 except Exception:
                     pass
             
@@ -1029,6 +1138,83 @@ class MainWindow(QtWidgets.QMainWindow):
         elif action == "Export":
             # Show export options dialog
             self._show_export_menu()
+
+    def _cancel_operation(self):
+        """Cancel the current import/export operation."""
+        self.cancel_requested = True
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("Cancelling...")
+        self.status_label.setText("Cancellation requested...")
+        try:
+            self._set_processing_message("Cancellation requested...", 3000)
+        except Exception:
+            pass
+    
+    def rollback_last_import(self):
+        """Rollback the last import operation by deleting created users."""
+        if not self.last_import_record:
+            QtWidgets.QMessageBox.information(
+                self, "No Import to Rollback", 
+                "No recent import operation found to rollback."
+            )
+            return
+        
+        created_ids = self.last_import_record.get('created_ids', [])
+        if not created_ids:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing to Rollback",
+                "No users were created in the last import operation."
+            )
+            return
+        
+        reply = QtWidgets.QMessageBox.question(
+            self, "Rollback Import",
+            f"This will delete {len(created_ids)} user(s) created in the last import.\n\n"
+            "This action cannot be undone. Continue?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        
+        # Execute rollback
+        client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        self.prog.show()
+        self.prog.setRange(0, len(created_ids))
+        
+        worker = BulkDeleteWorker(client, created_ids)
+        worker.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
+        worker.signals.status.connect(lambda msg: self._set_processing_message(msg))
+        worker.signals.tps_update.connect(lambda tps_stats: self._update_tps_status_bar(tps_stats, "Rollback"))
+        
+        def on_rollback_done(res):
+            self.prog.hide()
+            deleted = res.get('deleted', 0)
+            total = res.get('total', 0)
+            tps_stats = res.get('tps_stats')
+            
+            if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+                self._show_tps_report(tps_stats, "Rollback")
+            
+            QtWidgets.QMessageBox.information(
+                self, "Rollback Complete",
+                f"Deleted {deleted}/{total} users from last import."
+            )
+            
+            # Clear the import record after successful rollback
+            self.last_import_record = None
+            self.refresh_users()
+        
+        worker.signals.finished.connect(on_rollback_done)
+        worker.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Rollback Error", m)))
+        self.threadpool.start(worker)
+        
+        msg = "Rollback started"
+        try:
+            self._set_processing_message(msg)
+        except Exception:
+            pass
 
     def _get_last_transfer_method(self, direction: str) -> str:
         """Return the last used import or export method for the active profile."""
@@ -1153,6 +1339,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             self.last_source_label.setText(f"Last source: {source}")
+        except Exception:
+            pass
+    
+    def _set_processing_message(self, message: str, timeout: int = 0):
+        """Set a processing/status message in the status bar (appears after Last Source).
+        
+        Args:
+            message: The message to display
+            timeout: Optional timeout in milliseconds to clear the message (0 = no timeout)
+        """
+        try:
+            self.processing_label.setText(message)
+            if timeout > 0:
+                # Clear message after timeout
+                QtCore.QTimer.singleShot(timeout, lambda: self.processing_label.setText(""))
         except Exception:
             pass
 
@@ -1299,6 +1500,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.auto_connect_cb.setChecked(bool(meta.get('auto_connect_last', False)))
             saved_url = (meta.get('pingone_console_url', '') or '').strip()
             self._apply_pingone_console_url(saved_url or DEFAULT_PINGONE_CONSOLE_URL, persist=False)
+            self.prompt_before_delete = bool(meta.get('prompt_before_delete', True))
         except Exception:
             pass
         if self.profile_list.count() > 0:
@@ -1308,12 +1510,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 last = meta.get('last_working_profile')
                 if last and last in profile_names and self.auto_connect_cb.isChecked() and not skip_connect:
                     idx = profile_names.index(last)
+                    # Block signal-driven duplicate load; perform one explicit load.
+                    self.profile_list.blockSignals(True)
                     self.profile_list.setCurrentIndex(idx)
-                    # Ensure profile fields are loaded before attempting connect
-                    try:
-                        self.load_selected_profile()
-                    except Exception:
-                        pass
+                    self.profile_list.blockSignals(False)
+                    self.load_selected_profile()
                     # Delay connect slightly to allow UI to settle
                     QtCore.QTimer.singleShot(250, self.connect_only)
                 else:
@@ -1375,10 +1576,18 @@ class MainWindow(QtWidgets.QMainWindow):
         name = self.profile_list.currentText()
         p = self._read_config()
         if name in p:
+            if name != self._active_profile_name:
+                self._pending_user_tab_refresh = True
+                self._active_profile_name = name
             self.env_id.setText(p[name].get("env_id", ""))
             self.cl_id.setText(p[name].get("cl_id", ""))
             try:
-                self.cl_sec.setText(keyring.get_password("pingone_usermanager", name) or "")
+                if name in self._secret_cache:
+                    secret = self._secret_cache.get(name) or ""
+                else:
+                    secret = keyring.get_password("pingone_usermanager", name) or ""
+                    self._secret_cache[name] = secret
+                self.cl_sec.setText(secret)
             except Exception:
                 # If keyring backend fails, leave secret blank and continue
                 self.cl_sec.setText("")
@@ -1408,10 +1617,13 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             try:
+                self.prompt_before_delete = bool(p[name].get('prompt_before_delete', getattr(self, 'prompt_before_delete', True)))
+            except Exception:
+                pass
+            try:
                 msg = f"Profile loaded: {name}"
-                self.status_label.setText(msg)
                 try:
-                    self.statusBar().showMessage(msg)
+                    self._set_processing_message(msg)
                     self.profile_name_label.setText(f"Profile: {name}")
                 except Exception:
                     pass
@@ -1429,6 +1641,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p[name]['status_show_api_calls'] = bool(getattr(self, 'show_api_calls_cb', QtWidgets.QCheckBox()).isChecked())
             p[name]['hide_raw_http_columns'] = bool(getattr(self, 'hide_raw_http_columns_cb', QtWidgets.QCheckBox()).isChecked())
             p[name]['show_user_update_success'] = bool(getattr(self, 'show_user_update_success_action', QtGui.QAction()).isChecked())
+            p[name]['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
             # also update last working profile so auto-connect will remember this one
             meta = p.get('__meta__', {})
             meta['last_working_profile'] = name
@@ -1437,6 +1650,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(p, f, indent=4)
             try:
                 keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+                self._secret_cache[name] = self.cl_sec.text()
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Keyring Error", f"Failed to save client secret to keyring: {e}\n\nCredentials will not be stored persistently.")
             # reload profiles without triggering another connection attempt
@@ -1451,6 +1665,7 @@ class MainWindow(QtWidgets.QMainWindow):
             meta['auto_connect_last'] = bool(self.auto_connect_cb.isChecked())
             meta['theme'] = self.theme_manager.get_current_theme()
             meta['pingone_console_url'] = self.pingone_console_url
+            meta['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
             cfg['__meta__'] = meta
             with open(self.config_file, 'w') as f:
                 json.dump(cfg, f, indent=4)
@@ -1469,6 +1684,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cfg[name]['status_show_api_calls'] = bool(self.show_api_calls_cb.isChecked())
             cfg[name]['hide_raw_http_columns'] = bool(self.hide_raw_http_columns_cb.isChecked())
             cfg[name]['show_user_update_success'] = bool(self.show_user_update_success_action.isChecked())
+            cfg[name]['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
             with open(self.config_file, 'w') as f:
                 json.dump(cfg, f, indent=4)
         except Exception:
@@ -1486,9 +1702,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Show a small success notification for user updates with mute option."""
         field = str(field_name or '').strip() or '<unknown>'
         msg = f"Updated user {user_id} ({field}) in PingOne."
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg, 5000)
+            self._set_processing_message(msg, 5000)
         except Exception:
             pass
 
@@ -1775,25 +1990,67 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(cfg, f, indent=4)
             return new_name
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "LDAP Connections", f"Failed to edit LDAP connection: {e}")
+            QtWidgets.QMessageBox.critical(self, "Edit LDAP Connection", str(e))
             return connection_name
 
-    def _choose_ldap_connection(self, title: str = "Select LDAP Connection"):
-        """Choose an LDAP connection with inline Edit/Manage actions.
+    def _create_new_ldap_connection(self) -> str:
+        """Create a new LDAP connection using the dialog.
+        
+        Returns the new connection name if created and saved, empty string otherwise.
+        """
+        try:
+            dlg = LDAPConnectionDialog(initial={}, parent=self)
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return ''
+            
+            new_data = dlg.get_connection_data()
+            if not new_data.get('save', True):
+                return ''
+            
+            new_name = new_data.get('name', '').strip()
+            if not new_name:
+                QtWidgets.QMessageBox.warning(self, "Create LDAP Connection", "Connection name cannot be empty.")
+                return ''
+            
+            # Save the new connection
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            conns[new_name] = new_data
+            cfg['ldap_connections'] = conns
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+            
+            return new_name
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Create LDAP Connection", str(e))
+            return ''
+
+    def _choose_db_connection(self, title: str = "Select Database Connection"):
+        """Choose a database connection with inline Edit/Manage/Create actions.
 
         Returns ``(name, conns)`` or ``(None, conns)`` when cancelled.
         """
-        create_opt = "<Create New LDAP Config...>"
+        create_opt = "<Create New Database Connection...>"
         while True:
             cfg = self._read_config()
-            conns = cfg.get('ldap_connections', {})
+            conns = cfg.get('db_connections', {})
+            
+            # Allow creating first connection if none exist
             if not conns:
-                QtWidgets.QMessageBox.information(self, title, "No LDAP connections defined. Please create one first.")
-                self.manage_ldap_connections()
-                cfg = self._read_config()
-                conns = cfg.get('ldap_connections', {})
-                if not conns:
-                    return None, conns
+                create_new = QtWidgets.QMessageBox.question(
+                    self,
+                    title,
+                    "No database connections defined. Would you like to create one now?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                if create_new == QtWidgets.QMessageBox.Yes:
+                    new_conn_name = self._create_new_db_connection()
+                    if new_conn_name:
+                        cfg = self._read_config()
+                        conns = cfg.get('db_connections', {})
+                        if new_conn_name in conns:
+                            return new_conn_name, conns
+                return None, conns
 
             dlg = QtWidgets.QDialog(self)
             dlg.setWindowTitle(title)
@@ -1804,13 +2061,18 @@ class MainWindow(QtWidgets.QMainWindow):
             combo = QtWidgets.QComboBox()
             names = [create_opt] + list(conns.keys())
             combo.addItems(names)
+            # Select first non-create option by default
+            if len(names) > 1:
+                combo.setCurrentIndex(1)
             layout.addWidget(combo)
 
             action = {'value': 'ok'}
 
             action_row = QtWidgets.QHBoxLayout()
+            test_btn = QtWidgets.QPushButton("Test Connection")
             edit_btn = QtWidgets.QPushButton("Edit...")
             manage_btn = QtWidgets.QPushButton("Manage...")
+            action_row.addWidget(test_btn)
             action_row.addWidget(edit_btn)
             action_row.addWidget(manage_btn)
             action_row.addStretch()
@@ -1821,22 +2083,346 @@ class MainWindow(QtWidgets.QMainWindow):
             btns.rejected.connect(dlg.reject)
             layout.addWidget(btns)
 
+            def _test_selected():
+                """Test the selected database connection."""
+                selected = combo.currentText().strip()
+                if not selected or selected == create_opt or selected not in conns:
+                    QtWidgets.QMessageBox.warning(dlg, "Test Connection", "Please select a valid connection to test.")
+                    return
+                
+                conn = conns[selected]
+                try:
+                    from api import db_utils
+                    ok, err = db_utils.test_connection(
+                        conn['type'], conn['host'], conn['port'], 
+                        conn['database'], conn['user'], conn['password'], 
+                        conn.get('driver')
+                    )
+                    if ok:
+                        QtWidgets.QMessageBox.information(
+                            dlg, 
+                            "Test Connection", 
+                            f"Successfully connected to database '{conn['database']}' on {conn['host']}:{conn['port']}"
+                        )
+                    else:
+                        # Show error and offer to edit connection
+                        error_msg = f"Connection test failed.\n\n{err or 'Unknown error'}\n\nWould you like to edit this connection?"
+                        reply = QtWidgets.QMessageBox.question(
+                            dlg,
+                            "Test Connection Failed",
+                            error_msg,
+                            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                        )
+                        if reply == QtWidgets.QMessageBox.Yes:
+                            action['value'] = 'edit'
+                            dlg.accept()
+                except ModuleNotFoundError:
+                    QtWidgets.QMessageBox.critical(
+                        dlg,
+                        "Test Connection",
+                        "SQLAlchemy is not installed. Please run `pip install -r requirements.txt`."
+                    )
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(dlg, "Test Connection", f"Test failed: {str(e)}")
+
             def _edit_selected():
                 action['value'] = 'edit'
                 dlg.accept()
+
+            def _remove_selected():
+                selected = combo.currentText().strip()
+                if not selected or selected == create_opt or selected not in conns:
+                    QtWidgets.QMessageBox.warning(dlg, "Remove Connection", "Please select a valid connection to remove.")
+                    return
+                
+                reply = QtWidgets.QMessageBox.question(
+                    dlg,
+                    "Remove Connection",
+                    f"Are you sure you want to remove the database connection '{selected}'?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                if reply == QtWidgets.QMessageBox.Yes:
+                    action['value'] = 'remove'
+                    dlg.accept()
 
             def _manage_all():
                 action['value'] = 'manage'
                 dlg.accept()
 
+            test_btn.clicked.connect(_test_selected)
             edit_btn.clicked.connect(_edit_selected)
+            remove_btn.clicked.connect(_remove_selected)
             manage_btn.clicked.connect(_manage_all)
 
             if dlg.exec() != QtWidgets.QDialog.Accepted:
                 return None, conns
 
             selected = combo.currentText().strip()
-            if action['value'] == 'manage' or selected == create_opt:
+            
+            # Handle create new option
+            if selected == create_opt:
+                new_conn_name = self._create_new_db_connection()
+                if new_conn_name:
+                    cfg = self._read_config()
+                    conns = cfg.get('db_connections', {})
+                    if new_conn_name in conns:
+                        return new_conn_name, conns
+                continue
+            
+            if action['value'] == 'manage':
+                self.manage_db_connections()
+                continue
+
+            if action['value'] == 'edit':
+                if selected and selected != create_opt and selected in conns:
+                    self._edit_db_connection(selected)
+                continue
+            
+            if action['value'] == 'remove':
+                if selected and selected != create_opt and selected in conns:
+                    # Remove the connection
+                    del conns[selected]
+                    cfg['db_connections'] = conns
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                    QtWidgets.QMessageBox.information(self, "Remove Connection", f"Database connection '{selected}' has been removed.")
+                continue
+
+            if selected and selected in conns:
+                return selected, conns
+
+    def _create_new_db_connection(self) -> str:
+        """Create a new database connection using the dialog.
+        
+        Returns the new connection name if created and saved, empty string otherwise.
+        """
+        try:
+            dlg = DatabaseConnectionDialog(initial={}, parent=self)
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return ''
+            
+            new_data = dlg.get_connection_data()
+            if not new_data.get('save', True):
+                return ''
+            
+            new_name = new_data.get('name', '').strip()
+            if not new_name:
+                QtWidgets.QMessageBox.warning(self, "Create Database Connection", "Connection name cannot be empty.")
+                return ''
+            
+            # Save the new connection
+            cfg = self._read_config()
+            conns = cfg.get('db_connections', {})
+            conns[new_name] = new_data
+            cfg['db_connections'] = conns
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+            
+            return new_name
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Create Database Connection", str(e))
+            return ''
+
+    def _edit_db_connection(self, connection_name: str) -> str:
+        """Edit one database connection and persist changes.
+
+        Returns the updated connection name, or the original name if cancelled.
+        """
+        if not connection_name:
+            return connection_name
+        try:
+            cfg = self._read_config()
+            conns = cfg.get('db_connections', {})
+            if connection_name not in conns:
+                return connection_name
+
+            dlg = DatabaseConnectionDialog(initial=conns.get(connection_name, {}), parent=self)
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return connection_name
+
+            new_data = dlg.get_connection_data()
+            if not new_data.get('save', True):
+                if connection_name in conns:
+                    del conns[connection_name]
+                    cfg['db_connections'] = conns
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                return ''
+
+            new_name = new_data.get('name', '').strip() or connection_name
+            if new_name != connection_name and connection_name in conns:
+                del conns[connection_name]
+            conns[new_name] = new_data
+            cfg['db_connections'] = conns
+            with open(self.config_file, 'w') as f:
+                json.dump(cfg, f, indent=4)
+            return new_name
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Database Connection", f"Failed to edit database connection: {e}")
+            return connection_name
+
+    def _choose_ldap_connection(self, title: str = "Select LDAP Connection"):
+        """Choose an LDAP connection with inline Edit/Manage/Create actions.
+
+        Returns ``(name, conns)`` or ``(None, conns)`` when cancelled.
+        """
+        create_opt = "<Create New LDAP Connection...>"
+        while True:
+            cfg = self._read_config()
+            conns = cfg.get('ldap_connections', {})
+            
+            # Allow creating first connection if none exist
+            if not conns:
+                create_new = QtWidgets.QMessageBox.question(
+                    self,
+                    title,
+                    "No LDAP connections defined. Would you like to create one now?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                if create_new == QtWidgets.QMessageBox.Yes:
+                    new_conn_name = self._create_new_ldap_connection()
+                    if new_conn_name:
+                        cfg = self._read_config()
+                        conns = cfg.get('ldap_connections', {})
+                        if new_conn_name in conns:
+                            return new_conn_name, conns
+                return None, conns
+
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle(title)
+            dlg.setModal(True)
+            layout = QtWidgets.QVBoxLayout(dlg)
+            layout.addWidget(QtWidgets.QLabel("Connection:"))
+
+            combo = QtWidgets.QComboBox()
+            names = [create_opt] + list(conns.keys())
+            combo.addItems(names)
+            # Select first non-create option by default
+            if len(names) > 1:
+                combo.setCurrentIndex(1)
+            layout.addWidget(combo)
+
+            action = {'value': 'ok'}
+
+            action_row = QtWidgets.QHBoxLayout()
+            test_btn = QtWidgets.QPushButton("Test Connection")
+            edit_btn = QtWidgets.QPushButton("Edit...")
+            remove_btn = QtWidgets.QPushButton("Remove")
+            manage_btn = QtWidgets.QPushButton("Manage...")
+            action_row.addWidget(test_btn)
+            action_row.addWidget(edit_btn)
+            action_row.addWidget(remove_btn)
+            action_row.addWidget(manage_btn)
+            action_row.addStretch()
+            layout.addLayout(action_row)
+
+            btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            layout.addWidget(btns)
+
+            def _test_selected():
+                """Test the selected LDAP connection."""
+                selected = combo.currentText().strip()
+                if not selected or selected == create_opt or selected not in conns:
+                    QtWidgets.QMessageBox.warning(dlg, "Test Connection", "Please select a valid connection to test.")
+                    return
+                
+                conn = conns[selected]
+                try:
+                    from api import ldap_utils
+                    ok, err = ldap_utils.test_connection(
+                        conn.get('host', ''),
+                        int(conn.get('port', 0) or 0),
+                        bool(conn.get('use_ssl', False)),
+                        conn.get('bind_dn', ''),
+                        conn.get('password', ''),
+                        conn.get('base_dn', ''),
+                        bool(conn.get('start_tls', False)),
+                        timeout=int(conn.get('timeout', 30) or 30),
+                    )
+                    if ok:
+                        QtWidgets.QMessageBox.information(
+                            dlg,
+                            "Test Connection",
+                            f"Successfully connected to LDAP server '{conn.get('host', '')}' \nBase DN: {conn.get('base_dn', '')}"
+                        )
+                    else:
+                        # Show error and offer to edit connection
+                        error_msg = f"Connection test failed.\n\n{err or 'Unknown error'}\n\nWould you like to edit this connection?"
+                        reply = QtWidgets.QMessageBox.question(
+                            dlg,
+                            "Test Connection Failed",
+                            error_msg,
+                            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                        )
+                        if reply == QtWidgets.QMessageBox.Yes:
+                            action['value'] = 'edit'
+                            dlg.accept()
+                except ModuleNotFoundError:
+                    QtWidgets.QMessageBox.critical(
+                        dlg,
+                        "Test Connection",
+                        "ldap3 is not installed. Please run `pip install -r requirements.txt`."
+                    )
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(dlg, "Test Connection", f"Test failed: {str(e)}")
+
+            def _edit_selected():
+                action['value'] = 'edit'
+                dlg.accept()
+
+            def _remove_selected():
+                selected = combo.currentText().strip()
+                if not selected or selected == create_opt or selected not in conns:
+                    QtWidgets.QMessageBox.warning(dlg, "Remove Connection", "Please select a valid connection to remove.")
+                    return
+                
+                reply = QtWidgets.QMessageBox.question(
+                    dlg,
+                    "Remove Connection",
+                    f"Are you sure you want to remove the LDAP connection '{selected}'?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                )
+                if reply == QtWidgets.QMessageBox.Yes:
+                    action['value'] = 'remove'
+                    dlg.accept()
+
+            def _manage_all():
+                action['value'] = 'manage'
+                dlg.accept()
+
+            test_btn.clicked.connect(_test_selected)
+            edit_btn.clicked.connect(_edit_selected)
+            remove_btn.clicked.connect(_remove_selected)
+            manage_btn.clicked.connect(_manage_all)
+
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
+                return None, conns
+
+            selected = combo.currentText().strip()
+            
+            # Handle create new option
+            
+            if action['value'] == 'remove':
+                if selected and selected != create_opt and selected in conns:
+                    # Remove the connection
+                    del conns[selected]
+                    cfg['ldap_connections'] = conns
+                    with open(self.config_file, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                    QtWidgets.QMessageBox.information(self, "Remove Connection", f"LDAP connection '{selected}' has been removed.")
+                continue
+            if selected == create_opt:
+                new_conn_name = self._create_new_ldap_connection()
+                if new_conn_name:
+                    cfg = self._read_config()
+                    conns = cfg.get('ldap_connections', {})
+                    if new_conn_name in conns:
+                        return new_conn_name, conns
+                continue
+            
+            if action['value'] == 'manage':
                 self.manage_ldap_connections()
                 continue
 
@@ -1856,7 +2442,122 @@ class MainWindow(QtWidgets.QMainWindow):
             if not connection_name or connection_name not in conns:
                 QtWidgets.QMessageBox.critical(self, "Import LDAP", "Connection not found.")
                 return
-            self._import_from_ldap_connection(connection_name, conns[connection_name])
+            
+            conn = conns[connection_name]
+            
+            # Offer to test connection before proceeding
+            test_msg = QtWidgets.QMessageBox(self)
+            test_msg.setWindowTitle("Import from LDAP")
+            test_msg.setText(f"Ready to import from LDAP connection: {connection_name}")
+            test_msg.setInformativeText("Would you like to test the connection before proceeding?")
+            test_msg.setStandardButtons(
+                QtWidgets.QMessageBox.Yes | 
+                QtWidgets.QMessageBox.No | 
+                QtWidgets.QMessageBox.Cancel
+            )
+            test_msg.button(QtWidgets.QMessageBox.Yes).setText("Test Connection")
+            test_msg.button(QtWidgets.QMessageBox.No).setText("Skip Test")
+            test_msg.setDefaultButton(QtWidgets.QMessageBox.No)
+            
+            test_choice = test_msg.exec()
+            
+            if test_choice == QtWidgets.QMessageBox.Cancel:
+                return
+            elif test_choice == QtWidgets.QMessageBox.Yes:
+                # Test the connection
+                try:
+                    from api import ldap_utils
+                    ok, err = ldap_utils.test_connection(
+                        conn.get('host', ''),
+                        int(conn.get('port', 0) or 0),
+                        bool(conn.get('use_ssl', False)),
+                        conn.get('bind_dn', ''),
+                        conn.get('password', ''),
+                        conn.get('base_dn', ''),
+                        bool(conn.get('start_tls', False)),
+                        timeout=int(conn.get('timeout', 30) or 30),
+                    )
+                    if ok:
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Test Connection",
+                            f"Successfully connected to LDAP server '{conn.get('host', '')}'\nBase DN: {conn.get('base_dn', '')}"
+                        )
+                    else:
+                        # Show error and offer to edit connection
+                        error_msg = f"Connection test failed.\n\n{err or 'Unknown error'}\n\nWould you like to edit this connection?"
+                        reply = QtWidgets.QMessageBox.question(
+                            self,
+                            "Test Connection Failed",
+                            error_msg,
+                            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                        )
+                        if reply == QtWidgets.QMessageBox.Yes:
+                            self._edit_ldap_connection(connection_name)
+                            # After editing, ask if they want to retry
+                            retry = QtWidgets.QMessageBox.question(
+                                self,
+                                "Continue Import",
+                                "Connection edited. Would you like to continue with the import?",
+                                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+                            )
+                            if retry != QtWidgets.QMessageBox.Yes:
+                                return
+                            # Reload connection after edit
+                            cfg = self._read_config()
+                            conns = cfg.get('ldap_connections', {})
+                            if connection_name not in conns:
+                                QtWidgets.QMessageBox.warning(self, "Import LDAP", "Connection no longer exists.")
+                                return
+                            conn = conns[connection_name]
+                        else:
+                            return
+                except ModuleNotFoundError:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Test Connection",
+                        "ldap3 is not installed. Please run `pip install -r requirements.txt`."
+                    )
+                    return
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Test Connection", f"Test failed: {str(e)}")
+                    return
+            
+            # Prompt for filter mode (moved outside the test connection block to ensure it always runs)
+            try:
+                # Debug: Log that we're about to show filter dialog
+                import api.client as _api_client
+                _api_client.write_connection_log(f"LDAP Import: About to show filter mode dialog for connection {connection_name}")
+            except Exception:
+                pass
+            
+            try:
+                filter_mode, ok = QtWidgets.QInputDialog.getItem(
+                    self,
+                    "Import Filter",
+                    "Import using:",
+                    ["Default Filter", "Custom Filter"],
+                    editable=False,
+                )
+                if not ok or not filter_mode:
+                    try:
+                        import api.client as _api_client
+                        _api_client.write_connection_log(f"LDAP Import: User cancelled filter mode dialog (ok={ok}, filter_mode={filter_mode})")
+                    except Exception:
+                        pass
+                    return
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Import Filter Error", f"Failed to prompt for filter: {str(e)}")
+                return
+            
+            custom_filter = None
+            filter_saved = False
+            if filter_mode == "Custom Filter":
+                custom_filter, filter_saved = self._prompt_custom_ldap_filter_from_connection(conn, connection_name)
+                if not custom_filter:
+                    return
+            
+            self._import_from_ldap_connection(connection_name, conn, custom_filter, filter_saved)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import LDAP", str(e))
 
@@ -1866,11 +2567,32 @@ class MainWindow(QtWidgets.QMainWindow):
             name, conns = self._choose_ldap_connection("Select LDAP Connection")
             if not name:
                 return
-            self._import_from_ldap_connection(name, conns[name])
+            
+            conn = conns[name]
+            
+            # Prompt for filter mode similar to database import
+            filter_mode, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Import Filter",
+                "Import using:",
+                ["Default Filter", "Custom Filter"],
+                editable=False,
+            )
+            if not ok or not filter_mode:
+                return
+            
+            custom_filter = None
+            filter_saved = False
+            if filter_mode == "Custom Filter":
+                custom_filter, filter_saved = self._prompt_custom_ldap_filter_from_connection(conn, name)
+                if not custom_filter:
+                    return
+            
+            self._import_from_ldap_connection(name, conn, custom_filter, filter_saved)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import LDAP", str(e))
 
-    def _import_from_ldap_connection(self, connection_name: str, conn: dict):
+    def _import_from_ldap_connection(self, connection_name: str, conn: dict, custom_filter: str = None, filter_saved: bool = False):
         """Import users from an LDAP connection using the mapping dialog flow."""
         try:
             from api import ldap_utils
@@ -1896,8 +2618,26 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
             return
 
-        search_filter = conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)'
+        # Use custom filter if provided, otherwise use default filter from connection
+        if custom_filter:
+            search_filter = custom_filter
+        else:
+            search_filter = conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)'
+        
         try:
+            # Show progress dialog while reading LDAP
+            progress = QtWidgets.QProgressDialog(
+                "Reading entries from LDAP directory...",
+                "Cancel",
+                0, 0,
+                self
+            )
+            progress.setWindowTitle("Import from LDAP")
+            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(500)  # Show after 500ms
+            progress.setValue(0)
+            QtWidgets.QApplication.processEvents()
+            
             rows = ldap_utils.get_entries(
                 conn.get('host', ''),
                 int(conn.get('port', 0) or 0),
@@ -1911,13 +2651,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 start_tls=bool(conn.get('start_tls', False)),
                 timeout=int(conn.get('timeout', 30) or 30),
             )
+            
+            progress.close()
         except Exception as e:
+            progress.close()
             QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Failed to read LDAP entries: {e}")
             return
 
         if not rows:
             QtWidgets.QMessageBox.information(self, "Import LDAP", "No matching LDAP entries were found.")
             return
+        
+        # Show status message with entry count
+        self._set_processing_message(f"Read {len(rows)} entries from LDAP directory", 5000)
 
         # Discover populated attributes from first 10 entries
         source_fields = self._discover_populated_attributes_from_entries(rows, max_sample=10)
@@ -1928,12 +2674,17 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             token = asyncio.run(client.get_token())
             if token:
-                pops = asyncio.run(client.get_populations())
+                pops, _ = asyncio.run(client.get_populations())
         except Exception:
             pass
 
         ping_attrs = self._get_pingone_attributes_for_import(client)
         initial_mapping = conn.get('ldap_import_mapping', {})
+        # If using a custom filter, check for filter-specific mapping
+        if custom_filter:
+            by_filter = conn.get('ldap_import_mappings_by_filter', {}) or {}
+            if custom_filter in by_filter:
+                initial_mapping = by_filter.get(custom_filter, initial_mapping)
         dlg = LDAPMappingDialog(
             source_fields,
             ping_attrs,
@@ -1949,12 +2700,130 @@ class MainWindow(QtWidgets.QMainWindow):
         if not mapping:
             QtWidgets.QMessageBox.information(self, "Import LDAP", "No attributes were mapped; import cancelled.")
             return
-        if dlg.remember_mapping():
-            self._save_ldap_connection_settings(connection_name, {'ldap_import_mapping': mapping})
+        if dlg.remember_mapping() or (custom_filter and filter_saved):
+            updates = {'ldap_import_mapping': mapping}
+            # If using a saved custom filter, save the mapping for this specific filter
+            if custom_filter and filter_saved:
+                by_filter = dict(conn.get('ldap_import_mappings_by_filter', {}) or {})
+                by_filter[custom_filter] = mapping
+                updates['ldap_import_mappings_by_filter'] = by_filter
+            self._save_ldap_connection_settings(connection_name, updates)
 
         users = self._convert_rows_to_users(rows, mapping, client, pops)
-        self._set_last_data_source(f"LDAP {connection_name}: {conn.get('base_dn', '')}")
-        self._perform_import_sequence(users, client, pops)
+        # Update data source to include filter info
+        if custom_filter:
+            self._set_last_data_source(f"LDAP {connection_name}: custom filter")
+        else:
+            self._set_last_data_source(f"LDAP {connection_name}: {conn.get('base_dn', '')}")
+        
+        # Prompt for population selection
+        if not pops:
+            pops, default_pop_id = asyncio.run(client.get_populations())
+        else:
+            # Get default population even if we already have pops
+            try:
+                _, default_pop_id = asyncio.run(client.get_populations())
+            except Exception:
+                default_pop_id = None
+        
+        fixed_pop_id = None
+        if pops:
+            # Create population selection dialog
+            pop_dlg = QtWidgets.QDialog(self)
+            pop_dlg.setWindowTitle("Select Population for Import")
+            pop_layout = QtWidgets.QVBoxLayout(pop_dlg)
+            
+            pop_layout.addWidget(QtWidgets.QLabel("Assign all imported users to a population:"))
+            
+            # Combo box and refresh button in horizontal layout
+            pop_combo_layout = QtWidgets.QHBoxLayout()
+            pop_combo = QtWidgets.QComboBox()
+            pop_combo.addItem("<Use population from data>", None)
+            for pop_name, pop_id in sorted(pops.items()):
+                pop_combo.addItem(pop_name, pop_id)
+            pop_combo_layout.addWidget(pop_combo)
+            
+            # Set default to the environment's default population if one exists
+            if default_pop_id:
+                idx = pop_combo.findData(default_pop_id)
+                if idx != -1:
+                    pop_combo.setCurrentIndex(idx)
+            
+            refresh_pop_btn = QtWidgets.QPushButton("Refresh")
+            refresh_pop_btn.setToolTip("Query PingOne for updated population list")
+            
+            def refresh_populations():
+                nonlocal default_pop_id
+                try:
+                    QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                    current_selection = pop_combo.currentData()
+                    token = asyncio.run(client.get_token())
+                    if token:
+                        new_pops, new_default_pop_id = asyncio.run(client.get_populations())
+                        pops.clear()
+                        pops.update(new_pops or {})
+                        default_pop_id = new_default_pop_id
+                        
+                        # Rebuild combo
+                        pop_combo.clear()
+                        pop_combo.addItem("<Use population from data>", None)
+                        for pop_name, pop_id in sorted(pops.items()):
+                            pop_combo.addItem(pop_name, pop_id)
+                        
+                        # Restore selection if still exists, otherwise use default
+                        if current_selection:
+                            idx = pop_combo.findData(current_selection)
+                            if idx != -1:
+                                pop_combo.setCurrentIndex(idx)
+                            elif default_pop_id:
+                                # Selection no longer exists, use default
+                                idx = pop_combo.findData(default_pop_id)
+                                if idx != -1:
+                                    pop_combo.setCurrentIndex(idx)
+                        elif default_pop_id:
+                            # No previous selection, use default
+                            idx = pop_combo.findData(default_pop_id)
+                            if idx != -1:
+                                pop_combo.setCurrentIndex(idx)
+                        
+                        QtWidgets.QMessageBox.information(
+                            pop_dlg,
+                            "Refresh Populations",
+                            f"Successfully refreshed. Found {len(pops)} population(s)."
+                        )
+                    else:
+                        QtWidgets.QMessageBox.warning(
+                            pop_dlg,
+                            "Refresh Populations",
+                            "Failed to authenticate with PingOne."
+                        )
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(
+                        pop_dlg,
+                        "Refresh Populations",
+                        f"Failed to refresh: {str(e)}"
+                    )
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+            
+            refresh_pop_btn.clicked.connect(refresh_populations)
+            pop_combo_layout.addWidget(refresh_pop_btn)
+            
+            pop_layout.addLayout(pop_combo_layout)
+            
+            pop_btns = QtWidgets.QDialogButtonBox(
+                QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+            )
+            pop_btns.accepted.connect(pop_dlg.accept)
+            pop_btns.rejected.connect(pop_dlg.reject)
+            pop_layout.addWidget(pop_btns)
+            
+            if pop_dlg.exec() == QtWidgets.QDialog.Accepted:
+                fixed_pop_id = pop_combo.currentData()
+            else:
+                return  # User cancelled
+        
+        self._perform_import_sequence(users, client, pops, fixed_pop_id=fixed_pop_id)
 
     def export_to_ldap_directory(self):
         """Initiate export flow from PingOne users to LDAP entries."""
@@ -2008,12 +2877,14 @@ class MainWindow(QtWidgets.QMainWindow):
             populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
             metadata_cols = self._get_metadata_columns(self.users_cache)
             
-            # Load saved excluded metadata from profile
+            # Load saved excluded metadata and selected populations from profile
             excluded_metadata = []
+            selected_populations = []
             try:
                 cfg = self._read_config()
                 if profile_name and profile_name in cfg:
                     excluded_metadata = cfg[profile_name].get('export_excluded_metadata', [])
+                    selected_populations = cfg[profile_name].get('export_selected_populations', [])
             except Exception:
                 pass
             
@@ -2026,6 +2897,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 populated_attribute_samples=populated_attr_samples,
                 metadata_columns=metadata_cols,
                 excluded_metadata=excluded_metadata,
+                populations=self.pop_map,
+                selected_populations=selected_populations,
             )
             if export_dlg.exec() != QtWidgets.QDialog.Accepted:
                 return
@@ -2040,6 +2913,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     cfg[profile_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                     cfg[profile_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                     cfg[profile_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
+                    cfg[profile_name]['export_selected_populations'] = opts.get('selected_populations', [])
                     with open(self.config_file, 'w') as f:
                         json.dump(cfg, f, indent=4)
                 except Exception:
@@ -2059,6 +2933,12 @@ class MainWindow(QtWidgets.QMainWindow):
             filtered_out = 0
             if required_attrs:
                 export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
+
+            # Filter by selected populations
+            selected_populations_filter = opts.get('selected_populations', [])
+            pop_filtered_out = 0
+            if selected_populations_filter:
+                export_users, pop_filtered_out = self._filter_users_by_populations(export_users, selected_populations_filter)
 
             sample_entry = None
             ldap_attrs = [
@@ -2209,6 +3089,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 summary += f"; skipped {skipped} users without {rdn_attr}"
             if filtered_out:
                 summary += f"; filtered out {filtered_out} users by populated-attribute filter"
+            if pop_filtered_out:
+                summary += f"; filtered out {pop_filtered_out} users by population filter"
             errors = result.get('errors', []) or []
             if errors:
                 dlg = QtWidgets.QDialog(self)
@@ -2228,9 +3110,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(self, "Export LDAP", summary)
 
             self._set_last_data_source(f"LDAP {name}: {conn.get('base_dn', '')}")
-            self.status_label.setText(summary)
             try:
-                self.statusBar().showMessage(summary)
+                self._set_processing_message(summary)
             except Exception:
                 pass
             
@@ -2242,18 +3123,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def import_from_database(self):
         """Initiate import flow from a database table."""
         try:
-            cfg = self._read_config()
-            dbs = cfg.get('db_connections', {})
-            if not dbs:
-                QtWidgets.QMessageBox.information(self, "Import DB", "No database connections defined. Please create one first.")
-                self.manage_db_connections()
-                cfg = self._read_config(); dbs = cfg.get('db_connections', {})
-                if not dbs:
-                    return
-            # let user select connection
-            names = list(dbs.keys())
-            name, ok = QtWidgets.QInputDialog.getItem(self, "Select Connection", "Connection:", names, editable=False)
-            if not ok or not name:
+            # Use the new connection chooser with create option
+            name, dbs = self._choose_db_connection("Select Database Connection for Import")
+            if not name:
                 return
             conn = dbs[name]
 
@@ -2365,32 +3237,76 @@ class MainWindow(QtWidgets.QMainWindow):
                         by_query[query_text] = mapping
                         updates['db_import_mappings_by_query'] = by_query
                     self._save_db_connection_settings(name, updates)
-                # retrieve rows from the selected table
+                
+                # PHASE 2 OPTIMIZATION: Use streaming reads for large imports
+                # First, count rows to show progress
                 try:
+                    # Count total rows for progress tracking
+                    progress = QtWidgets.QProgressDialog(
+                        "Reading data from database...",
+                        "Cancel",
+                        0, 0,
+                        self
+                    )
+                    progress.setWindowTitle("Import from Database")
+                    progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+                    progress.setMinimumDuration(500)
+                    progress.setValue(0)
+                    QtWidgets.QApplication.processEvents()
+                    
+                    # Collect all users by streaming in batches
+                    all_users = []
+                    batch_count = 0
+                    
                     if source_mode == "Custom Query":
-                        rows = db_utils.get_query_rows(
+                        row_generator = db_utils.stream_query_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver')
+                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            batch_size=1000
                         )
                         self._set_last_data_source(f"DB {name}: custom query")
                     else:
-                        rows = db_utils.get_table_rows(
+                        row_generator = db_utils.stream_table_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver')
+                            conn['user'], conn['password'], table, conn.get('driver'),
+                            batch_size=1000
                         )
                         self._set_last_data_source(f"DB {name}: {table}")
+                    
+                    # Stream and collect all rows
+                    for batch in row_generator:
+                        batch_count += 1
+                        all_users.extend(batch)
+                        progress.setLabelText(f"Reading batch {batch_count} ({len(all_users)} rows so far)...")
+                        QtWidgets.QApplication.processEvents()
+                        
+                        if progress.wasCanceled():
+                            progress.close()
+                            return
+                    
+                    rows = all_users
+                    progress.close()
+                    
                 except Exception as e:
+                    try:
+                        progress.close()
+                    except:
+                        pass
                     QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table rows: {e}")
                     return
+                
                 if not rows:
                     QtWidgets.QMessageBox.information(self, "Import DB", "No rows found in table.")
                     return
+                
+                # Show status message with row count
+                self._set_processing_message(f"Read {len(rows)} rows from database", 5000)
                 # prepare API client and optional population cache
                 pops = {}
                 try:
                     token = asyncio.run(client.get_token())
                     if token:
-                        pops = asyncio.run(client.get_populations())
+                        pops, _ = asyncio.run(client.get_populations())
                 except Exception:
                     pass
                 # convert DB rows to PingOne users
@@ -2578,6 +3494,108 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return query_text, False
 
+    def _prompt_custom_ldap_filter_from_connection(self, conn: dict, connection_name: str):
+        """Prompt for LDAP filter and return (filter_text, filter_saved)."""
+        saved_filters = [f for f in (conn.get('saved_custom_filters', []) or []) if str(f).strip()]
+        default_filter = (conn.get('last_custom_filter') or '').strip() or "(objectClass=person)"
+
+        # If filters were previously saved, let the user start from one.
+        if saved_filters:
+            options = ["<Type new filter>"] + saved_filters
+            selected, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "Saved Custom Filters",
+                f"Select a saved filter for {connection_name} or choose '<Type new filter>':",
+                options,
+                0,
+                False,
+            )
+            if not ok:
+                return "", False
+            if selected and selected != "<Type new filter>":
+                default_filter = selected
+
+        filter_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Custom LDAP Filter",
+            "Enter LDAP filter (e.g., (&(objectClass=person)(ou=users))):",
+            default_filter,
+        )
+        if not ok or not filter_text or not filter_text.strip():
+            return "", False
+
+        filter_text = filter_text.strip()
+
+        # Validate basic LDAP filter syntax
+        if not filter_text.startswith('(') or not filter_text.endswith(')'):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid LDAP Filter",
+                "LDAP filters must be enclosed in parentheses, e.g., (objectClass=person)"
+            )
+            return "", False
+        
+        # Basic validation for balanced parentheses and suspicious patterns
+        if filter_text.count('(') != filter_text.count(')'):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid LDAP Filter",
+                "LDAP filter has unbalanced parentheses"
+            )
+            return "", False
+        
+        # Warn about potentially dangerous patterns (but allow them)
+        suspicious_patterns = ['*)(', ')(', '**']
+        has_suspicious = any(pattern in filter_text for pattern in suspicious_patterns)
+        if has_suspicious:
+            msg_box = QtWidgets.QMessageBox(self)
+            msg_box.setIcon(QtWidgets.QMessageBox.Question)
+            msg_box.setWindowTitle("Unusual LDAP Filter")
+            msg_box.setText("This filter contains unusual patterns that might return unexpected results.\n\nContinue anyway?")
+            
+            # Optional detailed information (collapsible)
+            detailed_info = (
+                "Possible issues:\n"
+                "• Patterns like '*)(', or ')(': May break filter logic or bypass intended restrictions\n"
+                "• Multiple wildcards '**': Can cause poor performance or overly broad matches\n"
+                "• Malformed structure: May return more/fewer entries than expected\n\n"
+                "These patterns could result in:\n"
+                "- Importing the wrong users\n"
+                "- Missing users you intended to import\n"
+                "- Performance degradation or timeouts"
+            )
+            msg_box.setDetailedText(detailed_info)
+            msg_box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            msg_box.setDefaultButton(QtWidgets.QMessageBox.No)
+            
+            reply = msg_box.exec()
+            if reply != QtWidgets.QMessageBox.Yes:
+                return "", False
+
+        if filter_text in saved_filters:
+            self._save_ldap_connection_settings(connection_name, {'last_custom_filter': filter_text})
+            return filter_text, True
+
+        save = QtWidgets.QMessageBox.question(
+            self,
+            "Save Custom Filter",
+            "Save this filter in the selected LDAP connection settings for reuse?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if save == QtWidgets.QMessageBox.Yes:
+            merged = [filter_text] + [f for f in saved_filters if f != filter_text]
+            self._save_ldap_connection_settings(
+                connection_name,
+                {
+                    'last_custom_filter': filter_text,
+                    'saved_custom_filters': merged[:10],
+                },
+            )
+            return filter_text, True
+
+        return filter_text, False
+
     def _get_pingone_attributes_for_import(self, client) -> list:
         """Refresh available PingOne attributes from live user data."""
         attrs = set(self._get_pingone_attributes())
@@ -2762,27 +3780,68 @@ class MainWindow(QtWidgets.QMainWindow):
                         updates['db_import_mappings_by_query'] = by_query
                     self._save_db_connection_settings(connection_name, updates)
                 
-                # Retrieve rows and convert keys
+                # PHASE 2 OPTIMIZATION: Use streaming reads for large imports
                 try:
+                    # Show progress dialog while reading database
+                    progress = QtWidgets.QProgressDialog(
+                        "Reading data from database...",
+                        "Cancel",
+                        0, 0,
+                        self
+                    )
+                    progress.setWindowTitle("Import from Database")
+                    progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+                    progress.setMinimumDuration(500)
+                    progress.setValue(0)
+                    QtWidgets.QApplication.processEvents()
+                    
+                    # Collect all users by streaming in batches
+                    all_users = []
+                    batch_count = 0
+                    
                     if query_text:
-                        rows = db_utils.get_query_rows(
+                        row_generator = db_utils.stream_query_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver')
+                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            batch_size=1000
                         )
                         self._set_last_data_source(f"DB {connection_name}: custom query")
                     else:
-                        rows = db_utils.get_table_rows(
+                        row_generator = db_utils.stream_table_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver')
+                            conn['user'], conn['password'], table, conn.get('driver'),
+                            batch_size=1000
                         )
                         self._set_last_data_source(f"DB {connection_name}: {table}")
+                    
+                    # Stream and collect all rows
+                    for batch in row_generator:
+                        batch_count += 1
+                        all_users.extend(batch)
+                        progress.setLabelText(f"Reading batch {batch_count} ({len(all_users)} rows so far)...")
+                        QtWidgets.QApplication.processEvents()
+                        
+                        if progress.wasCanceled():
+                            progress.close()
+                            return
+                    
+                    rows = all_users
+                    progress.close()
+                    
                 except Exception as e:
+                    try:
+                        progress.close()
+                    except:
+                        pass
                     QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table rows: {e}")
                     return
                 
                 if not rows:
                     QtWidgets.QMessageBox.information(self, "Import DB", "No rows found in table.")
                     return
+                
+                # Show status message with row count
+                self._set_processing_message(f"Read {len(rows)} rows from database", 5000)
                 
                 # Convert row keys to underscore versions
                 converted_rows = []
@@ -2792,32 +3851,127 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 # Prepare client and import
                 pops = {}
+                default_pop_id = None
                 try:
                     token = asyncio.run(client.get_token())
                     if token:
-                        pops = asyncio.run(client.get_populations())
+                        pops, default_pop_id = asyncio.run(client.get_populations())
                 except Exception:
                     token = None
                 
                 users = self._convert_rows_to_users(converted_rows, mapping, client, pops)
-                self._perform_import_sequence(users, client, pops)
+                
+                # Prompt for population selection
+                if not pops:
+                    pops, default_pop_id = asyncio.run(client.get_populations())
+                
+                fixed_pop_id = None
+                if pops:
+                    # Create population selection dialog
+                    pop_dlg = QtWidgets.QDialog(self)
+                    pop_dlg.setWindowTitle("Select Population for Import")
+                    pop_layout = QtWidgets.QVBoxLayout(pop_dlg)
+                    
+                    pop_layout.addWidget(QtWidgets.QLabel("Assign all imported users to a population:"))
+                    
+                    # Combo box and refresh button in horizontal layout
+                    pop_combo_layout = QtWidgets.QHBoxLayout()
+                    pop_combo = QtWidgets.QComboBox()
+                    pop_combo.addItem("<Use population from data>", None)
+                    for pop_name, pop_id in sorted(pops.items()):
+                        pop_combo.addItem(pop_name, pop_id)
+                    pop_combo_layout.addWidget(pop_combo)
+                    
+                    # Set default to the environment's default population if one exists
+                    if default_pop_id:
+                        idx = pop_combo.findData(default_pop_id)
+                        if idx != -1:
+                            pop_combo.setCurrentIndex(idx)
+                    
+                    refresh_pop_btn = QtWidgets.QPushButton("Refresh")
+                    refresh_pop_btn.setToolTip("Query PingOne for updated population list")
+                    
+                    def refresh_populations():
+                        nonlocal default_pop_id
+                        try:
+                            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                            current_selection = pop_combo.currentData()
+                            token = asyncio.run(client.get_token())
+                            if token:
+                                new_pops, new_default_pop_id = asyncio.run(client.get_populations())
+                                pops.clear()
+                                pops.update(new_pops or {})
+                                default_pop_id = new_default_pop_id
+                                
+                                # Rebuild combo
+                                pop_combo.clear()
+                                pop_combo.addItem("<Use population from data>", None)
+                                for pop_name, pop_id in sorted(pops.items()):
+                                    pop_combo.addItem(pop_name, pop_id)
+                                
+                                # Restore selection if still exists, otherwise use default
+                                if current_selection:
+                                    idx = pop_combo.findData(current_selection)
+                                    if idx != -1:
+                                        pop_combo.setCurrentIndex(idx)
+                                    elif default_pop_id:
+                                        # Selection no longer exists, use default
+                                        idx = pop_combo.findData(default_pop_id)
+                                        if idx != -1:
+                                            pop_combo.setCurrentIndex(idx)
+                                elif default_pop_id:
+                                    # No previous selection, use default
+                                    idx = pop_combo.findData(default_pop_id)
+                                    if idx != -1:
+                                        pop_combo.setCurrentIndex(idx)
+                                
+                                QtWidgets.QMessageBox.information(
+                                    pop_dlg,
+                                    "Refresh Populations",
+                                    f"Successfully refreshed. Found {len(pops)} population(s)."
+                                )
+                            else:
+                                QtWidgets.QMessageBox.warning(
+                                    pop_dlg,
+                                    "Refresh Populations",
+                                    "Failed to authenticate with PingOne."
+                                )
+                        except Exception as e:
+                            QtWidgets.QMessageBox.critical(
+                                pop_dlg,
+                                "Refresh Populations",
+                                f"Failed to refresh: {str(e)}"
+                            )
+                        finally:
+                            QtWidgets.QApplication.restoreOverrideCursor()
+                    
+                    refresh_pop_btn.clicked.connect(refresh_populations)
+                    pop_combo_layout.addWidget(refresh_pop_btn)
+                    
+                    pop_layout.addLayout(pop_combo_layout)
+                    
+                    pop_btns = QtWidgets.QDialogButtonBox(
+                        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+                    )
+                    pop_btns.accepted.connect(pop_dlg.accept)
+                    pop_btns.rejected.connect(pop_dlg.reject)
+                    pop_layout.addWidget(pop_btns)
+                    
+                    if pop_dlg.exec() == QtWidgets.QDialog.Accepted:
+                        fixed_pop_id = pop_combo.currentData()
+                    else:
+                        return  # User cancelled
+                
+                self._perform_import_sequence(users, client, pops, fixed_pop_id=fixed_pop_id)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
     def export_to_database(self):
         """Initiate export flow to a database table."""
         try:
-            cfg = self._read_config()
-            dbs = cfg.get('db_connections', {})
-            if not dbs:
-                QtWidgets.QMessageBox.information(self, "Export DB", "No database connections defined. Please create one first.")
-                self.manage_db_connections()
-                cfg = self._read_config(); dbs = cfg.get('db_connections', {})
-                if not dbs:
-                    return
-            names = list(dbs.keys())
-            name, ok = QtWidgets.QInputDialog.getItem(self, "Select Connection", "Connection:", names, editable=False)
-            if not ok or not name:
+            # Use the new connection chooser with create option
+            name, dbs = self._choose_db_connection("Select Database Connection for Export")
+            if not name:
                 return
             conn = dbs[name]
             self._set_last_data_source(f"DB {name}")
@@ -3049,6 +4203,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if required_attrs:
                     export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
                 
+                # Filter by selected populations
+                selected_populations = opts.get('selected_populations', [])
+                pop_filtered_out = 0
+                if selected_populations:
+                    export_users, pop_filtered_out = self._filter_users_by_populations(export_users, selected_populations)
+                
                 # Start TPS tracking
                 tracker = TPSTracker()
                 tracker.start()
@@ -3072,8 +4232,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Update status every 10 users or on last user
                     if idx % 10 == 0 or idx == total_users:
                         try:
-                            self.status_label.setText(f"Preparing {idx}/{total_users} users for export...")
-                            self.statusBar().showMessage(f"Preparing {idx}/{total_users} users for export...")
+                            percentage = int(idx / total_users * 100)
+                            self.status_label.setText(f"Preparing {idx}/{total_users} ({percentage}%) users for export...")
+                            self._set_processing_message(f"Preparing {idx}/{total_users} ({percentage}%) users for export...")
                         except Exception:
                             pass
                 
@@ -3099,7 +4260,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         cols_list = ", ".join(added_cols[:5])
                         if len(added_cols) > 5:
                             cols_list += f" (and {len(added_cols) - 5} more)"
-                        self.statusBar().showMessage(f"Added {len(added_cols)} missing columns to table: {cols_list}", 5000)
+                        self._set_processing_message(f"Added {len(added_cols)} missing columns to table: {cols_list}", 5000)
                     
                     # Insert the data
                     db_utils.insert_rows(
@@ -3109,6 +4270,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     msg = f"Exported {len(rows)} users to table {table}."
                     if filtered_out:
                         msg += f"\n\n(Filtered out {filtered_out} users by populated-attribute filter)"
+                    if pop_filtered_out:
+                        msg += f"\n\n(Filtered out {pop_filtered_out} users by population filter)"
                     QtWidgets.QMessageBox.information(self, "Export DB", msg)
                     # Show TPS report
                     self._show_tps_report(tps_stats, "Database Export")
@@ -3204,7 +4367,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Show connection success in the status area instead of a modal dialog
             self.status_label.setText("Connected")
             try:
-                self.statusBar().showMessage("Connected")
+                self._set_processing_message("Connected")
             except Exception:
                 pass
             # After successful connect, update users/populations counts
@@ -3231,7 +4394,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self.status_label.setText("Connection failed")
             try:
-                self.statusBar().showMessage("Connection failed")
+                self._set_processing_message("Connection failed")
             except Exception:
                 pass
 
@@ -3254,6 +4417,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     keyring.delete_password("pingone_usermanager", name)
                 except Exception:
                     pass
+                self._secret_cache.pop(name, None)
                 self.load_profiles_from_disk()
                 self.status_label.setText(f"Deleted profile {name}")
             except Exception as e:
@@ -3288,6 +4452,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     if secret:
                         keyring.set_password("pingone_usermanager", new_profile, secret)
+                        self._secret_cache[new_profile] = secret
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(
                         self,
@@ -3312,7 +4477,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         # Update status
                         self.status_label.setText(f"Connected to profile '{new_profile}'")
                         try:
-                            self.statusBar().showMessage(f"Connected to profile '{new_profile}'")
+                            self._set_processing_message(f"Connected to profile '{new_profile}'")
                         except Exception:
                             pass
                         # Refresh users
@@ -3356,6 +4521,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     try:
                         if secret:
                             keyring.set_password("pingone_usermanager", new_profile, secret)
+                            self._secret_cache[new_profile] = secret
                     except Exception as e:
                         QtWidgets.QMessageBox.warning(
                             self,
@@ -3384,9 +4550,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     msg_parts.append(f"Created profile '{new_profile}'")
                 
                 msg = "; ".join(msg_parts)
-                self.status_label.setText(msg)
                 try:
-                    self.statusBar().showMessage(msg)
+                    self._set_processing_message(msg)
                 except Exception:
                     pass
             
@@ -3397,6 +4562,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         keyring.delete_password("pingone_usermanager", profile_name)
                     except Exception:
                         pass
+                    self._secret_cache.pop(profile_name, None)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Profile Manager", f"Error opening profile manager: {e}")
 
@@ -3433,11 +4599,15 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.u_table.setSortingEnabled(True)
         msg = f"Loaded {data['user_count']} users, {data['pop_count']} populations"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
+        
+        # Update TPS in status bar if available
+        tps_stats = data.get('tps_stats')
+        if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+            self._update_tps_status_bar(tps_stats, "Refresh")
 
     def _get_all_columns(self, users):
         """Get list of all available columns based on populated attributes in users."""
@@ -3720,37 +4890,96 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def delete_selected_users(self):
         rows = self.u_table.selectionModel().selectedRows()
-        if not rows: return
+        if not rows:
+            current_row = self.u_table.currentRow()
+            if current_row >= 0:
+                self.u_table.selectRow(current_row)
+                rows = self.u_table.selectionModel().selectedRows()
+        if not rows:
+            return
         id_col = self.columns.index('id') if 'id' in self.columns else -1
-        if id_col == -1: return
+        if id_col == -1:
+            return
         uids = [self.u_table.item(r.row(), id_col).text() for r in rows]
-        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete {len(uids)} users?") == QtWidgets.QMessageBox.Yes:
-            client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
-            self.prog.show()
-            w = BulkDeleteWorker(client, uids)
-            w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
+        if not self._confirm_user_deletion(len(uids)):
+            return
+
+        client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        self.cancel_requested = False
+        self.cancel_btn.setText("Cancel Delete")
+        self.cancel_btn.setEnabled(True)
+        self.prog.show()
+        self.cancel_btn.show()
+        
+        # PHASE 2 OPTIMIZATION: Use parallel processing for large deletions
+        concurrency = 5 if len(uids) > 50 else 1  # Use 5 concurrent requests for >50 users
+        w = BulkDeleteWorker(client, uids, cancel_check=lambda: self.cancel_requested, concurrency=concurrency)
+        w.signals.status.connect(lambda msg: self._set_processing_message(msg))
+        w.signals.tps_update.connect(lambda tps_stats: self._update_tps_status_bar(tps_stats, "Delete"))
+        
+        def on_delete_done(res):
+            self.prog.hide()
+            self.cancel_btn.hide()
+            deleted = res.get('deleted', 0)
+            failed = res.get('failed', 0)
+            total = res.get('total', 0)
+            tps_stats = res.get('tps_stats')
+            failed_ids = res.get('failed_ids', [])
             
-            def on_delete_done(res):
-                self.prog.hide()
-                deleted = res.get('deleted', 0)
-                total = res.get('total', 0)
-                tps_stats = res.get('tps_stats')
-                
-                # Show TPS report if available
-                if tps_stats and tps_stats.get('total_transactions', 0) > 0:
-                    self._show_tps_report(tps_stats, "Delete")
-                
-                # Show result message
-                msg = f"Deleted {deleted}/{total} users"
-                try:
-                    self.statusBar().showMessage(msg, 5000)
-                except Exception:
-                    pass
-                
-                self.refresh_users()
+            # Show TPS report if available
+            if tps_stats and tps_stats.get('total_transactions', 0) > 0:
+                self._show_tps_report(tps_stats, "Delete")
             
-            w.signals.finished.connect(on_delete_done)
-            self.threadpool.start(w)
+            # Show result message
+            msg = f"Deleted {deleted}/{total} users"
+            if failed > 0:
+                msg += f" ({failed} failed)"
+            
+            try:
+                self._set_processing_message(msg, 5000)
+            except Exception:
+                pass
+            
+            # Show failed IDs if any
+            if failed_ids:
+                failed_msg = f"{failed} deletion(s) failed.\n\nFailed user IDs:\n" + "\n".join(failed_ids[:20])
+                if len(failed_ids) > 20:
+                    failed_msg += f"\n... and {len(failed_ids) - 20} more"
+                QtWidgets.QMessageBox.warning(self, "Delete Errors", failed_msg)
+            
+            self.refresh_users()
+        
+        w.signals.finished.connect(on_delete_done)
+        self.threadpool.start(w)
+
+    def _confirm_user_deletion(self, count: int) -> bool:
+        """Return True when deletion should proceed based on prompt preference."""
+        if count <= 0:
+            return False
+
+        if not bool(getattr(self, 'prompt_before_delete', True)):
+            return True
+
+        noun = "user" if count == 1 else "users"
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("Delete")
+        box.setText(f"Delete {count} {noun}?")
+        box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        box.setDefaultButton(QtWidgets.QMessageBox.No)
+        prompt_cb = QtWidgets.QCheckBox("Always prompt before deleting users")
+        prompt_cb.setChecked(bool(getattr(self, 'prompt_before_delete', True)))
+        box.setCheckBox(prompt_cb)
+        result = box.exec()
+
+        try:
+            self.prompt_before_delete = bool(prompt_cb.isChecked())
+            self.save_profile_option()
+            self.save_app_settings()
+        except Exception:
+            pass
+
+        return result == QtWidgets.QMessageBox.Yes
 
     def filter_table(self):
         txt = self.search_bar.text().lower()
@@ -3776,17 +5005,15 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 path = api_client.LOG_FILE
             msg = f"API logging enabled - File: {path}"
-            self.status_label.setText(msg)
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
             except Exception:
                 pass
         else:
             api_client.api_logger.info(f"API Logging disabled at {datetime.now()}")
             msg = "API logging disabled"
-            self.status_label.setText(msg)
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
             except Exception:
                 pass
 
@@ -3796,9 +5023,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             api_client.set_credentials_logging(enabled)
             msg = "Credentials logging enabled" if enabled else "Credentials logging disabled"
-            self.status_label.setText(msg)
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
             except Exception:
                 pass
         except Exception as e:
@@ -3844,9 +5070,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 api_client.api_logger.setLevel(getattr(logging, lvl, logging.INFO))
             else:
                 api_client.set_credentials_log_level(lvl)
-            self.status_label.setText(f"{title} set to {lvl}")
             try:
-                self.statusBar().showMessage(f"{title} set to {lvl}")
+                self._set_processing_message(f"{title} set to {lvl}")
             except Exception:
                 pass
         except Exception as e:
@@ -4244,9 +5469,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 api_client.credential_logger.info(f"Test credentials succeeded: env={client.env_id}, client_id={client.client_id}")
             except Exception:
                 pass
-            self.status_label.setText("Credentials valid")
             try:
-                self.statusBar().showMessage("Credentials valid")
+                self._set_processing_message("Credentials valid")
             except Exception:
                 pass
         else:
@@ -4271,9 +5495,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 api_client.credential_logger.error(f"Test credentials failed: env={client.env_id}, client_id={client.client_id} - {err}")
             except Exception:
                 pass
-            self.status_label.setText("Credentials invalid")
             try:
-                self.statusBar().showMessage("Credentials invalid")
+                self._set_processing_message("Credentials invalid")
             except Exception:
                 pass
 
@@ -4356,6 +5579,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(p, f, indent=4)
             try:
                 keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+                self._secret_cache[name] = self.cl_sec.text()
             except Exception as e:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -4374,9 +5598,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if enabled:
             self.use_local_schema_action.setChecked(False)
         msg = "Validation: Server dry-run" if enabled else "Validation: none"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
 
@@ -4385,9 +5608,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if enabled:
             self.use_server_dryrun_action.setChecked(False)
         msg = "Validation: Local schema" if enabled else "Validation: none"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
 
@@ -4408,11 +5630,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.btn_del.setStyleSheet(self.theme_manager.get_delete_button_style())
             self.save_app_settings()
             msg = "Dark mode enabled" if enabled else "Light mode enabled"
-            self.status_label.setText(msg)
-            try:
-                self.statusBar().showMessage(msg)
-            except Exception:
-                pass
+
 
     def load_theme_preference(self):
         """Load and apply saved theme preference from config."""
@@ -4436,9 +5654,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_columns_to_config()
         self.refresh_table()
         msg = "Reverted to default columns"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
 
@@ -4568,6 +5785,41 @@ class MainWindow(QtWidgets.QMainWindow):
                     break
             if keep:
                 filtered.append(user)
+        return filtered, max(0, len(users or []) - len(filtered))
+
+    def _filter_users_by_populations(self, users: list, selected_population_ids: list) -> tuple:
+        """Filter users to those belonging to the selected populations.
+        
+        Args:
+            users: List of user dictionaries
+            selected_population_ids: List of population IDs to include
+            
+        Returns:
+            Tuple of (filtered_users, count_filtered_out)
+        """
+        if not selected_population_ids:
+            return list(users or []), 0
+        
+        pop_id_set = set(str(pid).strip() for pid in selected_population_ids if str(pid).strip())
+        if not pop_id_set:
+            return list(users or []), 0
+        
+        filtered = []
+        for user in users or []:
+            try:
+                pop = user.get('population', {})
+                if isinstance(pop, dict):
+                    user_pop_id = str(pop.get('id', '')).strip()
+                    if user_pop_id in pop_id_set:
+                        filtered.append(user)
+                elif isinstance(pop, str):
+                    # Handle case where population is just an ID string
+                    if str(pop).strip() in pop_id_set:
+                        filtered.append(user)
+            except Exception:
+                # Skip users with malformed population data
+                continue
+        
         return filtered, max(0, len(users or []) - len(filtered))
 
     def _sanitize_db_column_name(self, name: str) -> str:
@@ -4749,7 +6001,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Normalize population values: convert names to IDs where possible
         try:
             if not pops:
-                pops = asyncio.run(client.get_populations())
+                pops, _ = asyncio.run(client.get_populations())
             for u in users:
                 if fixed_pop_id:
                     u['population'] = {'id': fixed_pop_id}
@@ -4892,7 +6144,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         try:
             if coerced_total:
-                self.statusBar().showMessage(
+                self._set_processing_message(
                     f"Import normalization: converted {coerced_total} numeric scalar value(s) to strings.",
                     5000,
                 )
@@ -4950,11 +6202,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Start create worker (if any) and then update worker (if any)
-        self.prog.show(); self.prog.setRange(0, len(create_users) if create_users else (len(update_pairs) or 0))
+        self.cancel_requested = False
+        self.cancel_btn.setText("Cancel Import")
+        self.cancel_btn.setEnabled(True)
+        self.prog.show()
+        self.cancel_btn.show()
+        self.prog.setRange(0, len(create_users) if create_users else (len(update_pairs) or 0))
         # Map population names to IDs if provided in CSV or apply fixed population
         try:
             if not pops:
-                pops = asyncio.run(client.get_populations())
+                pops, _ = asyncio.run(client.get_populations())
             # convert any user with population.name -> population.id
             for u in users:
                 if fixed_pop_id:
@@ -4977,16 +6234,31 @@ class MainWindow(QtWidgets.QMainWindow):
                             u['population'] = {'id': pops[val]}
         except Exception:
             pass
-        w = BulkCreateWorker(client, users)
+        
+        # PHASE 2 OPTIMIZATION: Use parallel processing for large imports
+        concurrency = 5 if len(create_users) > 100 else 1  # Use 5 concurrent requests for >100 users
+        w = BulkCreateWorker(client, create_users, cancel_check=lambda: self.cancel_requested, concurrency=concurrency)
         w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
-        w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
+        w.signals.status.connect(lambda msg: self._set_processing_message(msg))
+        w.signals.tps_update.connect(lambda tps_stats: self._update_tps_status_bar(tps_stats, "Import"))
         def on_done(res):
             self.prog.hide()
+            self.cancel_btn.hide()
             created = res.get('created', 0)
             updated_on_retry = res.get('updated_on_retry', 0)
             total = res.get('total', 0)
             errors = res.get('errors', []) or []
             tps_stats = res.get('tps_stats')
+            created_ids = res.get('created_ids', [])
+            
+            # Track this import for rollback
+            if created_ids:
+                self.last_import_record = {
+                    'created_ids': created_ids,
+                    'timestamp': datetime.now().isoformat(),
+                    'created_count': created,
+                }
+            
             summary = f"Created {created}/{total} users"
             if updated_on_retry:
                 summary += f"; Updated on retry {updated_on_retry}"
@@ -5046,12 +6318,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._include_import_attributes_in_grid(users)
             self.refresh_users()
         w.signals.finished.connect(on_done)
-        w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
+        w.signals.error.connect(lambda m: (self.prog.hide(), self.cancel_btn.hide(), QtWidgets.QMessageBox.critical(self, "Import Error", m)))
         self.threadpool.start(w)
         msg = f"Import started: {len(users)} users"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
 
@@ -5275,9 +6546,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             self.save_columns_to_config(show_notification=True)
             self.refresh_table()
             msg = "Column selection updated"
-            self.status_label.setText(msg)
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
             except Exception:
                 pass
 
@@ -5311,12 +6581,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
         metadata_cols = self._get_metadata_columns(self.users_cache)
         
-        # Load saved excluded metadata from profile
+        # Load saved excluded metadata and selected populations from profile
         excluded_metadata = []
+        selected_populations = []
         try:
             cfg = self._read_config()
             if prof_name and prof_name in cfg:
                 excluded_metadata = cfg[prof_name].get('export_excluded_metadata', [])
+                selected_populations = cfg[prof_name].get('export_selected_populations', [])
         except Exception:
             pass
         
@@ -5329,6 +6601,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             populated_attribute_samples=populated_attr_samples,
             metadata_columns=metadata_cols,
             excluded_metadata=excluded_metadata,
+            populations=self.pop_map,
+            selected_populations=selected_populations,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -5342,6 +6616,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 cfg[prof_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                 cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
+                cfg[prof_name]['export_selected_populations'] = opts.get('selected_populations', [])
                 with open(self.config_file, 'w') as f:
                     json.dump(cfg, f, indent=4)
             except Exception:
@@ -5381,6 +6656,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             if required_attrs:
                 export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
 
+            # Filter by selected populations
+            selected_populations = opts.get('selected_populations', [])
+            pop_filtered_out = 0
+            if selected_populations:
+                export_users, pop_filtered_out = self._filter_users_by_populations(export_users, selected_populations)
+
             import csv
             # Start TPS tracking
             tracker = TPSTracker()
@@ -5396,8 +6677,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     # Update status every 10 rows or on last row
                     if idx % 10 == 0 or idx == total_users:
                         try:
-                            self.status_label.setText(f"Exporting {idx}/{total_users} users...")
-                            self.statusBar().showMessage(f"Exporting {idx}/{total_users} users...")
+                            percentage = int(idx / total_users * 100)
+                            self.status_label.setText(f"Exporting {idx}/{total_users} ({percentage}%) users...")
+                            self._set_processing_message(f"Exporting {idx}/{total_users} ({percentage}%) users...")
                         except Exception:
                             pass
             
@@ -5409,9 +6691,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             msg = f"Exported {len(export_users)} users to {path}"
             if filtered_out:
                 msg += f" (filtered out {filtered_out} by populated-attribute filter)"
-            self.status_label.setText(msg)
+            if pop_filtered_out:
+                msg += f" (filtered out {pop_filtered_out} by population filter)"
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
             except Exception:
                 pass
             
@@ -5449,12 +6732,14 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         populated_attr_samples = self._get_populated_export_attribute_samples(self.users_cache, populated_attrs)
         metadata_cols = self._get_metadata_columns(self.users_cache)
         
-        # Load saved excluded metadata from profile
+        # Load saved excluded metadata and selected populations from profile
         excluded_metadata = []
+        selected_populations = []
         try:
             cfg = self._read_config()
             if prof_name and prof_name in cfg:
                 excluded_metadata = cfg[prof_name].get('export_excluded_metadata', [])
+                selected_populations = cfg[prof_name].get('export_selected_populations', [])
         except Exception:
             pass
         
@@ -5467,6 +6752,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             populated_attribute_samples=populated_attr_samples,
             metadata_columns=metadata_cols,
             excluded_metadata=excluded_metadata,
+            populations=self.pop_map,
+            selected_populations=selected_populations,
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
@@ -5479,6 +6766,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 cfg[prof_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                 cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
+                cfg[prof_name]['export_selected_populations'] = opts.get('selected_populations', [])
                 with open(self.config_file, 'w') as f:
                     json.dump(cfg, f, indent=4)
             except Exception:
@@ -5516,6 +6804,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             if required_attrs:
                 export_users, filtered_out = self._filter_users_by_populated_attributes(export_users, required_attrs)
 
+            # Filter by selected populations
+            selected_populations = opts.get('selected_populations', [])
+            pop_filtered_out = 0
+            if selected_populations:
+                export_users, pop_filtered_out = self._filter_users_by_populations(export_users, selected_populations)
+
             # Start TPS tracking
             tracker = TPSTracker()
             tracker.start()
@@ -5546,8 +6840,9 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     # Update status every 10 users or on last user
                     if idx % 10 == 0 or idx == total_users:
                         try:
-                            self.status_label.setText(f"Exporting {idx}/{total_users} users...")
-                            self.statusBar().showMessage(f"Exporting {idx}/{total_users} users...")
+                            percentage = int(idx / total_users * 100)
+                            self.status_label.setText(f"Exporting {idx}/{total_users} ({percentage}%) users...")
+                            self._set_processing_message(f"Exporting {idx}/{total_users} ({percentage}%) users...")
                         except Exception:
                             pass
             
@@ -5559,9 +6854,10 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             msg = f"Exported {len(export_users)} users to {path}"
             if filtered_out:
                 msg += f" (filtered out {filtered_out} by populated-attribute filter)"
-            self.status_label.setText(msg)
+            if pop_filtered_out:
+                msg += f" (filtered out {pop_filtered_out} by population filter)"
             try:
-                self.statusBar().showMessage(msg)
+                self._set_processing_message(msg)
                 # Show TPS report
                 self._show_tps_report(tps_stats, "LDIF Export")
             except Exception:
@@ -5762,7 +7058,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             try:
                 token = asyncio.run(client.get_token())
                 if token:
-                    pops = asyncio.run(client.get_populations())
+                    pops, _ = asyncio.run(client.get_populations())
             except Exception:
                 token = None
 
@@ -5795,7 +7091,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                                                initial_fixed_pop_id=initial_fixed,
                                                initial_fixed_enabled=initial_enabled,
                                                pingone_attrs=pingone_attrs,
-                                               sample_row=(raw_rows[0] if raw_rows else None))
+                                               sample_row=(raw_rows[0] if raw_rows else None),
+                                               client=client)
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:
                 return
             mapping, fixed_pop_id, fixed_enabled, remember = map_dialog.get_mapping()
@@ -5865,7 +7162,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             try:
                 token = asyncio.run(client.get_token())
                 if token:
-                    pops = asyncio.run(client.get_populations())
+                    pops, _ = asyncio.run(client.get_populations())
             except Exception:
                 token = None
             # Pass saved mappings for profile to LDIF mapping dialog as well
@@ -5897,6 +7194,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 initial_fixed_enabled=initial_enabled,
                 pingone_attrs=pingone_attrs,
                 sample_row=first_sample,
+                client=client,
             )
             if map_dialog.exec() != QtWidgets.QDialog.Accepted:
                 return
@@ -5994,7 +7292,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             from contextlib import suppress
             with suppress(Exception):
                 if not pops:
-                    pops = asyncio.run(client.get_populations())
+                    pops, _ = asyncio.run(client.get_populations())
                 # Pre-check for username collisions against existing users and within the import set
                 # Refresh existing usernames from the server to avoid stale cache
                 existing_user_map = {}
@@ -6146,7 +7444,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 # Map population names to IDs for both creates and updates
                 try:
                     if not pops:
-                        pops = asyncio.run(client.get_populations())
+                        pops, _ = asyncio.run(client.get_populations())
                     targets = []
                     if create_users:
                         targets.extend(create_users)
@@ -6177,7 +7475,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     self.prog.setRange(0, len(create_users))
                     w = BulkCreateWorker(client, create_users)
                     w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
-                    w.signals.status.connect(lambda msg: (self.status_label.setText(msg), self.statusBar().showMessage(msg)))
+                    w.signals.status.connect(lambda msg: self._set_processing_message(msg))
 
                     def on_done(res):
                         created = res.get('created', 0)
@@ -6188,6 +7486,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
                         def _on_updates_done(res2):
                             self.prog.hide()
+                            self.cancel_btn.hide()
                             updated = res2.get('updated', 0)
                             total_upd = res2.get('total', 0)
                             upd_errors = res2.get('errors', []) or []
@@ -6266,11 +7565,15 @@ See Configuration Help and User Management Help from the Help menu for detailed 
 
                         if update_pairs:
                             self.prog.show()
+                            self.cancel_btn.show()
                             self.prog.setRange(0, len(update_pairs))
-                            upd_w = BulkUpdateWorker(client, update_pairs)
+                            # PHASE 2 OPTIMIZATION: Use parallel processing for large updates
+                            concurrency = 5 if len(update_pairs) > 100 else 1
+                            upd_w = BulkUpdateWorker(client, update_pairs, cancel_check=lambda: self.cancel_requested, concurrency=concurrency)
                             upd_w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
+                            upd_w.signals.tps_update.connect(lambda tps_stats: self._update_tps_status_bar(tps_stats, "Update"))
                             upd_w.signals.finished.connect(_on_updates_done)
-                            upd_w.signals.error.connect(lambda m: (self.prog.hide(), QtWidgets.QMessageBox.critical(self, "Update Error", m)))
+                            upd_w.signals.error.connect(lambda m: (self.prog.hide(), self.cancel_btn.hide(), QtWidgets.QMessageBox.critical(self, "Update Error", m)))
                             self.threadpool.start(upd_w)
                         else:
                             _on_updates_done({"updated": 0, "total": 0, "errors": []})
@@ -6283,12 +7586,17 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     # no creates; run updates directly
                     if update_pairs:
                         self.prog.show()
+                        self.cancel_btn.show()
                         self.prog.setRange(0, len(update_pairs))
-                        upd_w = BulkUpdateWorker(client, update_pairs)
+                        # PHASE 2 OPTIMIZATION: Use parallel processing for large updates
+                        concurrency = 5 if len(update_pairs) > 100 else 1
+                        upd_w = BulkUpdateWorker(client, update_pairs, cancel_check=lambda: self.cancel_requested, concurrency=concurrency)
+                        upd_w.signals.tps_update.connect(lambda tps_stats: self._update_tps_status_bar(tps_stats, "Update"))
                         upd_w.signals.progress.connect(lambda cur, tot: self.prog.setValue(cur))
 
                         def _on_updates_done2(res):
                             self.prog.hide()
+                            self.cancel_btn.hide()
                             updated = res.get('updated', 0)
                             total_upd = res.get('total', 0)
                             upd_errors = res.get('errors', []) or []
@@ -6333,9 +7641,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                         msg = f"Import started: {len(update_pairs)} users to update"
                     else:
                         QtWidgets.QMessageBox.information(self, "Import", "No users to create or update.")
-                self.status_label.setText(msg)
                 try:
-                    self.statusBar().showMessage(msg)
+                    self._set_processing_message(msg)
                 except Exception:
                     pass
         except Exception as e:
@@ -6353,9 +7660,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             self.selected_columns.extend(added)
             self.save_columns_to_config()
             msg = f"Added {len(added)} imported attribute column(s) to grid"
-            self.status_label.setText(msg)
             try:
-                self.statusBar().showMessage(msg, 4000)
+                self._set_processing_message(msg, 4000)
             except Exception:
                 pass
         except Exception:
@@ -6375,7 +7681,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 msg = f"Column layout saved for profile '{name}'"
                 self.status_label.setText(msg)
                 try:
-                    self.statusBar().showMessage(msg, 3000)
+                    self._set_processing_message(msg, 3000)
                 except Exception:
                     pass
 
@@ -6392,6 +7698,87 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         except Exception:
             pass
 
+    def _log_tps_statistics(self, tps_stats: dict, operation_name: str = "Operation"):
+        """Log TPS statistics to a CSV file for reporting purposes.
+        
+        Args:
+            tps_stats: Dictionary with TPS statistics from TPSTracker
+            operation_name: Name of the operation (e.g., "Import", "Export", "Delete")
+        """
+        if not tps_stats:
+            return
+        
+        try:
+            from datetime import datetime
+            import os
+            import csv
+            
+            # Get statistics
+            total_transactions = tps_stats.get('total_transactions', 0)
+            total_duration = tps_stats.get('total_duration', 0.0)
+            average_tps = tps_stats.get('average_tps', 0.0)
+            mean_tps = tps_stats.get('mean_tps', 0.0)
+            peak_tps = tps_stats.get('peak_tps', 0.0)
+            start_time = tps_stats.get('start_time')
+            end_time = tps_stats.get('end_time')
+            
+            # Format timestamps
+            start_str = ""
+            end_str = ""
+            if start_time:
+                start_str = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
+            if end_time:
+                end_str = datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Current timestamp for log entry
+            log_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # CSV file path
+            csv_file = "performance_stats.csv"
+            
+            # Check if file exists to determine if we need to write header
+            write_header = not os.path.exists(csv_file)
+            
+            # Write to CSV file
+            with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+                csv_writer = csv.writer(f)
+                
+                if write_header:
+                    # Write CSV header
+                    csv_writer.writerow([
+                        'log_timestamp',
+                        'operation',
+                        'start_time',
+                        'end_time',
+                        'total_transactions',
+                        'total_duration_seconds',
+                        'average_tps',
+                        'mean_tps',
+                        'peak_tps'
+                    ])
+                
+                # Write data row
+                csv_writer.writerow([
+                    log_timestamp,
+                    operation_name,
+                    start_str,
+                    end_str,
+                    total_transactions,
+                    f"{total_duration:.2f}",
+                    f"{average_tps:.2f}",
+                    f"{mean_tps:.2f}",
+                    f"{peak_tps:.0f}"
+                ])
+                
+        except Exception as e:
+            # Silently fail if logging doesn't work - don't interrupt the user's workflow
+            try:
+                import api.client as api_client
+                if api_client.API_LOGGING_ENABLED:
+                    api_client.api_logger.error(f"Failed to log TPS statistics: {e}")
+            except Exception:
+                pass
+    
     def _show_tps_report(self, tps_stats: dict, operation_name: str = "Operation"):
         """Display a TPS (Transactions Per Second) report dialog.
         
@@ -6402,11 +7789,28 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         if not tps_stats:
             return
         
+        # Log statistics to file
+        self._log_tps_statistics(tps_stats, operation_name)
+        
+        # Update status bar with last TPS
+        self._update_tps_status_bar(tps_stats, operation_name)
+        
         total_transactions = tps_stats.get('total_transactions', 0)
         total_duration = tps_stats.get('total_duration', 0.0)
         average_tps = tps_stats.get('average_tps', 0.0)
         mean_tps = tps_stats.get('mean_tps', 0.0)
         peak_tps = tps_stats.get('peak_tps', 0.0)
+        start_time = tps_stats.get('start_time')
+        end_time = tps_stats.get('end_time')
+        
+        # Format start/end times
+        from datetime import datetime
+        start_str = ""
+        end_str = ""
+        if start_time:
+            start_str = datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
+        if end_time:
+            end_str = datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')
         
         # Create dialog
         dlg = QtWidgets.QDialog(self)
@@ -6418,9 +7822,12 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         title.setAlignment(QtCore.Qt.AlignCenter)
         lay.addWidget(title)
         
-        # Statistics
+        # Statistics - include start/end times
         stats_text = f"""
 <table style="margin: 10px;">
+<tr><td><b>Start Time:</b></td><td>{start_str}</td></tr>
+<tr><td><b>End Time:</b></td><td>{end_str}</td></tr>
+<tr><td></td><td></td></tr>
 <tr><td><b>Total Transactions:</b></td><td>{total_transactions}</td></tr>
 <tr><td><b>Total Duration:</b></td><td>{total_duration:.2f} seconds</td></tr>
 <tr><td></td><td></td></tr>
@@ -6443,15 +7850,69 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         explanation.setTextFormat(QtCore.Qt.RichText)
         explanation.setWordWrap(True)
         lay.addWidget(explanation)
+
+        # Countdown indicator for auto-close behavior.
+        countdown_seconds = 5
+        countdown_label = QtWidgets.QLabel()
+        countdown_label.setTextFormat(QtCore.Qt.RichText)
+        countdown_label.setAlignment(QtCore.Qt.AlignCenter)
+        lay.addWidget(countdown_label)
         
         # Close button
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
         btns.accepted.connect(dlg.accept)
         lay.addWidget(btns)
+
+        # Auto-close the TPS report after 5 seconds and update visible countdown.
+        countdown_timer = QtCore.QTimer(dlg)
+        countdown_timer.setInterval(1000)
+
+        def _format_countdown_text(seconds: int) -> str:
+            second_word = "second" if seconds == 1 else "seconds"
+            if seconds <= 2:
+                return (
+                    f"<b><span style='color:#b00020;'>"
+                    f"This report will close automatically in {seconds} {second_word}."
+                    f"</span></b>"
+                )
+            return f"<i>This report will close automatically in {seconds} {second_word}.</i>"
+
+        def _update_countdown() -> None:
+            nonlocal countdown_seconds
+            countdown_seconds -= 1
+            if countdown_seconds <= 0:
+                countdown_timer.stop()
+                dlg.accept()
+                return
+            countdown_label.setText(_format_countdown_text(countdown_seconds))
+
+        countdown_label.setText(_format_countdown_text(countdown_seconds))
+        countdown_timer.timeout.connect(_update_countdown)
+        countdown_timer.start()
         
-        # Size the dialog
-        dlg.resize(450, 300)
         dlg.exec()
+    
+    def _update_tps_status_bar(self, tps_stats: dict, operation_name: str = "Operation"):
+        """Update the status bar with the last TPS statistics.
+        
+        Args:
+            tps_stats: Dictionary with TPS statistics from TPSTracker
+            operation_name: Name of the operation (e.g., "Import", "Export")
+        """
+        if not tps_stats:
+            return
+        
+        self.last_tps_stats = tps_stats
+        average_tps = tps_stats.get('average_tps', 0.0)
+        
+        # Format the TPS display for the status bar
+        tps_text = f"Last TPS ({operation_name}): {average_tps:.2f} trans/sec"
+        self.last_tps_label.setText(tps_text)
+        try:
+            # Ensure the label is visible
+            self.last_tps_label.show()
+        except Exception:
+            pass
 
     def on_connection_error(self, message: str):
         self.prog.hide()
@@ -6571,9 +8032,8 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         """Update the selected columns order after user reorders table columns."""
         self._capture_current_column_layout()
         msg = "Column order updated"
-        self.status_label.setText(msg)
         try:
-            self.statusBar().showMessage(msg)
+            self._set_processing_message(msg)
         except Exception:
             pass
 

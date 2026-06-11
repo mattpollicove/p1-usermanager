@@ -36,3 +36,18 @@ such changes are made. Each entry should include:
     - `Configuration Help` remains in the Help menu only.
     - Runtime preference controls live in the settings dialog instead of a separate Preferences menu.
 - **Notes**: On macOS, `Preferences...` should use the application menu role. Other platforms will show the same dialog from the File menu unless later moved into a platform-specific menu layout.
+
+- **Date**: 2026-06-11
+- **Files changed**: INSTALL.md, README.md
+- **Platforms affected**: macOS, Windows, Linux
+- **Description**: Documented JDBC driver filesystem layout, vendor jar filenames, vendor download URLs, and local runtime setup details for JDBC database connectivity.
+  - Old:
+    - JDBC support was documented at a high level with vendor URLs only.
+  - New:
+    - Recommended repo layout:
+      - `drivers/mssql/mssql-jdbc-13.4.0.jre11.jar`
+      - `drivers/mysql/mysql-connector-j-9.0.0.jar`
+      - `drivers/oracle/ojdbc11.jar`
+    - Added macOS `JAVA_HOME` shell configuration example.
+    - Added local verification commands for Java, JPype, and JDBC jar loading.
+- **Notes**: The `JAVA_HOME` example is macOS/Homebrew-specific. Windows and Linux packaging or setup guides may need platform-native equivalents if local JVM discovery differs there.

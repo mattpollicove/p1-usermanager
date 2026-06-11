@@ -1,11 +1,18 @@
 # PingOne UserManager - Development Specification
 
-**Version:** 0.6 (Alpha)  
-**Last Updated:** March 12, 2026  
+**Version:** 0.8 (Alpha)  
+**Last Updated:** June 11, 2026  
 **Status:** Active Development  
 **Focus Area:** Database Connectivity Features
 
 ⚠️ **Alpha Release Notice**: This version is under active development with emphasis on database import/export functionality. Core user management features are stable, but database connectivity is being refined based on user feedback.
+
+### Database Connectivity Policy (Current)
+- Database import/export is JDBC-only.
+- Supported database backends: MSSQL, MySQL, Oracle.
+- Required Python packages: `jaydebeapi`, `JPype1`.
+- A vendor JDBC `.jar` file must be provided in the DB connection "Driver Path" field.
+- ODBC and non-JDBC DBAPI driver paths are not supported.
 
 ---
 
@@ -57,6 +64,7 @@ p1-usermanager/
 | **GUI Framework** | PySide6 (Qt for Python) | 6.x | Cross-platform native UI |
 | **HTTP Client** | httpx | Latest | Async HTTP operations |
 | **Credential Storage** | keyring | Latest | OS-native secure storage |
+| **DB Connectivity** | JDBC via jaydebeapi + JPype1 | Latest | MSSQL/MySQL/Oracle import-export |
 | **Language** | Python | 3.9+ | Application logic |
 | **Threading** | QThreadPool + QRunnable | Qt built-in | Non-blocking operations |
 | **Async Runtime** | asyncio | Python stdlib | Async HTTP operations |

@@ -2,6 +2,8 @@ pyside6
 httpx
 keyring
 sqlalchemy
-pymysql
 ldap3
-# pymssql is optional for MSSQL support but may require additional system libraries.
+# JDBC-only database support for MSSQL, MySQL, and Oracle
+# Requires vendor JDBC .jar file configured in Driver Path
+jaydebeapi
+JPype1

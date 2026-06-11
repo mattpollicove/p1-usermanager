@@ -7,9 +7,10 @@ table columns, and viewing/editing JSON payloads.
 import json
 import copy
 import sys
+import re
 import platform
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 # Add project root to sys.path when running this file directly so
 # `from ui.dialogs` and other absolute imports resolve in editor-run mode.
@@ -713,6 +714,7 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         initial_fixed_enabled=None,
         pingone_attrs: Optional[List[str]] = None,
         sample_row: Optional[dict] = None,
+        client=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("CSV Mapping")
@@ -737,6 +739,8 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         self.headers = list(headers or [])
         self.pop_map = pop_map or {}
         self.sample_row = sample_row or {}
+        self.client = client
+        self.initial_fixed_pop_id = initial_fixed_pop_id
 
         base_attrs = [
             'username', 'email', 'name.given', 'name.middle', 'name.family',
@@ -788,6 +792,8 @@ class AttributeMappingDialog(QtWidgets.QDialog):
         options_group = QtWidgets.QGroupBox("Import Options")
         options_form = QtWidgets.QFormLayout(options_group)
 
+        # Population combo with refresh button
+        pop_layout = QtWidgets.QHBoxLayout()
         self.population_fixed = QtWidgets.QComboBox()
         self.population_fixed.addItem("<Use mapped CSV column>", None)
         for name, pid in sorted(self.pop_map.items(), key=lambda x: x[0].lower()):
@@ -796,6 +802,16 @@ class AttributeMappingDialog(QtWidgets.QDialog):
             idx = self.population_fixed.findData(initial_fixed_pop_id)
             if idx != -1:
                 self.population_fixed.setCurrentIndex(idx)
+        pop_layout.addWidget(self.population_fixed)
+        
+        refresh_btn = QtWidgets.QPushButton("Refresh")
+        refresh_btn.setToolTip("Query PingOne for updated population list")
+        refresh_btn.clicked.connect(self._refresh_populations)
+        # Only enable if client is available
+        refresh_btn.setEnabled(self.client is not None)
+        pop_layout.addWidget(refresh_btn)
+        
+        options_form.addRow("Fixed population:", pop_layout)
 
         self.enabled_field = QtWidgets.QComboBox()
         self.enabled_field.addItem("<Use mapped CSV column>", None)
@@ -887,6 +903,68 @@ class AttributeMappingDialog(QtWidgets.QDialog):
             if self._normalize_mapping_token(attr) == normalized_source:
                 return attr
         return ''
+
+    def _refresh_populations(self):
+        """Query PingOne for updated population list and refresh the combo box."""
+        if not self.client:
+            QtWidgets.QMessageBox.warning(
+                self, 
+                "Refresh Populations", 
+                "No API client available. Cannot refresh populations."
+            )
+            return
+        
+        try:
+            # Get current selection to try to restore it
+            current_pop_id = self.population_fixed.currentData()
+            
+            # Show wait cursor
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+            
+            # Query PingOne for updated populations
+            import asyncio
+            token = asyncio.run(self.client.get_token())
+            if token:
+                new_pops, _ = asyncio.run(self.client.get_populations())
+                self.pop_map = new_pops or {}
+                
+                # Rebuild the combo box
+                self.population_fixed.clear()
+                self.population_fixed.addItem("<Use mapped CSV column>", None)
+                for name, pid in sorted(self.pop_map.items(), key=lambda x: x[0].lower()):
+                    self.population_fixed.addItem(f"{name} ({pid})", pid)
+                
+                # Try to restore previous selection
+                if current_pop_id:
+                    idx = self.population_fixed.findData(current_pop_id)
+                    if idx != -1:
+                        self.population_fixed.setCurrentIndex(idx)
+                    else:
+                        # Previous selection no longer exists, try to restore from initial
+                        if self.initial_fixed_pop_id:
+                            idx = self.population_fixed.findData(self.initial_fixed_pop_id)
+                            if idx != -1:
+                                self.population_fixed.setCurrentIndex(idx)
+                
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Refresh Populations",
+                    f"Successfully refreshed population list. Found {len(self.pop_map)} population(s)."
+                )
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Refresh Populations",
+                    "Failed to authenticate with PingOne. Please check your credentials."
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Refresh Populations",
+                f"Failed to refresh populations: {str(e)}"
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
 
     def get_mapping(self):
         mapping = {}
@@ -1020,8 +1098,8 @@ class AttributeMappingDialog(QtWidgets.QDialog):
 class DatabaseConnectionDialog(QtWidgets.QDialog):
     """Dialog for creating or editing a database connection definition.
 
-    Fields include connection name, type (MSSQL or MariaDB), host/port/db,
-    credentials, and optional JDBC/ODBC driver path.  Provides a "Test
+    Fields include connection name, type (MSSQL, MySQL, Oracle), host/port/db,
+    credentials, and JDBC driver path. Provides a "Test
     Connection" button that calls :func:`api.db_utils.test_connection`.
 
     The ``get_connection_data`` method returns a dict suitable for storing in
@@ -1040,8 +1118,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         self.name_edit = QtWidgets.QLineEdit()
         self.type_combo = QtWidgets.QComboBox()
-        # make MySQL/Maria the default entry
-        self.type_combo.addItems(["MariaDB/MySQL", "MSSQL"])
+        # MySQL is the default entry
+        self.type_combo.addItems(["MySQL", "MSSQL", "Oracle"])
         self.host_edit = QtWidgets.QLineEdit()
         self.host_edit.setPlaceholderText("hostname or IP")
         self.host_edit.setToolTip("Database server host")
@@ -1067,11 +1145,17 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.pw_edit = QtWidgets.QLineEdit()
         self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.pw_edit.setPlaceholderText("password")
-        # driver name (for pyodbc) or JDBC/ODBC path
+        # path to JDBC .jar file for the selected DB type
         self.driver_combo = QtWidgets.QComboBox()
         self.driver_combo.setEditable(True)
-        self.driver_combo.setPlaceholderText("driver name or path")
-        self.driver_combo.setToolTip("Select or type a driver name (e.g. ODBC Driver 18 for SQL Server) or specify a path to a JDBC/ODBC driver library")
+        self.driver_combo.setPlaceholderText("JDBC .jar path")
+        self.driver_combo.setToolTip(
+            "JDBC-only support:\n"
+            "- MSSQL: mssql-jdbc-*.jar\n"
+            "- MySQL: mysql-connector-j-*.jar\n"
+            "- Oracle: ojdbc*.jar\n"
+            "Python prerequisite: pip install jaydebeapi JPype1"
+        )
         # label to display the currently selected driver for clarity
         self.driver_label = QtWidgets.QLabel("")
         self.driver_combo.currentTextChanged.connect(self._update_driver_label)
@@ -1089,7 +1173,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.port_edit.textChanged.connect(self._update_jdbc_string)
         self.db_combo.currentTextChanged.connect(self._update_jdbc_string)
         drv_layout = QtWidgets.QHBoxLayout()
-        drv_layout.addWidget(self.driver_combo)
+        drv_layout.addWidget(self.driver_combo, 1)
+        browse_drv_btn = QtWidgets.QPushButton("Browse…")
+        browse_drv_btn.setToolTip("Browse for a JDBC .jar file")
+        browse_drv_btn.clicked.connect(self._browse_jar)
+        drv_layout.addWidget(browse_drv_btn)
 
         form.addRow("Name:", self.name_edit)
         form.addRow("Type:", self.type_combo)
@@ -1181,7 +1269,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         if initial:
             self.name_edit.setText(initial.get('name', ''))
-            self.type_combo.setCurrentText(initial.get('type', 'MariaDB/MySQL'))
+            initial_type = initial.get('type', 'MySQL')
+            if initial_type == 'MariaDB/MySQL':
+                initial_type = 'MySQL'
+            self.type_combo.setCurrentText(initial_type)
             self.host_edit.setText(initial.get('host', ''))
             self.port_edit.setText(str(initial.get('port', '')))
             self.db_combo.setCurrentText(initial.get('database', ''))
@@ -1200,6 +1291,18 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
     # kept for historical reference but not used
     def _browse_driver(self):
         pass
+
+    def _browse_jar(self):
+        """Open a file dialog to select a JDBC .jar file."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select JDBC .jar File",
+            "",
+            "JDBC Driver (*.jar);;All Files (*)",
+        )
+        if path:
+            self.driver_combo.setCurrentText(path)
+            self._update_driver_label(path)
 
     def _validate_and_accept(self):
         """Ensure required fields are present before closing dialog."""
@@ -1223,8 +1326,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
     def _update_port_default(self):
         # called when the type combo changes
         typ = self.type_combo.currentText()
-        if typ == "MariaDB/MySQL":
+        if typ == "MySQL":
             default = "3306"
+        elif typ == "Oracle":
+            default = "1521"
         else:
             default = "1433"
         if not self.port_edit.text():
@@ -1242,28 +1347,27 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
     def _set_driver_options(self):
         """Populate the driver combo with sensible defaults for the selected DB.
 
-        The combo is always editable so the user may enter a custom string or
-        a path, but providing a dropdown helps when picking a recent ODBC
-        driver name for SQL Server.
+        The combo is always editable so the user may enter an absolute path,
+        while the dropdown offers typical JDBC jar filenames as guidance.
 
         After repopulating we update the display label as well.
         """
         typ = self.type_combo.currentText()
         self.driver_combo.clear()
-        if typ == "MariaDB/MySQL":
-            # MySQL doesn't actually use the driver string in our URL, but
-            # having some common ODBC names may help users who configure
-            # pyodbc manually.
+        if typ == "MySQL":
             self.driver_combo.addItems([
-                "MySQL ODBC 8.0 Driver",
-                "MySQL ODBC 8.0 Unicode Driver",
+                "mysql-connector-j-9.0.0.jar",
+                "mysql-connector-j-8.4.0.jar",
+            ])
+        elif typ == "Oracle":
+            self.driver_combo.addItems([
+                "ojdbc11.jar",
+                "ojdbc8.jar",
             ])
         else:
-            # SQL Server: recent ODBC drivers
             self.driver_combo.addItems([
-                "ODBC Driver 18 for SQL Server",
-                "ODBC Driver 17 for SQL Server",
-                "ODBC Driver 13 for SQL Server",
+                "mssql-jdbc-12.6.1.jre11.jar",
+                "mssql-jdbc-12.6.1.jre8.jar",
             ])
         # update label after changing options
         if hasattr(self, 'driver_label'):
@@ -1278,14 +1382,21 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         """
         typ = self.type_combo.currentText()
         host = self.host_edit.text().strip()
-        port = self.port_edit.text().strip() or ("3306" if typ == "MariaDB/MySQL" else "1433")
+        if typ == "MySQL":
+            fallback_port = "3306"
+        elif typ == "Oracle":
+            fallback_port = "1521"
+        else:
+            fallback_port = "1433"
+        port = self.port_edit.text().strip() or fallback_port
         db = self.db_combo.currentText().strip()
         url = ""
         if host and db:
-            if typ == "MariaDB/MySQL":
+            if typ == "MySQL":
                 url = f"jdbc:mysql://{host}:{port}/{db}"
+            elif typ == "Oracle":
+                url = f"jdbc:oracle:thin:@//{host}:{port}/{db}"
             else:
-                # MSSQL style
                 url = f"jdbc:sqlserver://{host}:{port};databaseName={db}"
         self.jdbc_edit.setText(url)
 
@@ -1336,10 +1447,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         try:
             from api import db_utils
         except ModuleNotFoundError:
-            QtWidgets.QMessageBox.critical(
-                self,
+            self._show_copyable_message(
                 "Missing Dependency",
-                "SQLAlchemy is not installed. Please install the requirements and restart (e.g. `pip install -r requirements.txt`)."
+                "SQLAlchemy is not installed. Please install the requirements and restart (e.g. pip install -r requirements.txt).",
+                icon=QtWidgets.QMessageBox.Critical,
             )
             QtWidgets.QApplication.restoreOverrideCursor()
             self.status_label.setText("Dependency missing.")
@@ -1369,8 +1480,27 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             # show detailed error so user can debug
             msg = "Failed to connect to database."
             if err:
-                msg += f"\n\nError details:\n{err}"
-            QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
+                # Check if this is a missing driver error
+                if "pip install" in err and "jaydebeapi" in err:
+                    # Format as HTML with clickable links for better readability
+                    msg = self._format_driver_error(err)
+                else:
+                    msg += f"\n\nError details:\n{err}"
+            
+            # Use a message box that supports HTML/links if it's a driver error
+            if "https://" in msg:
+                self._show_copyable_message(
+                    "Missing Database Driver",
+                    msg,
+                    icon=QtWidgets.QMessageBox.Critical,
+                    rich_text=True,
+                )
+            else:
+                self._show_copyable_message(
+                    "Test Connection",
+                    msg,
+                    icon=QtWidgets.QMessageBox.Critical,
+                )
 
     def _show_sample_data(self, db_utils):
         """Fetch and display the first record from the selected table."""
@@ -1402,6 +1532,43 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         except Exception as e:
             self.sample_label.setText(f"<i>Could not fetch sample: {str(e)}</i>")
             self.sample_label.setVisible(True)
+
+    def _format_driver_error(self, error_msg: str) -> str:
+        """Convert driver error message with pip/download links into HTML format."""
+        # Convert URLs to HTML links
+        html_msg = error_msg.replace('\n', '<br>')
+        # Highlight pip install commands
+        html_msg = re.sub(
+            r'(pip install [^\n<]+)',
+            r'<code style="background-color: #f0f0f0; padding: 2px 4px;">\1</code>',
+            html_msg
+        )
+        # Create clickable links for URLs
+        html_msg = re.sub(
+            r'(https://[^<\s\n]+)',
+            r'<a href="\1" style="color: #0066cc; text-decoration: underline;">\1</a>',
+            html_msg
+        )
+        return html_msg
+
+    def _show_copyable_message(
+        self,
+        title: str,
+        message: str,
+        *,
+        icon=QtWidgets.QMessageBox.Critical,
+        rich_text: bool = False,
+    ):
+        """Show a message box with selectable text so errors can be copied."""
+        msgbox = QtWidgets.QMessageBox(self)
+        msgbox.setWindowTitle(title)
+        msgbox.setIcon(icon)
+        msgbox.setText(message)
+        msgbox.setTextFormat(QtCore.Qt.RichText if rich_text else QtCore.Qt.PlainText)
+        msgbox.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse | QtCore.Qt.LinksAccessibleByMouse
+        )
+        msgbox.exec()
 
     def _on_use(self):
         """Accept the dialog and mark that this connection should be used immediately."""
@@ -1439,7 +1606,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         """Fetch available databases from the server and populate db_combo.
 
         Requires the user to have SHOW DATABASES (MySQL) or VIEW ANY DATABASE
-        (MSSQL) privilege.  If the privilege is missing, shows an informational
+        (MSSQL) privilege. Oracle discovery is not supported in this flow.
+        If the privilege is missing, shows an informational
         dialog so the user knows to enter the name manually.
         """
         try:
@@ -1449,6 +1617,14 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         host = self.host_edit.text().strip()
         user = self.user_edit.text().strip()
+        typ = self.type_combo.currentText()
+        if typ == "Oracle":
+            QtWidgets.QMessageBox.information(
+                self,
+                "Oracle",
+                "Oracle service-name discovery is not supported here. Enter the service name manually.",
+            )
+            return
         if not host or not user:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -1476,16 +1652,16 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             msg = f"Found {len(names)} database(s)." if names else "No databases found."
             self.status_label.setText(msg)
         except PermissionError as e:
-            QtWidgets.QMessageBox.information(
-                self,
+            self._show_copyable_message(
                 "Insufficient Permissions",
-                f"{e}\n\nYou can still type the database name directly in the field."
+                f"{e}\n\nYou can still type the database name directly in the field.",
+                icon=QtWidgets.QMessageBox.Information,
             )
         except Exception as e:
-            QtWidgets.QMessageBox.warning(
-                self,
+            self._show_copyable_message(
                 "Could Not Fetch Databases",
-                f"Failed to retrieve database list:\n\n{e}"
+                f"Failed to retrieve database list:\n\n{e}",
+                icon=QtWidgets.QMessageBox.Warning,
             )
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -1502,7 +1678,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
     def _new_connection(self):
         """Reset fields to defaults so user can define a new DB connection."""
         self.name_edit.clear()
-        self.type_combo.setCurrentText("MariaDB/MySQL")
+        self.type_combo.setCurrentText("MySQL")
         self.host_edit.clear()
         self.port_edit.clear()
         self.db_combo.clearEditText()
@@ -1537,6 +1713,9 @@ class DBConnectionsManager(QtWidgets.QDialog):
         self.edit_btn.setToolTip("Modify the selected connection")
         self.del_btn = QtWidgets.QPushButton("Delete")
         self.del_btn.setToolTip("Remove the selected connection")
+        
+        # Initialize deleted set before populating list (used by _populate)
+        self.deleted = set()  # Track items marked for deletion
         
         # ensure Enter triggers edit when a connection is selected
         self.list_widget = QtWidgets.QListWidget()
@@ -1575,13 +1754,34 @@ class DBConnectionsManager(QtWidgets.QDialog):
         has_selection = self.list_widget.currentItem() is not None
         self.edit_btn.setEnabled(has_selection)
         self.del_btn.setEnabled(has_selection)
+        
+        # Update delete button text based on whether selected item is marked for deletion
+        if has_selection:
+            item = self.list_widget.currentItem()
+            if item and item.text() in self.deleted:
+                self.del_btn.setText("Undelete")
+                self.del_btn.setToolTip("Restore this connection (cancel deletion)")
+            else:
+                self.del_btn.setText("Delete")
+                self.del_btn.setToolTip("Mark this connection for deletion")
+        else:
+            self.del_btn.setText("Delete")
+            self.del_btn.setToolTip("Mark this connection for deletion")
 
     def _populate(self, connections):
         """Repopulate the list widget, blocking signals during update to avoid spurious state changes."""
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         for name in sorted(connections.keys()):
-            self.list_widget.addItem(name)
+            item = QtWidgets.QListWidgetItem(name)
+            if name in self.deleted:
+                # Mark deleted items visually
+                font = item.font()
+                font.setStrikeOut(True)
+                item.setFont(font)
+                item.setForeground(QtGui.QColor("#999999"))
+                item.setToolTip("This connection will be deleted when the dialog is closed")
+            self.list_widget.addItem(item)
         self.list_widget.blockSignals(False)
         # Focus on most recent entry (last in sorted list) or Add button if empty
         if self.list_widget.count() > 0:
@@ -1638,11 +1838,21 @@ class DBConnectionsManager(QtWidgets.QDialog):
         if not item:
             return
         name = item.text()
-        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
-            del self.result[name]
+        if name in self.deleted:
+            # Undelete if already marked for deletion
+            self.deleted.remove(name)
             self._populate(self.result)
+        else:
+            # Mark for deletion
+            if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
+                self.deleted.add(name)
+                self._populate(self.result)
 
     def get_connections(self) -> dict:
+        # Process deletions when dialog is closed
+        for name in self.deleted:
+            if name in self.result:
+                del self.result[name]
         return self.result
 
 
@@ -1940,6 +2150,7 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         close_btns.rejected.connect(self.reject)
         layout.addWidget(close_btns)
 
+        self.deleted = set()  # Track items marked for deletion
         self._populate(self.result)
         ensure_dialog_caption_fit(self)
 
@@ -1947,7 +2158,15 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         for name in sorted(connections.keys()):
-            self.list_widget.addItem(name)
+            item = QtWidgets.QListWidgetItem(name)
+            if name in self.deleted:
+                # Mark deleted items visually
+                font = item.font()
+                font.setStrikeOut(True)
+                item.setFont(font)
+                item.setForeground(QtGui.QColor("#999999"))
+                item.setToolTip("This connection will be deleted when the dialog is closed")
+            self.list_widget.addItem(item)
         self.list_widget.blockSignals(False)
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(self.list_widget.count() - 1)
@@ -1957,6 +2176,19 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         has_selection = self.list_widget.currentItem() is not None
         self.edit_btn.setEnabled(has_selection)
         self.del_btn.setEnabled(has_selection)
+        
+        # Update delete button text based on whether selected item is marked for deletion
+        if has_selection:
+            item = self.list_widget.currentItem()
+            if item and item.text() in self.deleted:
+                self.del_btn.setText("Undelete")
+                self.del_btn.setToolTip("Restore this connection (cancel deletion)")
+            else:
+                self.del_btn.setText("Delete")
+                self.del_btn.setToolTip("Mark this connection for deletion")
+        else:
+            self.del_btn.setText("Delete")
+            self.del_btn.setToolTip("Mark this connection for deletion")
 
     def add(self):
         dlg = LDAPConnectionDialog(parent=self)
@@ -2002,11 +2234,21 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         if not item:
             return
         name = item.text()
-        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
-            del self.result[name]
+        if name in self.deleted:
+            # Undelete if already marked for deletion
+            self.deleted.remove(name)
             self._populate(self.result)
+        else:
+            # Mark for deletion
+            if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
+                self.deleted.add(name)
+                self._populate(self.result)
 
     def get_connections(self) -> dict:
+        # Process deletions when dialog is closed
+        for name in self.deleted:
+            if name in self.result:
+                del self.result[name]
         return self.result
 
 
@@ -2548,11 +2790,12 @@ class _ReorderableTableWidget(QtWidgets.QTableWidget):
 
 
 class ExportOptionsDialog(QtWidgets.QDialog):
-    """Dialog to choose export options: selected vs all rows, visible vs all columns, metadata fields.
+    """Dialog to choose export options: selected vs all rows, visible vs all columns, metadata fields, populations.
 
     Returns a dict:
     { 'rows': 'selected'|'all', 'only_visible_columns': bool, 'remember': bool,
-      'required_populated_attributes': List[str], 'excluded_metadata': List[str] }
+      'required_populated_attributes': List[str], 'excluded_metadata': List[str],
+      'selected_populations': List[str] }
     """
     def __init__(
         self,
@@ -2564,6 +2807,8 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         populated_attribute_samples: Optional[dict] = None,
         metadata_columns: Optional[List[str]] = None,
         excluded_metadata: Optional[List[str]] = None,
+        populations: Optional[dict] = None,
+        selected_populations: Optional[List[str]] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle('Export Options')
@@ -2648,6 +2893,59 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             layout.addWidget(self.metadata_group)
         else:
             self.metadata_checkboxes = {}
+
+        # Population filter section
+        pop_dict = populations or {}
+        selected_pop_ids = set(selected_populations or [])
+        
+        if pop_dict:
+            self.population_filter_group = QtWidgets.QGroupBox('Filter by Population (optional)')
+            self.population_filter_group.setCheckable(True)
+            self.population_filter_group.setChecked(bool(selected_pop_ids))
+            pop_layout = QtWidgets.QVBoxLayout(self.population_filter_group)
+            
+            pop_note = QtWidgets.QLabel(
+                'Select specific populations to export. Leave all unchecked to export from all populations.'
+            )
+            pop_note.setWordWrap(True)
+            pop_note.setStyleSheet('color: #666; font-size: 10pt;')
+            pop_layout.addWidget(pop_note)
+            
+            # Create scrollable list for populations
+            pop_scroll_area = QtWidgets.QScrollArea()
+            pop_scroll_area.setWidgetResizable(True)
+            pop_scroll_area.setMaximumHeight(120)
+            pop_scroll_widget = QtWidgets.QWidget()
+            pop_scroll_layout = QtWidgets.QVBoxLayout(pop_scroll_widget)
+            pop_scroll_layout.setContentsMargins(5, 5, 5, 5)
+            
+            self.population_checkboxes = {}
+            # Sort populations by name for better UX
+            for pop_name, pop_id in sorted(pop_dict.items(), key=lambda x: x[0].lower()):
+                cb = QtWidgets.QCheckBox(f"{pop_name} ({pop_id})")
+                cb.setChecked(pop_id in selected_pop_ids or len(selected_pop_ids) == 0)
+                self.population_checkboxes[pop_id] = cb
+                pop_scroll_layout.addWidget(cb)
+            
+            pop_scroll_layout.addStretch()
+            pop_scroll_area.setWidget(pop_scroll_widget)
+            pop_layout.addWidget(pop_scroll_area)
+            
+            # Select All / Deselect All buttons
+            pop_buttons = QtWidgets.QHBoxLayout()
+            select_all_pop_btn = QtWidgets.QPushButton('Select All')
+            deselect_all_pop_btn = QtWidgets.QPushButton('Deselect All')
+            select_all_pop_btn.clicked.connect(self._select_all_populations)
+            deselect_all_pop_btn.clicked.connect(self._deselect_all_populations)
+            pop_buttons.addWidget(select_all_pop_btn)
+            pop_buttons.addWidget(deselect_all_pop_btn)
+            pop_buttons.addStretch()
+            pop_layout.addLayout(pop_buttons)
+            
+            layout.addWidget(self.population_filter_group)
+        else:
+            self.population_checkboxes = {}
+            self.population_filter_group = None
 
         self.attr_filter_group = QtWidgets.QGroupBox('Filter by populated attributes (optional)')
         self.attr_filter_group.setCheckable(True)
@@ -2779,6 +3077,16 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         for cb in self.metadata_checkboxes.values():
             cb.setChecked(False)
 
+    def _select_all_populations(self):
+        """Check all population checkboxes."""
+        for cb in self.population_checkboxes.values():
+            cb.setChecked(True)
+
+    def _deselect_all_populations(self):
+        """Uncheck all population checkboxes."""
+        for cb in self.population_checkboxes.values():
+            cb.setChecked(False)
+
     def _move_selected_attribute_row(self, delta: int):
         row = self._selected_attr_row()
         if row < 0:
@@ -2820,12 +3128,20 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             if not cb.isChecked():
                 excluded_metadata.append(field)
         
+        # Collect selected populations (if filter is enabled and checked)
+        selected_populations = []
+        if self.population_filter_group and self.population_filter_group.isEnabled() and self.population_filter_group.isChecked():
+            for pop_id, cb in self.population_checkboxes.items():
+                if cb.isChecked():
+                    selected_populations.append(pop_id)
+        
         return {
             'rows': rows,
             'only_visible_columns': bool(self.only_visible_cb.isChecked()),
             'remember': bool(self.remember_cb.isChecked()),
             'required_populated_attributes': required_populated_attributes,
             'excluded_metadata': excluded_metadata,
+            'selected_populations': selected_populations,
         }
 
 
@@ -3323,7 +3639,8 @@ class ImportWizardDialog(QtWidgets.QDialog):
         self.current_step = 0
         self.selected_connection = None
         self.result = {}
-        self._new_ldap_option = "<Create New LDAP Config...>"
+        self._new_ldap_option = "<Create New LDAP Connection...>"
+        self._new_db_option = "<Create New Database Connection...>"
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -3432,12 +3749,23 @@ class ImportWizardDialog(QtWidgets.QDialog):
         if source_connections:
             if source_type == 'ldap':
                 self.conn_combo.addItem(self._new_ldap_option)
+            else:
+                self.conn_combo.addItem(self._new_db_option)
             self.conn_combo.addItems(list(source_connections.keys()))
         else:
             self.conn_combo.addItem("(No connections available)")
             self.next_btn.setEnabled(False)
         
         self.content_layout.addWidget(self.conn_combo)
+        
+        # Add Manage button for existing connections
+        if source_connections:
+            manage_btn = QtWidgets.QPushButton("Manage Connections...")
+            if source_type == 'ldap':
+                manage_btn.clicked.connect(self._manage_ldap_connections)
+            else:
+                manage_btn.clicked.connect(self._manage_db_connections)
+            self.content_layout.addWidget(manage_btn)
 
         if not source_connections:
             if source_type == 'ldap':
@@ -3490,6 +3818,24 @@ class ImportWizardDialog(QtWidgets.QDialog):
         except Exception:
             pass
     
+    def _create_new_db_connection(self):
+        """Open DB connection dialog to create a new connection and refresh the list."""
+        p = self.parent()
+        if p is None or not hasattr(p, '_create_new_db_connection'):
+            return
+        try:
+            new_conn_name = p._create_new_db_connection()
+            if new_conn_name:
+                # Reload connections and refresh the step
+                self._reload_connections_from_parent()
+                self.show_step(1)
+                # Set the newly created connection as selected
+                idx = self.conn_combo.findText(new_conn_name)
+                if idx >= 0:
+                    self.conn_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+    
     def show_query_mode_selection(self):
         """Step 2: Select DB table/query mode or skip for LDAP."""
         if self.result.get('source_type') == 'ldap':
@@ -3529,6 +3875,9 @@ class ImportWizardDialog(QtWidgets.QDialog):
             self.selected_connection = self.conn_combo.currentText()
             if self.result.get('source_type') == 'ldap' and self.selected_connection == self._new_ldap_option:
                 self._manage_ldap_connections()
+                return
+            if self.result.get('source_type') == 'db' and self.selected_connection == self._new_db_option:
+                self._create_new_db_connection()
                 return
             if not self.selected_connection or self.selected_connection == "(No connections available)":
                 QtWidgets.QMessageBox.warning(self, "No Connection", "Please select a valid connection.")

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Database connectivity is now JDBC-only for MSSQL, MySQL, and Oracle.
+- Removed non-JDBC fallback guidance from active docs and UI guidance.
+
+### Added
+- Oracle support in database connection configuration and JDBC URL preview.
+- Explicit prerequisites documentation for JDBC bridge (`jaydebeapi`, `JPype1`) and vendor JDBC jars.
+
+### Documentation
+- Updated `README.md`, `INSTALL.md`, `DEVELOPMENT_SPEC.md`, and `DEVELOPMENT_RULES.md` to reflect JDBC-only policy (no ODBC).
+- Updated `requirements.txt` comments/dependencies to match JDBC-only database support.
+
 ## [0.8] - 2026-04-14
 ### Added
 - Bumped application version to `0.8`.

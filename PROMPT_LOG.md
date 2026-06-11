@@ -40,3 +40,13 @@ All user prompts during a session are recorded here with timestamps.
 - **[2026-04-15]** "in import/export mapping allow the deletion of multiple mapping rows at once. add a checkbox to automatically remove \"link\" attributes."
 - **[2026-04-15]** "only export selected fields to database or ldap"
 - **[2026-04-15]** "add tps statistics on export"
+
+## Session: 2026-06-11
+
+- **[2026-06-11]** "update requirements, all documention"
+- **[2026-06-11]** "from my end what do I need to do on the file system to be ready for mssql connections. e.g., install the jar files (specifiy version and location)"
+- **[2026-06-11]** "yes"
+- **[2026-06-11]** "yes"
+- **[2026-06-11]** "yes, also update documentation with file and url information"
+- **[2026-06-11]** "yes, also for oracle and mysql"
+- **[2026-06-11]** "commit and push"
