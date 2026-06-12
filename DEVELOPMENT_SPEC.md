@@ -12,7 +12,6 @@
 - Supported database backends: MSSQL, MySQL, Oracle.
 - Required Python packages: `jaydebeapi`, `JPype1`.
 - A vendor JDBC `.jar` file must be provided in the DB connection "Driver Path" field.
-- ODBC and non-JDBC DBAPI driver paths are not supported.
 
 ---
 

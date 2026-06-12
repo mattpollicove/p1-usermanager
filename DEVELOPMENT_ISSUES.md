@@ -867,7 +867,7 @@ def on_main_tab_changed(self, index):
 ## 2026-06-11 - MSSQL Guidance In UI Tooltip Not Aligned
 
 ### Problem
-- The database connection dialog tooltip used generic JDBC/ODBC wording and did not match the approved two-option MSSQL setup guidance.
+- The database connection dialog tooltip did not match the approved two-option MSSQL setup guidance.
 
 ### Root Cause
 - UI tooltip text in the DB connection dialog was older than the runtime error and install-document guidance.
@@ -883,7 +883,6 @@ def on_main_tab_changed(self, index):
 #### Before
 ```python
 "MSSQL JDBC: Browse to select a mssql-jdbc .jar file (recommended).\n"
-"MSSQL ODBC: type or select an ODBC driver name (e.g. ODBC Driver 18 for SQL Server).\n"
 ```
 
 #### After
@@ -900,11 +899,11 @@ def on_main_tab_changed(self, index):
 ## 2026-06-11 - Enforce JDBC-Only DB Support (MSSQL/MySQL/Oracle)
 
 ### Problem
-- The app mixed JDBC and non-JDBC database paths (pymysql/pymssql/pyodbc), and Oracle was not supported.
+- The app mixed JDBC and non-JDBC database paths (pymysql/pymssql), and Oracle was not supported.
 - Documentation and prerequisites did not consistently reflect a JDBC-only model across supported databases.
 
 ### Root Cause
-- Database engine creation in `api/db_utils.py` had fallback paths for Python DBAPI/ODBC drivers.
+- Database engine creation in `api/db_utils.py` had fallback paths for Python DBAPI drivers.
 - DB dialog defaults/tooltips and docs were written for MSSQL + MariaDB/MySQL mixed driver modes.
 
 ### Final Resolution
@@ -922,8 +921,7 @@ try:
     import pymssql
     return f"mssql+pymssql://..."
 except ImportError:
-    import pyodbc
-    return f"mssql+pyodbc://..."
+    raise ImportError("pymssql not installed")
 ```
 
 #### After (JDBC-only)
