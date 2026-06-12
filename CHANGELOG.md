@@ -11,10 +11,12 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Oracle support in database connection configuration and JDBC URL preview.
 - Explicit prerequisites documentation for JDBC bridge (`jaydebeapi`, `JPype1`) and vendor JDBC jars.
+- MSSQL Encrypt Mode selector (`Auto` / `On` / `Off`) in DB connection dialog, wired through all JDBC operations.
 
 ### Documentation
 - Updated `README.md`, `INSTALL.md`, `DEVELOPMENT_SPEC.md`, and `DEVELOPMENT_RULES.md` to reflect JDBC-only policy (no ODBC).
 - Updated `requirements.txt` comments/dependencies to match JDBC-only database support.
+- Added MSSQL Encrypt Mode guidance to `README.md` and `INSTALL.md`.
 
 ## [0.8] - 2026-04-14
 ### Added

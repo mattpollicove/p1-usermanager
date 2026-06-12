@@ -4,10 +4,122 @@ This module provides JDBC-only connectivity for database import/export.
 Supported backends are MSSQL, MySQL, and Oracle via ``jaydebeapi`` +
 ``JPype1`` and vendor JDBC drivers (.jar files).
 """
+import os
 import re
+import platform
+import subprocess
+from pathlib import Path
 from typing import Tuple, List, Optional
 
 from sqlalchemy import text
+
+
+_THIS_FILE = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS_FILE.parent.parent
+
+
+def _ensure_jdk_native_access_option() -> None:
+    """Enable native access for JPype on modern JDKs to suppress warnings.
+
+    JDK 22+ warns when JNI/native access is not explicitly enabled.
+    Setting this option before JVM startup keeps runtime output clean.
+    """
+    option = "--enable-native-access=ALL-UNNAMED"
+    current = (os.environ.get("JDK_JAVA_OPTIONS") or "").strip()
+    if option in current:
+        return
+    os.environ["JDK_JAVA_OPTIONS"] = f"{current} {option}".strip()
+
+
+def _is_java_home_discovery_error(text: str) -> bool:
+    """Return True when a JPype/JVM error indicates macOS java_home lookup failed."""
+    msg = str(text or "").lower()
+    return (
+        '/usr/libexec/java_home' in msg
+        or 'command' in msg and 'java_home' in msg and 'non-zero exit status' in msg
+    )
+
+
+def _get_java_runtime_error_details() -> str:
+    """Return actionable guidance when no JVM is discoverable for JDBC use."""
+    return (
+        "No Java runtime was discovered for JDBC operations.\n\n"
+        "On macOS, install a JDK and set JAVA_HOME before launching the app:\n"
+        "  brew install openjdk\n"
+        "  export JAVA_HOME=/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home\n"
+        "  export PATH=\"$JAVA_HOME/bin:$PATH\"\n\n"
+        "Then restart the app so the environment is picked up."
+    )
+
+
+def _ensure_java_home_macos_quiet() -> bool:
+    """Quietly discover JAVA_HOME on macOS; return False when unavailable."""
+    if platform.system() != 'Darwin':
+        return True
+    if (os.environ.get('JAVA_HOME') or '').strip():
+        return True
+    try:
+        probe = subprocess.run(
+            ['/usr/libexec/java_home'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode != 0:
+            return False
+        discovered = (probe.stdout or '').strip()
+        if discovered:
+            os.environ['JAVA_HOME'] = discovered
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def get_java_runtime_status() -> dict:
+    """Return JVM discovery status for startup preflight checks.
+
+    This function does not start the JVM. It only verifies whether a
+    usable JVM path is discoverable in the current process environment.
+    """
+    # On macOS, pre-check java_home quietly to avoid noisy stderr output from
+    # downstream JVM discovery calls when Java is missing.
+    if not _ensure_java_home_macos_quiet():
+        return {'available': False, 'message': _get_java_runtime_error_details()}
+
+    try:
+        import jpype  # type: ignore
+    except Exception:
+        return {
+            'available': False,
+            'message': (
+                "JDBC features require JPype1 and a Java runtime. "
+                "Install with: pip install jaydebeapi JPype1"
+            ),
+        }
+
+    try:
+        jvm_path = jpype.getDefaultJVMPath()
+    except Exception as exc:
+        err = str(exc)
+        if _is_java_home_discovery_error(err):
+            return {'available': False, 'message': _get_java_runtime_error_details()}
+        return {
+            'available': False,
+            'message': f"Java runtime not discoverable for JDBC: {err}",
+        }
+
+    if not jvm_path or not os.path.exists(str(jvm_path)):
+        return {
+            'available': False,
+            'message': _get_java_runtime_error_details(),
+        }
+
+    return {
+        'available': True,
+        'message': '',
+        'jvm_path': str(jvm_path),
+    }
 
 
 def check_available_drivers() -> dict:
@@ -64,7 +176,9 @@ def _get_mysql_driver_error() -> str:
         "  pip install jaydebeapi JPype1\n\n"
         "Required JDBC jar (MySQL Connector/J):\n"
         "  https://dev.mysql.com/downloads/connector/j/\n\n"
-        "Set Driver Path to the mysql-connector-j .jar file in the DB connection dialog."
+        "Set Driver Path to: drivers/mysql/mysql-connector-j-9.0.0.jar\n\n"
+        "Recommended folder layout:\n"
+        "  p1-usermanager/drivers/mysql/mysql-connector-j-9.0.0.jar"
     )
 
 
@@ -92,6 +206,29 @@ def _normalize_db_type(db_type: str) -> str:
     raise ValueError(f"Unsupported database type: {db_type}")
 
 
+def _normalize_encrypt_mode(encrypt_mode: Optional[str]) -> str:
+    """Normalize MSSQL encryption mode to one of auto/on/off."""
+    if isinstance(encrypt_mode, bool):
+        # Backward compatibility: legacy boolean values were historically
+        # treated as "enable encryption" without an explicit strict mode.
+        # Map True to Auto (secure-first with fallback) and False to Off.
+        return 'auto' if encrypt_mode else 'off'
+    raw = (encrypt_mode or "").strip().lower()
+    if not raw:
+        return 'auto'
+    if raw in ('auto', 'default'):
+        return 'auto'
+    if raw in ('on', 'required', 'strict'):
+        return 'on'
+    if raw in ('true', 'yes', '1', 'enabled'):
+        # Keep legacy truthy text values in Auto for safer behavior with
+        # mixed SQL Server TLS endpoint compatibility.
+        return 'auto'
+    if raw in ('off', 'false', 'no', '0', 'disabled'):
+        return 'off'
+    return 'auto'
+
+
 # ---------------------------------------------------------------------------
 # JDBC support helpers and engine wrapper
 # ---------------------------------------------------------------------------
@@ -99,6 +236,31 @@ def _normalize_db_type(db_type: str) -> str:
 def _is_jdbc_jar(driver_path: Optional[str]) -> bool:
     """Return True if driver_path points to a JDBC .jar file."""
     return bool(driver_path and str(driver_path).strip().lower().endswith('.jar'))
+
+
+def _resolve_driver_jar_path(driver_path: str) -> str:
+    """Resolve driver jar path to an existing absolute path.
+
+    Resolution order for relative paths:
+    1) current working directory
+    2) project root directory
+    """
+    raw = str(driver_path or "").strip()
+    if not raw:
+        raise FileNotFoundError("Driver Path is empty")
+
+    expanded = Path(raw).expanduser()
+    candidates = [expanded] if expanded.is_absolute() else [Path.cwd() / expanded, _PROJECT_ROOT / expanded]
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file() and candidate.suffix.lower() == ".jar":
+            return str(candidate.resolve())
+
+    checked = "\n".join(f"  - {str(c)}" for c in candidates)
+    raise FileNotFoundError(
+        "JDBC driver jar was not found at the specified Driver Path. Checked:\n"
+        f"{checked}"
+    )
 
 
 def _sqlalchemy_to_jdbc(sql: str, params: dict) -> tuple:
@@ -180,9 +342,19 @@ class _JDBCConnection:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if exc_type is None:
-                self._conn.commit()
+                # Only commit if autocommit is disabled
+                try:
+                    if not self._conn.jconn.getAutoCommit():
+                        self._conn.commit()
+                except Exception:
+                    pass  # best-effort; autocommit likely enabled
             else:
-                self._conn.rollback()
+                # Only rollback if autocommit is disabled
+                try:
+                    if not self._conn.jconn.getAutoCommit():
+                        self._conn.rollback()
+                except Exception:
+                    pass  # best-effort
         finally:
             if self._auto_close:
                 self._conn.close()
@@ -276,7 +448,8 @@ class _JDBCEngine:
     """Mimics SQLAlchemy Engine for JDBC connections via jaydebeapi."""
 
     def __init__(self, db_kind: str, host: str, port: int, database: str,
-                 user: str, password: str, jar_path: str):
+                 user: str, password: str, jar_path: str,
+                 encrypt_mode: Optional[str] = None):
         self._db_kind = db_kind
         self._host = host
         self._port = int(port)
@@ -284,33 +457,95 @@ class _JDBCEngine:
         self._user = user
         self._password = password
         self._jar_path = jar_path
+        self._encrypt_mode = _normalize_encrypt_mode(encrypt_mode)
         if db_kind == 'mssql':
             self._driver_class = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
-            self._jdbc_url = (
-                f"jdbc:sqlserver://{host}:{int(port)};"
-                f"databaseName={database};"
-                "encrypt=true;trustServerCertificate=true"
-            )
+            base_url = f"jdbc:sqlserver://{host}:{int(port)};databaseName={database};"
+            if self._encrypt_mode == 'off':
+                self._jdbc_url = base_url + "encrypt=false"
+                self._jdbc_url_insecure = self._jdbc_url
+            else:
+                self._jdbc_url = base_url + "encrypt=true;trustServerCertificate=true"
+                self._jdbc_url_insecure = base_url + "encrypt=false"
         elif db_kind == 'mysql':
             self._driver_class = "com.mysql.cj.jdbc.Driver"
             self._jdbc_url = (
                 f"jdbc:mysql://{host}:{int(port)}/{database}"
                 "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
             )
+            self._jdbc_url_insecure = self._jdbc_url
         elif db_kind == 'oracle':
             self._driver_class = "oracle.jdbc.OracleDriver"
             self._jdbc_url = f"jdbc:oracle:thin:@//{host}:{int(port)}/{database}"
+            self._jdbc_url_insecure = self._jdbc_url
         else:
             raise ValueError(f"Unsupported JDBC database type: {db_kind}")
 
     def _raw_connect(self):
         import jaydebeapi  # type: ignore
-        return jaydebeapi.connect(
-            self._driver_class,
-            self._jdbc_url,
-            [self._user, self._password],
-            self._jar_path,
-        )
+        _ensure_jdk_native_access_option()
+        if not _ensure_java_home_macos_quiet():
+            raise RuntimeError(_get_java_runtime_error_details())
+        jvm_bootstrap_error = None
+        try:
+            import jpype  # type: ignore
+            if jpype.isJVMStarted():
+                # If JVM was already started earlier in this process, make sure
+                # the currently selected vendor jar is still on the classpath.
+                jpype.addClassPath(self._jar_path)
+            else:
+                # JPype starts the JVM via JNI (not the java launcher), so
+                # process env vars like JDK_JAVA_OPTIONS may not reliably apply.
+                # Start JVM explicitly with native-access enabled to avoid
+                # restricted-method warnings on modern JDKs.
+                jpype.startJVM(
+                    jpype.getDefaultJVMPath(),
+                    "--enable-native-access=ALL-UNNAMED",
+                    classpath=[self._jar_path],
+                )
+        except Exception as exc:
+            jvm_bootstrap_error = str(exc)
+            # Best effort only; jaydebeapi.connect below will still raise
+            # actionable errors if class loading fails.
+            pass
+
+        def _connect(url: str):
+            return jaydebeapi.connect(
+                self._driver_class,
+                url,
+                [self._user, self._password],
+                self._jar_path,
+            )
+
+        try:
+            return _connect(self._jdbc_url)
+        except Exception as exc:
+            msg = str(exc)
+            if _is_java_home_discovery_error(msg) or _is_java_home_discovery_error(jvm_bootstrap_error):
+                raise RuntimeError(_get_java_runtime_error_details()) from exc
+            if self._db_kind == 'mssql':
+                ssl_error = (
+                    'could not establish a secure connection' in msg.lower()
+                    or 'unexpected_message' in msg.lower()
+                    or ('"encrypt" property is set to "true"' in msg and 'trustservercertificate' in msg.lower())
+                )
+                if ssl_error and self._encrypt_mode == 'auto':
+                    try:
+                        return _connect(self._jdbc_url_insecure)
+                    except Exception:
+                        pass
+                if ssl_error and self._encrypt_mode == 'on':
+                    raise RuntimeError(
+                        "MSSQL SSL/TLS handshake failed while Encrypt Mode is 'On'. "
+                        "Try setting Encrypt Mode to 'Auto' (secure-first fallback) or 'Off' "
+                        "for servers that do not support TLS on this endpoint."
+                    ) from exc
+            if "Class" in msg and "is not found" in msg:
+                raise RuntimeError(
+                    f"JDBC driver class '{self._driver_class}' was not found using jar '{self._jar_path}'. "
+                    "Verify Driver Path points to the correct vendor JDBC jar for the selected DB type."
+                ) from exc
+            raise
 
     def connect(self) -> '_JDBCConnection':
         return _JDBCConnection(self._raw_connect(), auto_close=True)
@@ -372,7 +607,8 @@ def _quote_table_identifier(db_type: str, ident: str) -> str:
 
 def _make_engine(db_type: str, host: str, port: int, database: str,
                  user: str, password: str,
-                 driver_path: Optional[str] = None):
+                 driver_path: Optional[str] = None,
+                 encrypt_mode: Optional[str] = None):
     """Return a JDBC engine for MSSQL, MySQL, or Oracle.
 
     ``driver_path`` must point to a JDBC .jar file.
@@ -406,7 +642,17 @@ def _make_engine(db_type: str, host: str, port: int, database: str,
         'oracle': 'orcl',
     }
     db_name = (database or '').strip() or default_db[db_kind]
-    return _JDBCEngine(db_kind, host.strip(), int(port), db_name, user.strip(), password, str(driver_path).strip())
+    resolved_jar = _resolve_driver_jar_path(str(driver_path).strip())
+    return _JDBCEngine(
+        db_kind,
+        host.strip(),
+        int(port),
+        db_name,
+        user.strip(),
+        password,
+        resolved_jar,
+        encrypt_mode=encrypt_mode,
+    )
 
 
 def _inspect_engine(engine):
@@ -415,7 +661,9 @@ def _inspect_engine(engine):
 
 
 def test_connection(db_type: str, host: str, port: int, database: str,
-                    user: str, password: str, driver_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+                    user: str, password: str,
+                    driver_path: Optional[str] = None,
+                    encrypt_mode: Optional[str] = None) -> Tuple[bool, Optional[str]]:
     """Attempt to connect to the database; return (success, error_message).
 
     Returns (True, None) on success, or (False, error_string) on failure.
@@ -430,7 +678,7 @@ def test_connection(db_type: str, host: str, port: int, database: str,
         return False, "User name cannot be empty"
     
     try:
-        engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+        engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True, None
@@ -440,12 +688,13 @@ def test_connection(db_type: str, host: str, port: int, database: str,
 
 def get_table_columns(db_type: str, host: str, port: int, database: str,
                       user: str, password: str, table_name: str,
-                      driver_path: Optional[str] = None) -> List[str]:
+                      driver_path: Optional[str] = None,
+                      encrypt_mode: Optional[str] = None) -> List[str]:
     """Return a list of column names for the given table.
 
     Raises an exception on failure.
     """
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     inspector = _inspect_engine(engine)
     cols = inspector.get_columns(table_name)
     return [c['name'] for c in cols]
@@ -453,12 +702,13 @@ def get_table_columns(db_type: str, host: str, port: int, database: str,
 
 def get_table_sample(db_type: str, host: str, port: int, database: str,
                      user: str, password: str, table_name: str,
-                     driver_path: Optional[str] = None) -> Optional[dict]:
+                     driver_path: Optional[str] = None,
+                     encrypt_mode: Optional[str] = None) -> Optional[dict]:
     """Return a single row (as dict) from the table, or None if empty.
 
     Useful for showing sample values next to column names.
     """
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     with engine.connect() as conn:
         try:
             q_table = _quote_table_identifier(db_type, table_name)
@@ -480,7 +730,8 @@ def get_table_sample(db_type: str, host: str, port: int, database: str,
 
 def get_table_names(db_type: str, host: str, port: int, database: str,
                     user: str, password: str,
-                    driver_path: Optional[str] = None) -> List[str]:
+                    driver_path: Optional[str] = None,
+                    encrypt_mode: Optional[str] = None) -> List[str]:
     """Return a list of table names in the specified database.
 
     Useful for populating a table selector in the UI.
@@ -488,14 +739,15 @@ def get_table_names(db_type: str, host: str, port: int, database: str,
     if not database or not str(database).strip():
         raise ValueError("Database name cannot be empty when fetching table names")
 
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     inspector = _inspect_engine(engine)
     return inspector.get_table_names()
 
 
 def get_database_names(db_type: str, host: str, port: int,
                        user: str, password: str,
-                       driver_path: Optional[str] = None) -> List[str]:
+                       driver_path: Optional[str] = None,
+                       encrypt_mode: Optional[str] = None) -> List[str]:
     """Return a list of accessible database names on the server.
 
     Connects without selecting a specific database and runs SHOW DATABASES
@@ -510,7 +762,7 @@ def get_database_names(db_type: str, host: str, port: int,
         return []
 
     base_database = 'master' if db_kind == 'mssql' else 'mysql'
-    engine = _make_engine(db_type, host, port, base_database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, base_database, user, password, driver_path, encrypt_mode)
     with engine.connect() as conn:
         try:
             if db_kind == 'mssql':
@@ -538,14 +790,15 @@ def get_database_names(db_type: str, host: str, port: int,
 def get_table_rows(db_type: str, host: str, port: int, database: str,
                    user: str, password: str, table_name: str,
                    driver_path: Optional[str] = None,
-                   limit: Optional[int] = None) -> List[dict]:
+                   limit: Optional[int] = None,
+                   encrypt_mode: Optional[str] = None) -> List[dict]:
     """Return all rows from the specified table as a list of dicts.
 
     The optional ``limit`` parameter can be used to restrict the number of
     rows returned (useful for previewing large tables). The caller is
     responsible for ensuring the table exists beforehand.
     """
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     with engine.connect() as conn:
         q_table = _quote_table_identifier(db_type, table_name)
         db_kind = _normalize_db_type(db_type)
@@ -565,7 +818,8 @@ def get_table_rows(db_type: str, host: str, port: int, database: str,
 def get_query_rows(db_type: str, host: str, port: int, database: str,
                    user: str, password: str, query: str,
                    driver_path: Optional[str] = None,
-                   limit: Optional[int] = None) -> List[dict]:
+                   limit: Optional[int] = None,
+                   encrypt_mode: Optional[str] = None) -> List[dict]:
     """Return rows from a custom SELECT query as a list of dicts.
 
     The caller is responsible for supplying a valid read-only query.
@@ -573,7 +827,7 @@ def get_query_rows(db_type: str, host: str, port: int, database: str,
     """
     if not query or not query.strip():
         raise ValueError("Query cannot be empty")
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     with engine.connect() as conn:
         result = conn.execute(text(query))
         rows = [dict(r._mapping) for r in result.fetchall()]
@@ -584,9 +838,10 @@ def get_query_rows(db_type: str, host: str, port: int, database: str,
 
 def get_query_columns(db_type: str, host: str, port: int, database: str,
                       user: str, password: str, query: str,
-                      driver_path: Optional[str] = None) -> List[str]:
+                      driver_path: Optional[str] = None,
+                      encrypt_mode: Optional[str] = None) -> List[str]:
     """Return result column names for a custom query."""
-    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1)
+    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1, encrypt_mode=encrypt_mode)
     if not rows:
         return []
     return list(rows[0].keys())
@@ -594,16 +849,18 @@ def get_query_columns(db_type: str, host: str, port: int, database: str,
 
 def get_query_sample(db_type: str, host: str, port: int, database: str,
                      user: str, password: str, query: str,
-                     driver_path: Optional[str] = None) -> Optional[dict]:
+                     driver_path: Optional[str] = None,
+                     encrypt_mode: Optional[str] = None) -> Optional[dict]:
     """Return one sample row for a custom query, or None if no rows."""
-    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1)
+    rows = get_query_rows(db_type, host, port, database, user, password, query, driver_path, limit=1, encrypt_mode=encrypt_mode)
     return rows[0] if rows else None
 
 
 def stream_table_rows(db_type: str, host: str, port: int, database: str,
                       user: str, password: str, table_name: str,
                       driver_path: Optional[str] = None,
-                      batch_size: int = 1000):
+                      batch_size: int = 1000,
+                      encrypt_mode: Optional[str] = None):
     """Generator that yields batches of rows from a table.
     
     Instead of loading all rows at once, this streams them in batches
@@ -612,7 +869,7 @@ def stream_table_rows(db_type: str, host: str, port: int, database: str,
     Yields:
         List[dict]: Batches of rows as dictionaries
     """
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
 
     with engine.connect() as conn:
         q_table = _quote_table_identifier(db_type, table_name)
@@ -634,7 +891,8 @@ def stream_table_rows(db_type: str, host: str, port: int, database: str,
 def stream_query_rows(db_type: str, host: str, port: int, database: str,
                       user: str, password: str, query: str,
                       driver_path: Optional[str] = None,
-                      batch_size: int = 1000):
+                      batch_size: int = 1000,
+                      encrypt_mode: Optional[str] = None):
     """Generator that yields batches of rows from a custom query.
     
     Instead of loading all rows at once, this streams them in batches
@@ -646,7 +904,7 @@ def stream_query_rows(db_type: str, host: str, port: int, database: str,
     if not query or not query.strip():
         raise ValueError("Query cannot be empty")
 
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
 
     with engine.connect() as conn:
         result = conn.execution_options(stream_results=True).execute(text(query))
@@ -666,14 +924,15 @@ def stream_query_rows(db_type: str, host: str, port: int, database: str,
 def create_table_if_not_exists(db_type: str, host: str, port: int, database: str,
                                user: str, password: str, table_name: str,
                                columns: List[str],
-                               driver_path: Optional[str] = None):
+                               driver_path: Optional[str] = None,
+                               encrypt_mode: Optional[str] = None):
     """Create a simple table with given column names if it does not already exist.
 
     All columns are created with TEXT type for maximum compatibility.  This
     helper is intentionally minimal; callers can always create tables with a
     richer schema if desired.
     """
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     inspector = _inspect_engine(engine)
     if not inspector.has_table(table_name):
         db_kind = _normalize_db_type(db_type)
@@ -692,7 +951,8 @@ def create_table_if_not_exists(db_type: str, host: str, port: int, database: str
 def add_missing_columns(db_type: str, host: str, port: int, database: str,
                        user: str, password: str, table_name: str,
                        required_columns: List[str],
-                       driver_path: Optional[str] = None) -> List[str]:
+                       driver_path: Optional[str] = None,
+                       encrypt_mode: Optional[str] = None) -> List[str]:
     """Add missing columns to an existing table.
     
     Checks which columns from required_columns don't exist in the table,
@@ -703,7 +963,7 @@ def add_missing_columns(db_type: str, host: str, port: int, database: str,
     if not required_columns:
         return []
 
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
 
     try:
         db_kind = _normalize_db_type(db_type)
@@ -746,7 +1006,8 @@ def add_missing_columns(db_type: str, host: str, port: int, database: str,
 def rename_table_columns(db_type: str, host: str, port: int, database: str,
                          user: str, password: str, table_name: str,
                          rename_map: dict,
-                         driver_path: Optional[str] = None):
+                         driver_path: Optional[str] = None,
+                         encrypt_mode: Optional[str] = None):
     """Rename columns on an existing table.
 
     ``rename_map`` should be {old_name: new_name}. This helper currently
@@ -760,7 +1021,7 @@ def rename_table_columns(db_type: str, host: str, port: int, database: str,
     if db_kind != 'mysql':
         raise NotImplementedError("Column rename migration is currently implemented for MySQL only")
 
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     inspector = _inspect_engine(engine)
     meta_cols = {c.get('name'): c for c in inspector.get_columns(table_name)}
     q_table = _quote_table_identifier(db_type, table_name)
@@ -782,7 +1043,8 @@ def rename_table_columns(db_type: str, host: str, port: int, database: str,
 def insert_rows(db_type: str, host: str, port: int, database: str,
                 user: str, password: str, table_name: str,
                 rows: List[dict],
-                driver_path: Optional[str] = None):
+                driver_path: Optional[str] = None,
+                encrypt_mode: Optional[str] = None):
     """Insert a list of rows (dicts) into the specified table.
 
     Each dict should map column names to values.  This helper performs a simple
@@ -790,7 +1052,7 @@ def insert_rows(db_type: str, host: str, port: int, database: str,
     """
     if not rows:
         return
-    engine = _make_engine(db_type, host, port, database, user, password, driver_path)
+    engine = _make_engine(db_type, host, port, database, user, password, driver_path, encrypt_mode)
     q_table = _quote_table_identifier(db_type, table_name)
     with engine.begin() as conn:
         for row in rows:

@@ -39,6 +39,7 @@ API_LOGGING_ENABLED = False
 # Live capture controls for UI-driven capture sessions
 LIVE_CAPTURE_ENABLED = False
 _LIVE_EVENTS = []
+_MAX_LIVE_EVENTS = 1000  # Prevent unbounded memory growth
 
 def enable_live_capture(enabled: bool):
     global LIVE_CAPTURE_ENABLED
@@ -52,6 +53,9 @@ def append_live_event(message: str):
     try:
         if LIVE_CAPTURE_ENABLED:
             _LIVE_EVENTS.append(f"{datetime.utcnow().isoformat()}Z {message}")
+            # Prevent unbounded growth by keeping only the most recent events
+            if len(_LIVE_EVENTS) > _MAX_LIVE_EVENTS:
+                _LIVE_EVENTS[:] = _LIVE_EVENTS[-_MAX_LIVE_EVENTS:]
     except Exception:
         pass
 
@@ -193,7 +197,11 @@ class PingOneClient:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async def get_token(self) -> Optional[str]:
-        """Retrieve and cache access token for API authentication."""
+        """Retrieve and cache access token for API authentication.
+        
+        Note: This method is not thread-safe. For multi-threaded environments,
+        consider using separate client instances per thread.
+        """
         now = time.time()
         if self._token and now < self._token_expires:
             return self._token
@@ -204,7 +212,8 @@ class PingOneClient:
         self.last_error = None
         try:
             append_live_event(f"TOKEN POST {auth_url}")
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Add timeout to prevent hanging on network issues
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     auth_url,
                     data={"grant_type": "client_credentials"},
@@ -262,7 +271,7 @@ class PingOneClient:
             raise Exception("Auth Failed. Check credentials.")
         headers = self._get_auth_headers(token)
         update_url = f"{self.base_url}/users/{user_id}"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 # Optionally record request body/URL
                 if API_LOGGING_ENABLED:
@@ -325,7 +334,7 @@ class PingOneClient:
             raise Exception("Auth Failed. Check credentials.")
         headers = self._get_auth_headers(token)
         create_url = f"{self.base_url}/users"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 params = None
                 append_live_event(f"POST {create_url}")
@@ -386,7 +395,7 @@ class PingOneClient:
         headers = self._get_auth_headers(token)
         create_url = f"{self.base_url}/users"
         params = {'dryRun': 'true'} if dry_run else None
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             append_live_event(f"POST {create_url} (dryRun={dry_run})")
             resp = await client.post(create_url, headers=headers, json=data, params=params)
             try:
@@ -436,16 +445,31 @@ class PingOneClient:
             raise
 
     async def get_populations(self) -> dict:
-        """Return a mapping of population names to IDs for the environment."""
+        """Return a mapping of population names to IDs for the environment.
+        
+        Also returns the default population ID if one is marked as default.
+        Returns a tuple: (pop_dict, default_pop_id)
+        """
         token = await self.get_token()
         if not token:
             raise Exception("Auth Failed. Check credentials.")
         headers = self._get_auth_headers(token)
         url = f"{self.base_url}/populations"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             append_live_event(f"GET {url}")
             resp = await client.get(url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            pops = {p['name']: p['id'] for p in data.get('_embedded', {}).get('populations', [])}
-            return pops
+            populations = data.get('_embedded', {}).get('populations', [])
+            
+            # Build name->id mapping
+            pops = {p['name']: p['id'] for p in populations}
+            
+            # Find default population
+            default_pop_id = None
+            for p in populations:
+                if p.get('default', False):
+                    default_pop_id = p['id']
+                    break
+            
+            return pops, default_pop_id

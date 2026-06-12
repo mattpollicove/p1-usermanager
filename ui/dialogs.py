@@ -9,6 +9,7 @@ import copy
 import sys
 import re
 import platform
+import html
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -366,9 +367,9 @@ class EditUserDialog(QtWidgets.QDialog):
             attrs_table.setMaximumHeight(220)
 
             for row, (key, value) in enumerate(all_attrs):
-                key_item = QtWidgets.QTableWidgetItem(key)
+                key_item = QtWidgets.QTableWidgetItem(str(key))
                 key_item.setFlags(key_item.flags() & ~QtCore.Qt.ItemIsEditable)
-                value_item = QtWidgets.QTableWidgetItem(value)
+                value_item = QtWidgets.QTableWidgetItem(str(value))
                 value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemIsEditable)
                 attrs_table.setItem(row, 0, key_item)
                 attrs_table.setItem(row, 1, value_item)
@@ -1120,6 +1121,14 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.type_combo = QtWidgets.QComboBox()
         # MySQL is the default entry
         self.type_combo.addItems(["MySQL", "MSSQL", "Oracle"])
+        self.encrypt_combo = QtWidgets.QComboBox()
+        self.encrypt_combo.addItems(["Auto", "On", "Off"])
+        self.encrypt_combo.setToolTip(
+            "MSSQL only:\n"
+            "- Auto: Try TLS first, then retry without encryption if handshake fails\n"
+            "- On: Require TLS\n"
+            "- Off: Disable TLS"
+        )
         self.host_edit = QtWidgets.QLineEdit()
         self.host_edit.setPlaceholderText("hostname or IP")
         self.host_edit.setToolTip("Database server host")
@@ -1166,8 +1175,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.type_combo.currentTextChanged.connect(self._update_port_default)
         # refresh driver name suggestions when type changes
         self.type_combo.currentTextChanged.connect(self._set_driver_options)
+        # refresh encrypt-mode availability when type changes
+        self.type_combo.currentTextChanged.connect(self._update_encrypt_mode_state)
         # update JDBC string when type changes
         self.type_combo.currentTextChanged.connect(self._update_jdbc_string)
+        self.encrypt_combo.currentTextChanged.connect(self._update_jdbc_string)
         # update JDBC string when host/db/port change
         self.host_edit.textChanged.connect(self._update_jdbc_string)
         self.port_edit.textChanged.connect(self._update_jdbc_string)
@@ -1181,6 +1193,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         form.addRow("Name:", self.name_edit)
         form.addRow("Type:", self.type_combo)
+        form.addRow("Encrypt Mode:", self.encrypt_combo)
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         db_row = QtWidgets.QHBoxLayout()
@@ -1221,6 +1234,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
 
         # initialize port based on current type (combo default may already be set)
         self._update_port_default()
+        self._update_encrypt_mode_state()
         # ensure JDBC string is populated as well
         self._update_jdbc_string()
 
@@ -1279,9 +1293,11 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.user_edit.setText(initial.get('user', ''))
             self.pw_edit.setText(initial.get('password', ''))
             self.driver_combo.setCurrentText(initial.get('driver', ''))
+            self.encrypt_combo.setCurrentText(str(initial.get('encrypt_mode', 'Auto')).title())
             # do not prefill the table combo when editing; user must test
             # the connection in order to refresh and choose a table
             # rebuild JDBC string from loaded values
+            self._update_encrypt_mode_state()
             self._update_jdbc_string()
             # if editing an existing connection, focus name field for convenience
             self.name_edit.setFocus()
@@ -1356,22 +1372,27 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.driver_combo.clear()
         if typ == "MySQL":
             self.driver_combo.addItems([
-                "mysql-connector-j-9.0.0.jar",
-                "mysql-connector-j-8.4.0.jar",
+                "drivers/mysql/mysql-connector-j-9.0.0.jar",
+                "drivers/mysql/mysql-connector-j-8.4.0.jar",
             ])
         elif typ == "Oracle":
             self.driver_combo.addItems([
-                "ojdbc11.jar",
-                "ojdbc8.jar",
+                "drivers/oracle/ojdbc11.jar",
+                "drivers/oracle/ojdbc8.jar",
             ])
         else:
             self.driver_combo.addItems([
-                "mssql-jdbc-12.6.1.jre11.jar",
-                "mssql-jdbc-12.6.1.jre8.jar",
+                "drivers/mssql/mssql-jdbc-12.6.1.jre11.jar",
+                "drivers/mssql/mssql-jdbc-12.6.1.jre8.jar",
             ])
         # update label after changing options
         if hasattr(self, 'driver_label'):
             self._update_driver_label(self.driver_combo.currentText())
+
+    def _update_encrypt_mode_state(self):
+        """Enable encrypt mode controls only for MSSQL connections."""
+        is_mssql = self.type_combo.currentText() == "MSSQL"
+        self.encrypt_combo.setEnabled(is_mssql)
 
     def _update_jdbc_string(self):
         """Build a JDBC connection string from the current fields.
@@ -1397,7 +1418,12 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             elif typ == "Oracle":
                 url = f"jdbc:oracle:thin:@//{host}:{port}/{db}"
             else:
-                url = f"jdbc:sqlserver://{host}:{port};databaseName={db}"
+                mode = self.encrypt_combo.currentText()
+                if mode == "Off":
+                    suffix = ";encrypt=false"
+                else:
+                    suffix = ";encrypt=true;trustServerCertificate=true"
+                url = f"jdbc:sqlserver://{host}:{port};databaseName={db}{suffix}"
         self.jdbc_edit.setText(url)
 
     def _populate_tables(self):
@@ -1422,9 +1448,10 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.user_edit.text(),
                 self.pw_edit.text(),
                 self.driver_combo.currentText() or None,
+                self.encrypt_combo.currentText(),
             )
-            # Strip whitespace from table names to prevent SQL errors
-            names = [name.strip() for name in names]
+            # Strip whitespace and coerce to Python str to prevent Qt/JPype conversion errors
+            names = [str(name).strip() for name in names if str(name).strip()]
             self.table_combo.clear()
             self.table_combo.addItems(names)
             self.table_combo.setEnabled(bool(names))
@@ -1464,7 +1491,8 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.db_combo.currentText(),
             self.user_edit.text(),
             self.pw_edit.text(),
-            self.driver_combo.currentText() or None
+            self.driver_combo.currentText() or None,
+            self.encrypt_combo.currentText(),
         )
         QtWidgets.QApplication.restoreOverrideCursor()
         if ok:
@@ -1518,6 +1546,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 self.pw_edit.text(),
                 self.table_combo.currentText(),
                 self.driver_combo.currentText() or None,
+                self.encrypt_combo.currentText(),
             )
             if sample:
                 # Format the sample row in horizontal layout
@@ -1534,9 +1563,19 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             self.sample_label.setVisible(True)
 
     def _format_driver_error(self, error_msg: str) -> str:
-        """Convert driver error message with pip/download links into HTML format."""
-        # Convert URLs to HTML links
-        html_msg = error_msg.replace('\n', '<br>')
+        """Convert driver/setup guidance into safe HTML for display."""
+        raw = str(error_msg or '').strip()
+        # Strip Qt/RichText export CSS noise if a rich text fragment was passed back.
+        raw = re.sub(r'^\s*p,\s*li\s*\{[^\n]*\}\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'^\s*hr\s*\{[^\n]*\}\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'^\s*li\.unchecked::marker\s*\{[^\n]*\}\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'^\s*li\.checked::marker\s*\{[^\n]*\}\s*', '', raw, flags=re.IGNORECASE)
+        # Convert markdown-style links to plain URLs before HTML escaping/linking.
+        raw = re.sub(r'\[([^\]]+?)\]\((https?://[^\s)]+)\)', r'\2', raw)
+        # Remove markdown emphasis markers.
+        raw = raw.replace('**', '')
+
+        html_msg = html.escape(raw).replace('\n', '<br>')
         # Highlight pip install commands
         html_msg = re.sub(
             r'(pip install [^\n<]+)',
@@ -1559,16 +1598,47 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         icon=QtWidgets.QMessageBox.Critical,
         rich_text: bool = False,
     ):
-        """Show a message box with selectable text so errors can be copied."""
-        msgbox = QtWidgets.QMessageBox(self)
-        msgbox.setWindowTitle(title)
-        msgbox.setIcon(icon)
-        msgbox.setText(message)
-        msgbox.setTextFormat(QtCore.Qt.RichText if rich_text else QtCore.Qt.PlainText)
-        msgbox.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse | QtCore.Qt.LinksAccessibleByMouse
-        )
-        msgbox.exec()
+        """Show a selectable/clickable message dialog without Qt auto-format surprises."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        header = QtWidgets.QHBoxLayout()
+        icon_label = QtWidgets.QLabel()
+        pixmap = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxCritical).pixmap(32, 32)
+        if icon == QtWidgets.QMessageBox.Warning:
+            pixmap = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning).pixmap(32, 32)
+        elif icon == QtWidgets.QMessageBox.Information:
+            pixmap = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation).pixmap(32, 32)
+        icon_label.setPixmap(pixmap)
+        header.addWidget(icon_label, 0, QtCore.Qt.AlignTop)
+
+        body_container = QtWidgets.QVBoxLayout()
+        if rich_text:
+            viewer = QtWidgets.QTextBrowser(dlg)
+            viewer.setOpenExternalLinks(True)
+            viewer.setHtml(self._format_driver_error(message))
+        else:
+            viewer = QtWidgets.QPlainTextEdit(dlg)
+            viewer.setPlainText(str(message or ''))
+        viewer.setReadOnly(True)
+        body_container.addWidget(viewer)
+        header.addLayout(body_container, 1)
+        layout.addLayout(header)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok, parent=dlg)
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+
+        try:
+            screen = dlg.screen() or QtWidgets.QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+            dlg.resize(min(900, int(geom.width() * 0.7)), min(520, int(geom.height() * 0.6)))
+        except Exception:
+            dlg.resize(820, 480)
+        dlg.exec()
 
     def _on_use(self):
         """Accept the dialog and mark that this connection should be used immediately."""
@@ -1594,6 +1664,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
             'user': self.user_edit.text().strip(),
             'password': self.pw_edit.text(),
             'driver': self.driver_combo.currentText().strip(),
+            'encrypt_mode': self.encrypt_combo.currentText().strip().lower(),
             'save': bool(self.save_cb.isChecked()),
             'use': getattr(self, 'use_connection', False),
         }
@@ -1643,6 +1714,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
                 user,
                 self.pw_edit.text(),
                 self.driver_combo.currentText() or None,
+                self.encrypt_combo.currentText(),
             )
             current = self.db_combo.currentText()
             self.db_combo.clear()
@@ -1687,6 +1759,7 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         self.user_edit.clear()
         self.pw_edit.clear()
         self.driver_combo.setCurrentIndex(0)
+        self.encrypt_combo.setCurrentText("Auto")
         self.save_cb.setChecked(True)
         self.status_label.setText("")
         self.sample_label.setVisible(False)
@@ -2279,9 +2352,11 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
             max_h_ratio=0.64,
         )
         self.direction = direction
-        self.table_cols = list(table_cols or [])
-        self.pingone_attrs = list(pingone_attrs or [])
-        self.sample_row = sample_row or {}
+        # JDBC result metadata can contain JPype Java string objects;
+        # normalize all UI-bound names to Python str for Qt compatibility.
+        self.table_cols = [str(c) for c in (table_cols or [])]
+        self.pingone_attrs = [str(a) for a in (pingone_attrs or [])]
+        self.sample_row = {str(k): v for k, v in (sample_row or {}).items()}
         self.initial_mapping = dict(initial_mapping or {})
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -2466,7 +2541,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
             is_phone = col_info.get('is_phone', False)
             phone_type = col_info.get('phone_type', '')
             source_key = f"{col}::{phone_type}" if is_phone and phone_type else col
-            display_name = f"{col} ({phone_type})" if is_phone and phone_type else col
+            display_name = f"{str(col)} ({phone_type})" if is_phone and phone_type else str(col)
 
             src_item = QtWidgets.QTableWidgetItem(display_name)
             src_item.setData(QtCore.Qt.UserRole, source_key)
@@ -2482,7 +2557,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
                             if isinstance(phone_obj, dict) and phone_obj.get('type') == phone_type:
                                 val = phone_obj.get('number', '')
                                 break
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(val))
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(val) if val else ''))
 
             combo = QtWidgets.QComboBox()
             combo.setEditable(True)
@@ -2518,7 +2593,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         
         self.table.setRowCount(len(attrs))
         for i, attr in enumerate(attrs):
-            left_item = QtWidgets.QTableWidgetItem(attr)
+            left_item = QtWidgets.QTableWidgetItem(str(attr))
             left_item.setData(QtCore.Qt.UserRole, attr)
             self.table.setItem(i, 0, left_item)
 
@@ -2549,7 +2624,7 @@ class DatabaseMappingDialog(QtWidgets.QDialog):
         """Expand phoneNumbers column to show individual phone types if present."""
         expanded = []
         for col in table_cols:
-            if col.lower() == 'phonenumbers' and sample_row and col in sample_row:
+            if str(col).lower() == 'phonenumbers' and sample_row and col in sample_row:
                 phones = sample_row.get(col, [])
                 if isinstance(phones, list) and phones:
                     # Expand each phone with its type
@@ -2985,7 +3060,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             check_item.setCheckState(QtCore.Qt.Unchecked)
             self.attr_table.setItem(row, 0, check_item)
 
-            attr_item = QtWidgets.QTableWidgetItem(attr)
+            attr_item = QtWidgets.QTableWidgetItem(str(attr))
             attr_item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
             self.attr_table.setItem(row, 1, attr_item)
 

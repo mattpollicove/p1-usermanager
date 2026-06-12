@@ -12,10 +12,10 @@ from urllib.parse import urlparse
 
 try:
     import ldap3
-    from ldap3 import ALL, BASE, MODIFY_REPLACE, NO_ATTRIBUTES, SUBTREE
+    from ldap3 import ALL, MODIFY_REPLACE, SUBTREE, BASE, NO_ATTRIBUTES
 except Exception:  # pragma: no cover - handled by caller-facing checks
     ldap3 = None
-    ALL = BASE = MODIFY_REPLACE = NO_ATTRIBUTES = SUBTREE = None
+    ALL = MODIFY_REPLACE = SUBTREE = BASE = NO_ATTRIBUTES = None
 
 
 def _require_ldap3():

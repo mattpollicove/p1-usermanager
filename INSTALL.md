@@ -166,6 +166,7 @@ Quick-start values for the DB connection dialog:
 
 **MSSQL**
 - Type: `MSSQL`
+- Encrypt Mode: `Auto` (recommended), `On` (require TLS), or `Off` (no TLS)
 - Host: your SQL Server host or IP
 - Port: `1433`
 - Database: target SQL Server database name
@@ -192,6 +193,10 @@ Notes:
 - Use port `1433` for MSSQL, `3306` for MySQL, and `1521` for Oracle unless your environment uses custom ports.
 - For Oracle, enter the service name in the **Database** field.
 - For MSSQL, use the database name in the **Database** field and port `1433` unless your SQL Server uses a custom listener.
+- MSSQL Encrypt Mode behavior:
+   - `Auto`: secure-first (`encrypt=true;trustServerCertificate=true`) with one fallback retry to `encrypt=false` on TLS handshake errors.
+   - `On`: secure-only; no fallback.
+   - `Off`: disables TLS for environments that do not support encrypted SQL Server listener connections.
 
 ## Configuration
 

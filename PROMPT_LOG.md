@@ -50,3 +50,8 @@ All user prompts during a session are recorded here with timestamps.
 - **[2026-06-11]** "yes, also update documentation with file and url information"
 - **[2026-06-11]** "yes, also for oracle and mysql"
 - **[2026-06-11]** "commit and push"
+- **[2026-06-11]** "when changing profiles I still need to log into keychain twice"
+- **[2026-06-11]** "p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 13.0px '.SF NS'; color: #000000; color: rgba(0, 0, 0, 0.85)} p.p2 {margin: 0.0px 0.0px 0.0px 0.0px; font: 13.0px '.SF NS'; color: #000000; color: rgba(0, 0, 0, 0.85); min-height: 16.0px} **Failed to connect to database.** **** **Error details:** **Class com.microsoft.sqlserver.jdbc.SQLServerDriver is not found**"
+- **[2026-06-11]** "I am using the recommended path /Users/matthewpollicove/Documents/Projects/p1-usermanager/drivers/mssql/mssql-jdbc-13.4.0.jre11.jar"
+- **[2026-06-11]** "**com.microsoft.sqlserver.jdbc.SQLServerException: \"encrypt\" property is set to \"true\" and \"trustServerCertificate\" property is set to \"true\" but the driver could not establish a secure connection to SQL Server by using Secure Sockets Layer (SSL) encryption: Error: (unexpected_message) SQL Server did not return a response. The connection has been closed. ClientConnectionId:54bed01d-08fa-4cca-9c32-2c71170bad5a.**"
+- **[2026-06-11]** "**com.microsoft.sqlserver.jdbc.SQLServerException: \"encrypt\" property is set to \"true\" and \"trustServerCertificate\" property is set to \"true\" but the driver could not establish a secure connection to SQL Server by using Secure Sockets Layer (SSL) encryption: Error: (unexpected_message) SQL Server did not return a response. The connection has been closed. ClientConnectionId:1bde2dd4-d43e-4049-8db0-cf905243ee33.**"

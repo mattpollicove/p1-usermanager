@@ -10,6 +10,9 @@ import zipfile
 import shutil
 import sys
 import platform
+import threading
+import os
+import tempfile
 
 # If this file is executed directly (e.g. via the editor), ensure the
 # project root is on `sys.path` so local packages like `api` and `workers`
@@ -231,6 +234,8 @@ class MainWindow(QtWidgets.QMainWindow):
     - Provide helper methods for dialogs to trigger API updates
     - Surface connection logs and toggle API logging at runtime
     """
+    secret_read_completed = QtCore.Signal(str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{APP_VERSION}")
@@ -291,6 +296,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # Cache keyring secrets in-memory for this app session to avoid
         # repeated keychain unlock prompts when switching profiles.
         self._secret_cache = {}
+        # Track profiles we've already attempted to read from keyring this
+        # session so we do not repeatedly trigger macOS keychain prompts.
+        self._secret_read_attempted = set()
+        # Track secret reads currently running in background threads.
+        self._secret_read_inflight = set()
+        self.secret_read_completed.connect(self._on_secret_read_complete)
         self._open_log_windows = {}
         self.friendly_names = {
             'username': 'Username',
@@ -310,6 +321,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_profiles_from_disk()
         self.load_theme_preference()
         self._show_keyring_startup_warning()
+        self._show_java_startup_warning()
         # Don't restore geometry here - do it in showEvent after window is shown
 
     def _show_keyring_startup_warning(self):
@@ -321,6 +333,134 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_processing_message(msg, 15000)
         except Exception:
             pass
+
+    def _show_java_startup_warning(self):
+        """Show startup warning when Java runtime for JDBC is not discoverable."""
+        try:
+            from api import db_utils
+            status = db_utils.get_java_runtime_status()
+        except Exception:
+            return
+
+        if bool(status.get('available', False)):
+            return
+
+        msg = status.get('message') or (
+            "Java runtime unavailable: database import/export features may not work until Java is configured."
+        )
+        try:
+            self._set_processing_message(msg, 20000)
+        except Exception:
+            pass
+
+    def _profile_cache_keys(self, profile_name: str) -> list:
+        """Return cache keys for a profile name (raw + normalized)."""
+        raw = str(profile_name or "")
+        normalized = raw.strip()
+        keys = []
+        if raw:
+            keys.append(raw)
+        if normalized and normalized not in keys:
+            keys.append(normalized)
+        return keys
+
+    def _cache_secret(self, profile_name: str, secret: str):
+        """Store secret in session cache under raw and normalized profile keys."""
+        for key in self._profile_cache_keys(profile_name):
+            self._secret_cache[key] = secret or ""
+
+    def _mark_secret_read_attempted(self, profile_name: str):
+        """Mark profile key variants as already read-attempted this session."""
+        for key in self._profile_cache_keys(profile_name):
+            self._secret_read_attempted.add(key)
+
+    def _was_secret_read_attempted(self, profile_name: str) -> bool:
+        """Return True if keyring read already attempted this session."""
+        for key in self._profile_cache_keys(profile_name):
+            if key in self._secret_read_attempted:
+                return True
+        return False
+
+    def _get_cached_secret(self, profile_name: str):
+        """Return cached secret if present for the profile name."""
+        for key in self._profile_cache_keys(profile_name):
+            if key in self._secret_cache:
+                return self._secret_cache.get(key) or ""
+        return None
+
+    def _is_secret_read_inflight(self, profile_name: str) -> bool:
+        """Return True when a secret read is currently running for a profile."""
+        for key in self._profile_cache_keys(profile_name):
+            if key in self._secret_read_inflight:
+                return True
+        return False
+
+    def _start_secret_read(self, profile_name: str):
+        """Load a profile secret from keyring in a background thread."""
+        if not KEYRING_AVAILABLE:
+            self._mark_secret_read_attempted(profile_name)
+            return
+        if self._was_secret_read_attempted(profile_name):
+            return
+        if self._is_secret_read_inflight(profile_name):
+            return
+
+        keys = self._profile_cache_keys(profile_name)
+        for key in keys:
+            self._secret_read_inflight.add(key)
+        self._mark_secret_read_attempted(profile_name)
+
+        def worker():
+            secret = ""
+            try:
+                secret = keyring.get_password("pingone_usermanager", profile_name) or ""
+            except Exception:
+                secret = ""
+            finally:
+                self.secret_read_completed.emit(profile_name, secret)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_secret_read_complete(self, profile_name: str, secret: str):
+        """Apply secret read completion on the UI thread."""
+        for key in self._profile_cache_keys(profile_name):
+            self._secret_read_inflight.discard(key)
+
+        if secret:
+            self._cache_secret(profile_name, secret)
+
+        if self.profile_list.currentText() == profile_name:
+            # Keep user's manual entry if present; otherwise fill with loaded secret.
+            if not self.cl_sec.text().strip():
+                self.cl_sec.setText(secret or "")
+
+    def _connect_when_secret_ready(self, profile_name: str, retries_left: int = 20):
+        """Auto-connect after secret load (or timeout) without blocking the UI."""
+        if self.profile_list.currentText() != profile_name:
+            return
+
+        if self.cl_sec.text().strip():
+            self.connect_only(interactive=False)
+            return
+
+        cached_secret = self._get_cached_secret(profile_name)
+        if cached_secret:
+            self.cl_sec.setText(cached_secret)
+            self.connect_only(interactive=False)
+            return
+
+        if self._is_secret_read_inflight(profile_name) and retries_left > 0:
+            QtCore.QTimer.singleShot(250, lambda: self._connect_when_secret_ready(profile_name, retries_left - 1))
+            return
+
+        self.connect_only(interactive=False)
+
+    def _clear_cached_secret(self, profile_name: str):
+        """Remove any cached secret entries for the profile name."""
+        for key in self._profile_cache_keys(profile_name):
+            self._secret_cache.pop(key, None)
+            self._secret_read_attempted.discard(key)
+            self._secret_read_inflight.discard(key)
 
     def show_about_dialog(self):
         """Show application About information."""
@@ -609,11 +749,9 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Add a Settings menu for easy access to preferences
         settings_menu = menubar.addMenu("Settings")
-        print(f"Created Settings menu: {settings_menu}")
         settings_preferences_action = settings_menu.addAction("Preferences...")
         settings_preferences_action.triggered.connect(self.show_preferences_dialog)
         settings_preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.Key.Key_Comma))
-        print(f"Added Preferences to Settings menu")
         
         help_menu = menubar.addMenu("Help")
         
@@ -621,7 +759,6 @@ class MainWindow(QtWidgets.QMainWindow):
         help_preferences_action = help_menu.addAction("Preferences...")
         help_preferences_action.triggered.connect(self.show_preferences_dialog)
         help_preferences_action.setShortcut(QtGui.QKeySequence(SHORTCUT_MODIFIER | QtCore.Qt.Key.Key_Comma))
-        print(f"Added Preferences to Help menu")
         help_menu.addSeparator()
         
         config_help_action = help_menu.addAction("Configuration Help")
@@ -647,7 +784,7 @@ class MainWindow(QtWidgets.QMainWindow):
         prof_group = QtWidgets.QGroupBox("Profiles")
         prof_form = QtWidgets.QFormLayout(prof_group)
         self.profile_list = QtWidgets.QComboBox()
-        self.profile_list.currentIndexChanged.connect(self.load_selected_profile)
+        self.profile_list.currentIndexChanged[int].connect(self.load_selected_profile)
         prof_form.addRow("Active Profile:", self.profile_list)
         # Option: auto-connect to last working profile on startup
         self.auto_connect_cb = QtWidgets.QCheckBox("Auto-connect to last working profile on startup")
@@ -1239,8 +1376,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if prof not in cfg:
                 cfg[prof] = {}
             cfg[prof][key] = method
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
 
@@ -1363,6 +1499,25 @@ class MainWindow(QtWidgets.QMainWindow):
             with open(self.config_file, 'r') as f: return json.load(f)
         return {}
 
+    def _write_config(self, data: dict):
+        """Atomically persist profiles config to avoid truncated JSON on interruption."""
+        cfg_path = Path(self.config_file)
+        parent = cfg_path.parent if cfg_path.parent != Path("") else Path(".")
+        parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{cfg_path.name}.", suffix=".tmp", dir=str(parent))
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(cfg_path))
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+
     def restore_window_geometry(self):
         """Restore saved window geometry from profiles.json __meta__ section."""
         try:
@@ -1459,8 +1614,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     cfg['__meta__']['window_x'] = self.x()
                     cfg['__meta__']['window_y'] = self.y()
             
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
 
@@ -1486,8 +1640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if migrated:
             # Persist the migrated config back to disk so the change is
             # visible on subsequent runs.
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
 
         self.profile_list.blockSignals(True); self.profile_list.clear()
         # Populate only profile names (filter out any __meta__ app-level keys)
@@ -1515,8 +1668,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.profile_list.setCurrentIndex(idx)
                     self.profile_list.blockSignals(False)
                     self.load_selected_profile()
-                    # Delay connect slightly to allow UI to settle
-                    QtCore.QTimer.singleShot(250, self.connect_only)
+                    # Delay connect slightly to allow UI/secret load to settle.
+                    QtCore.QTimer.singleShot(250, lambda: self._connect_when_secret_ready(last, retries_left=20))
                 else:
                     # simply load whichever profile is currently selected (first item)
                     self.load_selected_profile()
@@ -1582,11 +1735,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.env_id.setText(p[name].get("env_id", ""))
             self.cl_id.setText(p[name].get("cl_id", ""))
             try:
-                if name in self._secret_cache:
-                    secret = self._secret_cache.get(name) or ""
+                cached_secret = self._get_cached_secret(name)
+                if cached_secret is None:
+                    if self._was_secret_read_attempted(name):
+                        secret = ""
+                    else:
+                        secret = ""
+                        self._start_secret_read(name)
                 else:
-                    secret = keyring.get_password("pingone_usermanager", name) or ""
-                    self._secret_cache[name] = secret
+                    secret = cached_secret
                 self.cl_sec.setText(secret)
             except Exception:
                 # If keyring backend fails, leave secret blank and continue
@@ -1646,11 +1803,10 @@ class MainWindow(QtWidgets.QMainWindow):
             meta = p.get('__meta__', {})
             meta['last_working_profile'] = name
             p['__meta__'] = meta
-            with open(self.config_file, 'w') as f:
-                json.dump(p, f, indent=4)
+            self._write_config(p)
             try:
                 keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
-                self._secret_cache[name] = self.cl_sec.text()
+                self._cache_secret(name, self.cl_sec.text())
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Keyring Error", f"Failed to save client secret to keyring: {e}\n\nCredentials will not be stored persistently.")
             # reload profiles without triggering another connection attempt
@@ -1667,8 +1823,7 @@ class MainWindow(QtWidgets.QMainWindow):
             meta['pingone_console_url'] = self.pingone_console_url
             meta['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
             cfg['__meta__'] = meta
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
 
@@ -1685,8 +1840,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cfg[name]['hide_raw_http_columns'] = bool(self.hide_raw_http_columns_cb.isChecked())
             cfg[name]['show_user_update_success'] = bool(self.show_user_update_success_action.isChecked())
             cfg[name]['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
 
@@ -1921,8 +2075,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # connections marked not to be saved)
             new = dlg.get_connections()
             cfg['db_connections'] = new
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "DB Connections", f"Failed to manage DB connections: {e}")
 
@@ -1934,8 +2087,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dlg = LDAPConnectionsManager(conns.copy(), self)
             dlg.exec()
             cfg['ldap_connections'] = dlg.get_connections()
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "LDAP Connections", f"Failed to manage LDAP connections: {e}")
 
@@ -1950,8 +2102,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             conns[connection_name].update(updates)
             cfg['ldap_connections'] = conns
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
 
@@ -1977,8 +2128,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if connection_name in conns:
                     del conns[connection_name]
                     cfg['ldap_connections'] = conns
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                 return ''
 
             new_name = new_data.get('name', '').strip() or connection_name
@@ -1986,8 +2136,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 del conns[connection_name]
             conns[new_name] = new_data
             cfg['ldap_connections'] = conns
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
             return new_name
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Edit LDAP Connection", str(e))
@@ -2017,8 +2166,7 @@ class MainWindow(QtWidgets.QMainWindow):
             conns = cfg.get('ldap_connections', {})
             conns[new_name] = new_data
             cfg['ldap_connections'] = conns
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
             
             return new_name
         except Exception as e:
@@ -2096,7 +2244,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ok, err = db_utils.test_connection(
                         conn['type'], conn['host'], conn['port'], 
                         conn['database'], conn['user'], conn['password'], 
-                        conn.get('driver')
+                        conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     if ok:
                         QtWidgets.QMessageBox.information(
@@ -2183,8 +2331,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Remove the connection
                     del conns[selected]
                     cfg['db_connections'] = conns
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                     QtWidgets.QMessageBox.information(self, "Remove Connection", f"Database connection '{selected}' has been removed.")
                 continue
 
@@ -2215,8 +2362,7 @@ class MainWindow(QtWidgets.QMainWindow):
             conns = cfg.get('db_connections', {})
             conns[new_name] = new_data
             cfg['db_connections'] = conns
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
             
             return new_name
         except Exception as e:
@@ -2245,8 +2391,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if connection_name in conns:
                     del conns[connection_name]
                     cfg['db_connections'] = conns
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                 return ''
 
             new_name = new_data.get('name', '').strip() or connection_name
@@ -2254,8 +2399,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 del conns[connection_name]
             conns[new_name] = new_data
             cfg['db_connections'] = conns
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
             return new_name
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Database Connection", f"Failed to edit database connection: {e}")
@@ -2409,8 +2553,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Remove the connection
                     del conns[selected]
                     cfg['ldap_connections'] = conns
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                     QtWidgets.QMessageBox.information(self, "Remove Connection", f"LDAP connection '{selected}' has been removed.")
                 continue
             if selected == create_opt:
@@ -2914,8 +3057,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     cfg[profile_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                     cfg[profile_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
                     cfg[profile_name]['export_selected_populations'] = opts.get('selected_populations', [])
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                 except Exception:
                     pass
 
@@ -2958,7 +3100,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     timeout=int(conn.get('timeout', 30) or 30),
                 )
                 if sample_entry:
-                    ldap_attrs = sorted(set(ldap_attrs).union({k for k in sample_entry.keys() if k and k.lower() != 'dn'}))
+                    ldap_attrs = sorted(set(ldap_attrs).union({k for k in sample_entry.keys() if k and str(k).lower() != 'dn'}))
             except Exception:
                 pass
 
@@ -3031,7 +3173,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 'population.name': 'ou',
                 'population.id': 'employeeNumber',
             }
-            rdn_attr = rdn_aliases.get(rdn_attr.lower(), rdn_attr)
+            rdn_attr = rdn_aliases.get(str(rdn_attr).lower(), rdn_attr)
             object_classes = conn.get('object_classes') or ['top', 'person', 'organizationalPerson', 'inetOrgPerson']
             
             # Start TPS tracking
@@ -3161,7 +3303,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'))
+            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'))
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
                 return
@@ -3170,13 +3312,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 if source_mode == "Custom Query":
                     cols = db_utils.get_query_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], query_text, conn.get('driver')
+                        conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     # Get first 10 rows to discover populated attributes
                     try:
                         sample_rows = db_utils.get_query_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             limit=10
                         )
                         cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
@@ -3185,18 +3327,18 @@ class MainWindow(QtWidgets.QMainWindow):
                         # Fall back to single sample
                         sample = db_utils.get_query_sample(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver')
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
                 else:
                     cols = db_utils.get_table_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver')
+                        conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     # Get first 10 rows to discover populated attributes
                     try:
                         sample_rows = db_utils.get_table_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver'),
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             limit=10
                         )
                         cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
@@ -3205,7 +3347,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         # Fall back to single sample
                         sample = db_utils.get_table_sample(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver')
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {e}")
@@ -3261,14 +3403,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     if source_mode == "Custom Query":
                         row_generator = db_utils.stream_query_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             batch_size=1000
                         )
                         self._set_last_data_source(f"DB {name}: custom query")
                     else:
                         row_generator = db_utils.stream_table_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver'),
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             batch_size=1000
                         )
                         self._set_last_data_source(f"DB {name}: {table}")
@@ -3310,9 +3452,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
                 # convert DB rows to PingOne users
-                users = self._convert_rows_to_users(rows, mapping, client, pops)
+                debug_stats = {}
+                users = self._convert_rows_to_users(rows, mapping, client, pops, debug_stats=debug_stats)
+                self._set_processing_message(self._format_import_mapping_debug_summary(debug_stats), 10000)
+                sampled_skips = debug_stats.get('sampled_skips', []) if isinstance(debug_stats, dict) else []
+                if sampled_skips:
+                    self._set_processing_message(f"Sample skipped rows: {' | '.join(sampled_skips)}", 12000)
                 # run common import sequence
-                self._perform_import_sequence(users, client, pops)
+                self._perform_import_sequence(users, client, pops, debug_stats=debug_stats)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import DB", str(e))
 
@@ -3325,9 +3472,9 @@ class MainWindow(QtWidgets.QMainWindow):
             from api import db_utils
             table_names = db_utils.get_table_names(
                 conn['type'], conn['host'], conn['port'], conn['database'],
-                conn['user'], conn['password'], conn.get('driver')
+                conn['user'], conn['password'], conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
             )
-            table_names = [t.strip() for t in table_names if str(t).strip()]
+            table_names = [str(t).strip() for t in table_names if str(t).strip()]
         except Exception as e:
             list_error = str(e)
             table_names = []
@@ -3378,9 +3525,9 @@ class MainWindow(QtWidgets.QMainWindow):
             from api import db_utils
             table_names = db_utils.get_table_names(
                 conn['type'], conn['host'], conn['port'], conn['database'],
-                conn['user'], conn['password'], conn.get('driver')
+                conn['user'], conn['password'], conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
             )
-            table_names = [t.strip() for t in table_names if str(t).strip()]
+            table_names = [str(t).strip() for t in table_names if str(t).strip()]
         except Exception as e:
             list_error = str(e)
             table_names = []
@@ -3433,10 +3580,189 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             dbs[connection_name].update(updates)
             cfg['db_connections'] = dbs
-            with open(self.config_file, 'w') as f:
-                json.dump(cfg, f, indent=4)
+            self._write_config(cfg)
         except Exception:
             pass
+
+    def _get_saved_dialog_size(self, prefs_key: str):
+        """Return saved dialog size for the active profile (fallback to app meta)."""
+        try:
+            cfg = self._read_config()
+            prof_name = self.profile_list.currentText() if hasattr(self, 'profile_list') else ''
+            if prof_name and prof_name in cfg and isinstance(cfg.get(prof_name), dict):
+                prof_sizes = cfg[prof_name].get('dialog_sizes', {})
+                if isinstance(prof_sizes, dict):
+                    size = prof_sizes.get(prefs_key)
+                    if isinstance(size, dict):
+                        w = int(size.get('width', 0) or 0)
+                        h = int(size.get('height', 0) or 0)
+                        if w > 0 and h > 0:
+                            return w, h
+            meta = cfg.get('__meta__', {}) if isinstance(cfg, dict) else {}
+            global_sizes = meta.get('dialog_sizes', {}) if isinstance(meta, dict) else {}
+            size = global_sizes.get(prefs_key) if isinstance(global_sizes, dict) else None
+            if isinstance(size, dict):
+                w = int(size.get('width', 0) or 0)
+                h = int(size.get('height', 0) or 0)
+                if w > 0 and h > 0:
+                    return w, h
+        except Exception:
+            pass
+        return None
+
+    def _save_dialog_size(self, prefs_key: str, width: int, height: int):
+        """Persist dialog size for the active profile, with app-level fallback."""
+        try:
+            w = int(width or 0)
+            h = int(height or 0)
+            if w <= 0 or h <= 0:
+                return
+            cfg = self._read_config()
+            prof_name = self.profile_list.currentText() if hasattr(self, 'profile_list') else ''
+            if prof_name:
+                if prof_name not in cfg or not isinstance(cfg.get(prof_name), dict):
+                    cfg[prof_name] = {}
+                prof_sizes = cfg[prof_name].get('dialog_sizes', {})
+                if not isinstance(prof_sizes, dict):
+                    prof_sizes = {}
+                prof_sizes[prefs_key] = {'width': w, 'height': h}
+                cfg[prof_name]['dialog_sizes'] = prof_sizes
+            else:
+                meta = cfg.get('__meta__', {})
+                if not isinstance(meta, dict):
+                    meta = {}
+                global_sizes = meta.get('dialog_sizes', {})
+                if not isinstance(global_sizes, dict):
+                    global_sizes = {}
+                global_sizes[prefs_key] = {'width': w, 'height': h}
+                meta['dialog_sizes'] = global_sizes
+                cfg['__meta__'] = meta
+            self._write_config(cfg)
+        except Exception:
+            pass
+
+    def _prompt_bounded_multiline_text(self, title: str, prompt: str, default_text: str, prefs_key: str = 'multiline_input'):
+        """Prompt for multiline text using a dialog bounded to screen size."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+        label = QtWidgets.QLabel(prompt)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        editor = QtWidgets.QTextEdit(dlg)
+        editor.setPlainText(str(default_text or ''))
+        # Keep long SQL/LDAP text usable without forcing giant window expansion.
+        editor.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        layout.addWidget(editor)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dlg,
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+            max_w = max(640, geom.width() - 40)
+            max_h = max(420, geom.height() - 40)
+            target_w = min(980, int(geom.width() * 0.78), max_w)
+            target_h = min(620, int(geom.height() * 0.62), max_h)
+            saved_size = self._get_saved_dialog_size(prefs_key)
+            if saved_size:
+                target_w = min(max_w, max(680, int(saved_size[0])))
+                target_h = min(max_h, max(420, int(saved_size[1])))
+            dlg.resize(max(680, target_w), max(420, target_h))
+            dlg.setMaximumSize(max_w, max_h)
+        except Exception:
+            dlg.resize(900, 560)
+
+        accepted = dlg.exec() == QtWidgets.QDialog.Accepted
+        try:
+            self._save_dialog_size(prefs_key, dlg.width(), dlg.height())
+        except Exception:
+            pass
+        if not accepted:
+            return "", False
+        text = editor.toPlainText()
+        return text, True
+
+    def _prompt_saved_text_choice(self, title: str, prompt: str, items: list, new_label: str, prefs_key: str):
+        """Prompt to select from saved long text values in a bounded dialog."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+        label = QtWidgets.QLabel(prompt)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        list_widget = QtWidgets.QListWidget(dlg)
+
+        def _shorten(text: str, max_len: int = 120) -> str:
+            s = str(text or '').replace('\n', ' ').strip()
+            if len(s) <= max_len:
+                return s
+            return s[: max_len - 3] + '...'
+
+        new_item = QtWidgets.QListWidgetItem(new_label)
+        new_item.setData(QtCore.Qt.UserRole, new_label)
+        list_widget.addItem(new_item)
+
+        for saved in items or []:
+            shown = _shorten(saved)
+            item = QtWidgets.QListWidgetItem(shown)
+            item.setToolTip(str(saved))
+            item.setData(QtCore.Qt.UserRole, str(saved))
+            list_widget.addItem(item)
+
+        list_widget.setCurrentRow(0)
+        list_widget.itemDoubleClicked.connect(lambda _item: dlg.accept())
+        layout.addWidget(list_widget)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dlg,
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            geom = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+            max_w = max(560, geom.width() - 40)
+            max_h = max(320, geom.height() - 40)
+            target_w = min(900, int(geom.width() * 0.7), max_w)
+            target_h = min(520, int(geom.height() * 0.55), max_h)
+            saved_size = self._get_saved_dialog_size(prefs_key)
+            if saved_size:
+                target_w = min(max_w, max(560, int(saved_size[0])))
+                target_h = min(max_h, max(320, int(saved_size[1])))
+            dlg.resize(max(560, target_w), max(320, target_h))
+            dlg.setMaximumSize(max_w, max_h)
+        except Exception:
+            dlg.resize(760, 420)
+
+        accepted = dlg.exec() == QtWidgets.QDialog.Accepted
+        try:
+            self._save_dialog_size(prefs_key, dlg.width(), dlg.height())
+        except Exception:
+            pass
+        if not accepted:
+            return "", False
+
+        current = list_widget.currentItem()
+        if not current:
+            return "", False
+        selected = current.data(QtCore.Qt.UserRole)
+        return str(selected or ''), True
 
     def _prompt_custom_query_from_connection(self, conn: dict, connection_name: str):
         """Prompt for SQL query and return (query_text, query_saved)."""
@@ -3445,25 +3771,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # If queries were previously saved, let the user start from one.
         if saved_queries:
-            options = ["<Type new query>"] + saved_queries
-            selected, ok = QtWidgets.QInputDialog.getItem(
-                self,
+            selected, ok = self._prompt_saved_text_choice(
                 "Saved Custom Queries",
                 f"Select a saved query for {connection_name} or choose '<Type new query>':",
-                options,
-                0,
-                False,
+                saved_queries,
+                "<Type new query>",
+                prefs_key='saved_custom_query_picker',
             )
             if not ok:
                 return "", False
             if selected and selected != "<Type new query>":
                 default_query = selected
 
-        query_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
+        query_text, ok = self._prompt_bounded_multiline_text(
             "Custom Query",
             "Enter SQL query (SELECT):",
             default_query,
+            prefs_key='custom_query_input',
         )
         if not ok or not query_text or not query_text.strip():
             return "", False
@@ -3501,25 +3825,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # If filters were previously saved, let the user start from one.
         if saved_filters:
-            options = ["<Type new filter>"] + saved_filters
-            selected, ok = QtWidgets.QInputDialog.getItem(
-                self,
+            selected, ok = self._prompt_saved_text_choice(
                 "Saved Custom Filters",
                 f"Select a saved filter for {connection_name} or choose '<Type new filter>':",
-                options,
-                0,
-                False,
+                saved_filters,
+                "<Type new filter>",
+                prefs_key='saved_custom_filter_picker',
             )
             if not ok:
                 return "", False
             if selected and selected != "<Type new filter>":
                 default_filter = selected
 
-        filter_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
+        filter_text, ok = self._prompt_bounded_multiline_text(
             "Custom LDAP Filter",
             "Enter LDAP filter (e.g., (&(objectClass=person)(ou=users))):",
             default_filter,
+            prefs_key='custom_ldap_filter_input',
         )
         if not ok or not filter_text or not filter_text.strip():
             return "", False
@@ -3665,7 +3987,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             ok, _ = db_utils.test_connection(
                 conn['type'], conn['host'], conn['port'], conn['database'],
-                conn['user'], conn['password'], conn.get('driver')
+                conn['user'], conn['password'], conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
             )
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Import DB", "Unable to connect with provided credentials.")
@@ -3676,12 +3998,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if query_text:
                     cols = db_utils.get_query_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], query_text, conn.get('driver')
+                        conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     # Get first 10 rows to discover populated attributes
                     sample_rows = db_utils.get_query_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], query_text, conn.get('driver'),
+                        conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                         limit=10
                     )
                     cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
@@ -3689,12 +4011,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     cols = db_utils.get_table_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver')
+                        conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     # Get first 10 rows to discover populated attributes
                     sample_rows = db_utils.get_table_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, conn.get('driver'),
+                        conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                         limit=10
                     )
                     cols = self._discover_populated_attributes_from_entries(sample_rows, max_sample=10) if sample_rows else cols
@@ -3705,20 +4027,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     if query_text:
                         cols = db_utils.get_query_columns(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver')
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
                         sample = db_utils.get_query_sample(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver')
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
                     else:
                         cols = db_utils.get_table_columns(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver')
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
                         sample = db_utils.get_table_sample(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver')
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                         )
                 except Exception as inner_e:
                     QtWidgets.QMessageBox.critical(self, "Import DB", f"Failed to read table metadata: {inner_e}")
@@ -3802,14 +4124,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     if query_text:
                         row_generator = db_utils.stream_query_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], query_text, conn.get('driver'),
+                            conn['user'], conn['password'], query_text, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             batch_size=1000
                         )
                         self._set_last_data_source(f"DB {connection_name}: custom query")
                     else:
                         row_generator = db_utils.stream_table_rows(
                             conn['type'], conn['host'], conn['port'], conn['database'],
-                            conn['user'], conn['password'], table, conn.get('driver'),
+                            conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'),
                             batch_size=1000
                         )
                         self._set_last_data_source(f"DB {connection_name}: {table}")
@@ -3843,10 +4165,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Show status message with row count
                 self._set_processing_message(f"Read {len(rows)} rows from database", 5000)
                 
-                # Convert row keys to underscore versions
+                # Normalize DB row keys to Python strings.
                 converted_rows = []
                 for row in rows:
-                    converted_row = {self._convert_dotted_to_underscore(k): v for k, v in row.items()}
+                    converted_row = {str(k): v for k, v in row.items()}
                     converted_rows.append(converted_row)
                 
                 # Prepare client and import
@@ -3859,7 +4181,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     token = None
                 
-                users = self._convert_rows_to_users(converted_rows, mapping, client, pops)
+                debug_stats = {}
+                users = self._convert_rows_to_users(converted_rows, mapping, client, pops, debug_stats=debug_stats)
+                self._set_processing_message(self._format_import_mapping_debug_summary(debug_stats), 10000)
+                sampled_skips = debug_stats.get('sampled_skips', []) if isinstance(debug_stats, dict) else []
+                if sampled_skips:
+                    self._set_processing_message(f"Sample skipped rows: {' | '.join(sampled_skips)}", 12000)
                 
                 # Prompt for population selection
                 if not pops:
@@ -3962,7 +4289,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         return  # User cancelled
                 
-                self._perform_import_sequence(users, client, pops, fixed_pop_id=fixed_pop_id)
+                self._perform_import_sequence(users, client, pops, fixed_pop_id=fixed_pop_id, debug_stats=debug_stats)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
@@ -3989,7 +4316,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'))
+            ok, _ = db_utils.test_connection(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'))
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Export DB", "Unable to connect with provided credentials.")
                 return
@@ -4048,15 +4375,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     cfg[profile_name]['export_prefer_selected'] = (opts.get('rows') == 'selected')
                     cfg[profile_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                     cfg[profile_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
                 except Exception:
                     pass
             
             # fetch column names if table exists, otherwise use empty list
             cols = []
             try:
-                cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'))
+                cols = db_utils.get_table_columns(conn['type'], conn['host'], conn['port'], conn['database'], conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode'))
             except Exception:
                 cols = []
             
@@ -4086,11 +4412,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         try:
                             db_utils.rename_table_columns(
                                 conn['type'], conn['host'], conn['port'], conn['database'],
-                                conn['user'], conn['password'], table, rename_map, conn.get('driver')
+                                conn['user'], conn['password'], table, rename_map, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                             )
                             cols = db_utils.get_table_columns(
                                 conn['type'], conn['host'], conn['port'], conn['database'],
-                                conn['user'], conn['password'], table, conn.get('driver')
+                                conn['user'], conn['password'], table, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                             )
                             # Filter metadata columns after migration too
                             if cols:
@@ -4247,13 +4573,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Create table if it doesn't exist
                     db_utils.create_table_if_not_exists(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver')
+                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     
                     # Add any missing columns to existing table
                     added_cols = db_utils.add_missing_columns(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver')
+                        conn['user'], conn['password'], table, list(effective_mapping.values()), conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     
                     if added_cols:
@@ -4265,7 +4591,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Insert the data
                     db_utils.insert_rows(
                         conn['type'], conn['host'], conn['port'], conn['database'],
-                        conn['user'], conn['password'], table, rows, conn.get('driver')
+                        conn['user'], conn['password'], table, rows, conn.get('driver'), encrypt_mode=conn.get('encrypt_mode')
                     )
                     msg = f"Exported {len(rows)} users to table {table}."
                     if filtered_out:
@@ -4343,7 +4669,7 @@ class MainWindow(QtWidgets.QMainWindow):
         attrs = {a for a in attrs if _is_mappable_attr(a)}
         return sorted(attrs)
 
-    def connect_only(self):
+    def connect_only(self, interactive: bool = True):
         """Attempt to obtain a token using the UI credentials and log success/failure."""
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
         self.prog.show(); self.prog.setRange(0, 0)
@@ -4382,12 +4708,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta = cfg.get('__meta__', {})
                 meta['last_working_profile'] = prof_name
                 cfg['__meta__'] = meta
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+                self._write_config(cfg)
             except Exception:
                 pass
         else:
-            QtWidgets.QMessageBox.critical(self, "Connect", "Auth Failed. Check credentials.")
+            if interactive:
+                QtWidgets.QMessageBox.critical(self, "Connect", "Auth Failed. Check credentials.")
             try:
                 api_client.write_connection_log(f"Connect failed for env={client.env_id}, client_id={client.client_id}")
             except Exception:
@@ -4411,13 +4737,12 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 # Remove saved profile and associated keyring secret
                 del p[name]
-                with open(self.config_file, 'w') as f:
-                    json.dump(p, f, indent=4)
+                self._write_config(p)
                 try:
                     keyring.delete_password("pingone_usermanager", name)
                 except Exception:
                     pass
-                self._secret_cache.pop(name, None)
+                self._clear_cached_secret(name)
                 self.load_profiles_from_disk()
                 self.status_label.setText(f"Deleted profile {name}")
             except Exception as e:
@@ -4444,15 +4769,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     return False
                 
                 # Save the config and credentials first
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+                self._write_config(cfg)
                 
                 # Save credentials to keyring
                 env_id, client_id, secret = new_credentials
                 try:
                     if secret:
                         keyring.set_password("pingone_usermanager", new_profile, secret)
-                        self._secret_cache[new_profile] = secret
+                        self._cache_secret(new_profile, secret)
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(
                         self,
@@ -4466,7 +4790,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 idx = self.profile_list.findText(new_profile)
                 if idx >= 0:
                     self.profile_list.setCurrentIndex(idx)
-                    self.load_selected_profile()
                 
                 # Test the connection synchronously
                 client = api_client.PingOneClient(env_id, client_id, secret)
@@ -4512,8 +4835,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Save if there were any changes (and connection wasn't already tested)
             if (deleted or new_profile) and not auto_connect:
                 # Save updated config
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+                self._write_config(cfg)
                 
                 # Save credentials to keyring if provided
                 if new_profile and new_credentials:
@@ -4521,7 +4843,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     try:
                         if secret:
                             keyring.set_password("pingone_usermanager", new_profile, secret)
-                            self._secret_cache[new_profile] = secret
+                            self._cache_secret(new_profile, secret)
                     except Exception as e:
                         QtWidgets.QMessageBox.warning(
                             self,
@@ -4538,7 +4860,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         idx = self.profile_list.findText(new_profile)
                         if idx >= 0:
                             self.profile_list.setCurrentIndex(idx)
-                            self.load_selected_profile()
                     except Exception:
                         pass
                 
@@ -4562,7 +4883,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         keyring.delete_password("pingone_usermanager", profile_name)
                     except Exception:
                         pass
-                    self._secret_cache.pop(profile_name, None)
+                    self._clear_cached_secret(profile_name)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Profile Manager", f"Error opening profile manager: {e}")
 
@@ -5579,7 +5900,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(p, f, indent=4)
             try:
                 keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
-                self._secret_cache[name] = self.cl_sec.text()
+                self._cache_secret(name, self.cl_sec.text())
             except Exception as e:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -5871,7 +6192,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- shared import helpers ------------------------------------------------
     def _convert_rows_to_users(self, rows: list, mapping: dict,
                                client, pops: dict = None,
-                               fixed_pop_id=None, fixed_enabled=None) -> list:
+                               fixed_pop_id=None, fixed_enabled=None,
+                               debug_stats: dict = None) -> list:
         """Apply a column-to-attribute mapping to a list of row dicts.
 
         Returns a list of PingOne user dicts suitable for import.  This logic is
@@ -5880,17 +6202,76 @@ class MainWindow(QtWidgets.QMainWindow):
         ``mapping`` should map source column names to PingOne attribute names.
         """
         users = []
-        for row in rows:
+        if isinstance(debug_stats, dict):
+            debug_stats['total_rows'] = len(rows or [])
+            debug_stats['mapped_rows'] = 0
+            debug_stats['skipped_rows'] = 0
+            debug_stats['skip_reasons'] = {}
+            debug_stats['sampled_skips'] = []
+
+        for idx, row in enumerate(rows, start=1):
+            # Normalize row keys from JDBC/JPype sources to Python strings.
+            row_str = {str(k): v for k, v in (row or {}).items()}
+            # Also keep trimmed-key aliases (drivers can include padded metadata labels).
+            row_trimmed = {}
+            for k, v in row_str.items():
+                try:
+                    k_trim = str(k).strip()
+                except Exception:
+                    k_trim = str(k)
+                if k_trim and k_trim not in row_trimmed:
+                    row_trimmed[k_trim] = v
+            # Case-insensitive lookup map for DB drivers that normalize key casing.
+            row_lower = {str(k).lower(): v for k, v in row_str.items()}
+            row_lower.update({str(k).lower(): v for k, v in row_trimmed.items()})
+            # Tokenized lookup map for loose matching (e.g. [User Name], user_name, USERNAME).
+            row_token = {}
+            for k, v in row_trimmed.items():
+                token = ''.join(ch for ch in str(k).lower() if ch.isalnum())
+                if token and token not in row_token:
+                    row_token[token] = v
             flat = {}
             phone_by_type = {}
 
             for src_key, target in mapping.items():
-                source_name = src_key
+                source_name = str(src_key).strip()
                 source_phone_type = None
-                if isinstance(src_key, str) and '::' in src_key:
-                    source_name, source_phone_type = src_key.split('::', 1)
+                if '::' in source_name:
+                    source_name, source_phone_type = source_name.split('::', 1)
+                    source_name = source_name.strip()
+                    source_phone_type = str(source_phone_type).strip()
 
-                v = row.get(source_name)
+                source_candidates = []
+                source_candidates.append(source_name)
+                dot_to_us = self._convert_dotted_to_underscore(source_name)
+                if dot_to_us not in source_candidates:
+                    source_candidates.append(dot_to_us)
+                if '.' in source_name:
+                    us_variant = source_name.replace('.', '_')
+                    if us_variant not in source_candidates:
+                        source_candidates.append(us_variant)
+                if '_' in source_name:
+                    dot_variant = source_name.replace('_', '.')
+                    if dot_variant not in source_candidates:
+                        source_candidates.append(dot_variant)
+
+                v = None
+                for cand in source_candidates:
+                    cand_trim = str(cand).strip()
+                    if cand_trim in row_trimmed:
+                        v = row_trimmed.get(cand_trim)
+                        break
+                    if cand in row_str:
+                        v = row_str.get(cand)
+                        break
+                    cand_lower = cand.lower()
+                    if cand_lower in row_lower:
+                        v = row_lower.get(cand_lower)
+                        break
+                    cand_token = ''.join(ch for ch in cand_lower if ch.isalnum())
+                    if cand_token and cand_token in row_token:
+                        v = row_token.get(cand_token)
+                        break
                 if v is None or v == '':
                     continue
 
@@ -5919,6 +6300,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Skip any mapping that resolves to an empty/blank target
                 if not target or (isinstance(target, str) and not target.strip()):
                     continue
+
+                if isinstance(target, str):
+                    target = target.strip()
 
                 # Treat any 'uid' mapping as username (avoid importing as system id)
                 try:
@@ -5997,6 +6381,60 @@ class MainWindow(QtWidgets.QMainWindow):
             # apply fixed enabled setting if provided
             if fixed_enabled is not None:
                 user['enabled'] = bool(fixed_enabled)
+
+            # Fallback: derive username from common identity columns when mapping
+            # does not populate username (common in HR-style tables).
+            uname_val = user.get('username')
+            if uname_val is None or not str(uname_val).strip():
+                fallback_tokens = [
+                    'username', 'userid', 'userprincipalname', 'samaccountname',
+                    'login', 'uid', 'employeeid', 'employeenumber', 'mail', 'email'
+                ]
+                derived_username = None
+                for tok in fallback_tokens:
+                    candidate = row_token.get(tok)
+                    if candidate is None:
+                        continue
+                    candidate_str = str(candidate).strip()
+                    if not candidate_str:
+                        continue
+                    derived_username = candidate_str
+                    break
+                if derived_username:
+                    user['username'] = derived_username
+                    if isinstance(debug_stats, dict):
+                        debug_stats['derived_usernames'] = debug_stats.get('derived_usernames', 0) + 1
+                        samples = debug_stats.setdefault('derived_username_samples', [])
+                        if len(samples) < 5:
+                            samples.append(f"Row {idx}: username='{derived_username}'")
+
+            skip_reason = None
+            if not user:
+                skip_reason = 'no mapped attributes'
+            else:
+                uname = user.get('username')
+                if uname is None:
+                    skip_reason = 'missing username'
+                elif not str(uname).strip():
+                    skip_reason = 'blank username'
+
+            if skip_reason:
+                if isinstance(debug_stats, dict):
+                    debug_stats['skipped_rows'] = debug_stats.get('skipped_rows', 0) + 1
+                    reasons = debug_stats.setdefault('skip_reasons', {})
+                    reasons[skip_reason] = reasons.get(skip_reason, 0) + 1
+                    if skip_reason == 'missing username':
+                        key_samples = debug_stats.setdefault('username_key_samples', [])
+                        if len(key_samples) < 5:
+                            shown_keys = list(row_trimmed.keys())[:8]
+                            key_samples.append(f"Row {idx} keys: {shown_keys}")
+                    sampled = debug_stats.setdefault('sampled_skips', [])
+                    if len(sampled) < 10:
+                        sampled.append(f"Row {idx}: {skip_reason}")
+                continue
+
+            if isinstance(debug_stats, dict):
+                debug_stats['mapped_rows'] = debug_stats.get('mapped_rows', 0) + 1
             users.append(user)
         # Normalize population values: convert names to IDs where possible
         try:
@@ -6026,8 +6464,21 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         return users
 
+    def _format_import_mapping_debug_summary(self, debug_stats: dict) -> str:
+        """Build a compact one-line import conversion summary for UI status."""
+        total = int((debug_stats or {}).get('total_rows', 0) or 0)
+        mapped = int((debug_stats or {}).get('mapped_rows', 0) or 0)
+        skipped = int((debug_stats or {}).get('skipped_rows', 0) or 0)
+        derived = int((debug_stats or {}).get('derived_usernames', 0) or 0)
+        reasons = (debug_stats or {}).get('skip_reasons', {}) or {}
+        reason_str = '; '.join(f"{k}: {v}" for k, v in sorted(reasons.items(), key=lambda item: item[0]))
+        if reason_str:
+            return f"Row mapping: total={total}, mapped={mapped}, skipped={skipped}, derived_username={derived} ({reason_str})"
+        return f"Row mapping: total={total}, mapped={mapped}, skipped={skipped}, derived_username={derived}"
+
     def _perform_import_sequence(self, users: list, client, pops: dict = None,
-                                 fixed_pop_id=None, fixed_enabled=None):
+                                 fixed_pop_id=None, fixed_enabled=None,
+                                 debug_stats: dict = None):
         """Common logic used by both CSV and database import flows.
 
         ``users`` should be a list of pre-processed user dicts (i.e. the output
@@ -6036,7 +6487,47 @@ class MainWindow(QtWidgets.QMainWindow):
         off the background worker.
         """
         if not users:
-            QtWidgets.QMessageBox.information(self, "Import", "No users to import.")
+            summary = self._format_import_mapping_debug_summary(debug_stats) if isinstance(debug_stats, dict) else "No users to import."
+            sampled_skips = []
+            if isinstance(debug_stats, dict):
+                sampled_skips = debug_stats.get('sampled_skips', []) or []
+                username_key_samples = debug_stats.get('username_key_samples', []) or []
+                derived_username_samples = debug_stats.get('derived_username_samples', []) or []
+            else:
+                username_key_samples = []
+                derived_username_samples = []
+
+            message_lines = ["No users to import."]
+            if summary:
+                message_lines.append("")
+                message_lines.append(summary)
+            if sampled_skips:
+                message_lines.append("")
+                message_lines.append("Sample skipped rows:")
+                message_lines.extend(sampled_skips[:10])
+            if username_key_samples:
+                message_lines.append("")
+                message_lines.append("Observed source keys (first rows):")
+                message_lines.extend(username_key_samples[:5])
+            if derived_username_samples:
+                message_lines.append("")
+                message_lines.append("Derived usernames (first rows):")
+                message_lines.extend(derived_username_samples[:5])
+
+            try:
+                import api.client as _api_client
+                _api_client.write_connection_log("Import conversion produced zero users")
+                _api_client.write_connection_log(summary)
+                for sample in sampled_skips[:10]:
+                    _api_client.write_connection_log(sample)
+                for sample in username_key_samples[:5]:
+                    _api_client.write_connection_log(sample)
+                for sample in derived_username_samples[:5]:
+                    _api_client.write_connection_log(sample)
+            except Exception:
+                pass
+
+            QtWidgets.QMessageBox.information(self, "Import", "\n".join(message_lines))
             return
         # Validate credentials by obtaining a token before starting the worker
         try:
@@ -6617,8 +7108,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                 cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
                 cfg[prof_name]['export_selected_populations'] = opts.get('selected_populations', [])
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+                self._write_config(cfg)
             except Exception:
                 pass
 
@@ -6767,8 +7257,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 cfg[prof_name]['export_only_visible_columns'] = bool(opts.get('only_visible_columns'))
                 cfg[prof_name]['export_excluded_metadata'] = opts.get('excluded_metadata', [])
                 cfg[prof_name]['export_selected_populations'] = opts.get('selected_populations', [])
-                with open(self.config_file, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+                self._write_config(cfg)
             except Exception:
                 pass
 
@@ -6929,7 +7418,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 continue
             for key, val in entry.items():
                 # Skip DN and other metadata keys
-                if not key or (isinstance(key, str) and key.lower() in ('dn', '')):
+                if not key or (isinstance(key, str) and str(key).lower() in ('dn', '')):
                     continue
                 # Check if value is non-empty
                 if val is None or val == '' or val == [] or val == {}:
@@ -7106,16 +7595,20 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     cfg[prof_name]['mappings'] = mapping
                     cfg[prof_name]['fixed_population_id'] = fixed_pop_id
                     cfg[prof_name]['fixed_enabled'] = fixed_enabled
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
             except Exception:
                 pass
 
             # convert rows into users via shared helper
+            debug_stats = {}
             users = self._convert_rows_to_users(raw_rows, mapping, client, pops,
-                                                fixed_pop_id, fixed_enabled)
+                                                fixed_pop_id, fixed_enabled, debug_stats=debug_stats)
+            self._set_processing_message(self._format_import_mapping_debug_summary(debug_stats), 10000)
+            sampled_skips = debug_stats.get('sampled_skips', []) if isinstance(debug_stats, dict) else []
+            if sampled_skips:
+                self._set_processing_message(f"Sample skipped rows: {' | '.join(sampled_skips)}", 12000)
             # hand off to common import logic
-            self._perform_import_sequence(users, client, pops, fixed_pop_id, fixed_enabled)
+            self._perform_import_sequence(users, client, pops, fixed_pop_id, fixed_enabled, debug_stats=debug_stats)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import Error", str(e))
 
@@ -7207,8 +7700,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     cfg[prof_name]['mappings'] = mapping
                     cfg[prof_name]['fixed_population_id'] = fixed_pop_id
                     cfg[prof_name]['fixed_enabled'] = fixed_enabled
-                    with open(self.config_file, 'w') as f:
-                        json.dump(cfg, f, indent=4)
+                    self._write_config(cfg)
             except Exception:
                 pass
             for ent in entries:
@@ -7675,8 +8167,7 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         p = self._read_config()
         if name in p:
             p[name]["columns"] = self.selected_columns
-            with open(self.config_file, 'w') as f:
-                json.dump(p, f, indent=4)
+            self._write_config(p)
             if show_notification:
                 msg = f"Column layout saved for profile '{name}'"
                 self.status_label.setText(msg)

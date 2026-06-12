@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Test the updated database utilities."""
 
+import os
 from api import db_utils
 
-host = "192.168.4.174"
-port = 3306
-user = "mattp"
-password = "Ping-2026!"
-database = "userdata"
+# Load from environment variables for security
+# Set these before running: export DB_HOST=host DB_USER=user DB_PASS=pass DB_NAME=dbname
+host = os.environ.get("DB_HOST", "localhost")
+port = int(os.environ.get("DB_PORT", "3306"))
+user = os.environ.get("DB_USER", "testuser")
+password = os.environ.get("DB_PASS", "testpass")
+database = os.environ.get("DB_NAME", "testdb")
+
+if user == "testuser":
+    print("⚠ WARNING: Using default test credentials")
+    print("Set environment variables: DB_HOST, DB_USER, DB_PASS, DB_NAME\n")
 
 print("Testing database connection with timeouts...")
 success, err = db_utils.test_connection("MariaDB/MySQL", host, port, database, user, password)

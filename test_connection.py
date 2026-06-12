@@ -40,13 +40,23 @@ except Exception as e:
 print("2. Testing PyMySQL driver connection")
 try:
     import pymysql
-    # Replace these with your actual credentials
+    import os
+    
+    # Load credentials from environment variables for security
+    # Set these before running: export DB_USER=username DB_PASS=password DB_NAME=dbname
+    db_user = os.environ.get("DB_USER", "your_username")
+    db_pass = os.environ.get("DB_PASS", "your_password") 
+    db_name = os.environ.get("DB_NAME", "your_database")
+    
+    if db_user == "your_username":
+        print("   ⚠ Using default credentials - set DB_USER, DB_PASS, DB_NAME environment variables\n")
+    
     conn = pymysql.connect(
         host=HOST,
         port=PORT,
-        user="your_username",  # CHANGE THIS
-        password="your_password",  # CHANGE THIS
-        database="your_database",  # CHANGE THIS
+        user=db_user,
+        password=db_pass,
+        database=db_name,
         connect_timeout=5,
         read_timeout=5,
         write_timeout=5,

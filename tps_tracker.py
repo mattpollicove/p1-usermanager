@@ -49,6 +49,8 @@ class TPSTracker:
             - average_tps: Total transactions / total duration
             - mean_tps: Average of all 1-second window TPS values
             - peak_tps: Maximum TPS in any 1-second window
+            - start_time: Timestamp when tracking started
+            - end_time: Timestamp when tracking ended
         """
         if not self.transaction_times:
             return {
@@ -57,6 +59,8 @@ class TPSTracker:
                 "average_tps": 0.0,
                 "mean_tps": 0.0,
                 "peak_tps": 0.0,
+                "start_time": None,
+                "end_time": None,
             }
         
         total_transactions = len(self.transaction_times)
@@ -91,4 +95,6 @@ class TPSTracker:
             "average_tps": average_tps,
             "mean_tps": mean_tps,
             "peak_tps": peak_tps,
+            "start_time": self.start_time,
+            "end_time": end,
         }
