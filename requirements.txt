@@ -7,3 +7,4 @@ ldap3
 # Requires vendor JDBC .jar file configured in Driver Path
 jaydebeapi
 JPype1
+pyobjc-framework-LocalAuthentication; sys_platform == 'darwin'

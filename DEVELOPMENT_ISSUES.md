@@ -218,6 +218,147 @@
     - raw Qt CSS export fragments
     - markdown-style links
     - markdown emphasis markers
+
+## 2026-07-23 - Fix Export DB NameError for remove_btn
+
+### Problem
+
+- Exporting to database could fail with a runtime error: `name 'remove_btn' is not defined`.
+
+### Root Cause
+
+- In the database connection picker UI (`_choose_db_connection`), the code connected `remove_btn.clicked` but never created or added `remove_btn` in that dialog block.
+
+### Final Resolution
+
+- Added the missing Remove button construction and inserted it into the action row:
+    - `remove_btn = QtWidgets.QPushButton("Remove")`
+    - `action_row.addWidget(remove_btn)`
+- Existing remove-handler wiring now binds correctly and no NameError occurs.
+
+### Lessons Learned
+
+- When copying parallel dialog patterns (DB and LDAP), verify all action buttons are instantiated before signal connections to avoid runtime NameErrors.
+
+## 2026-07-23 - Add Touch ID Support for Vault Password Prompts on macOS
+
+### Problem
+
+- On macOS, credential save/load could trigger a generic keyring "vault password" prompt instead of native Keychain auth.
+- Users requested Touch ID support when this prompt appears.
+
+### Root Cause
+
+- Keyring backend selection could fall back to a non-macOS backend (for example encrypted-file/vault style backend), which does not use native Keychain Touch ID flows.
+
+### Final Resolution
+
+- Added keyring backend detection/metadata during startup.
+- On macOS, the app now explicitly prefers the native `keyring.backends.macOS.Keyring` backend.
+- Added runtime status fields:
+    - `KEYRING_BACKEND_NAME`
+    - `KEYRING_TOUCH_ID_SUPPORTED`
+- Updated startup warning and About dialog to surface backend and Touch ID capability status.
+
+### Lessons Learned
+
+- On macOS, Touch ID support depends on using the native Keychain backend; backend introspection and explicit selection prevent silent fallback to vault-style prompts.
+
+## 2026-07-23 - Fix 401 invalid_client When Secret Not Loaded From Keychain
+
+### Problem
+
+- Connect/Test could fail with `401 Unauthorized` and `invalid_client` even though profile credentials were previously saved.
+- In these failures, users also reported no keychain password/Touch ID prompt.
+
+### Root Cause
+
+- Keyring reads used a single username format (`profile_name`), but existing saved secrets can exist under alternate naming (`profile_name_client_secret`).
+- When lookup missed the stored secret, `cl_sec` remained blank and token calls were sent with an empty secret.
+
+### Final Resolution
+
+- Added keyring compatibility helpers to read/write/delete across both key formats:
+    - raw profile name
+    - suffixed profile name (`_client_secret`)
+- Updated all keyring operations in profile save/load/manager/delete paths to use these helpers.
+- Added a manual Connect/Test fallback: if secret field is blank, force keyring read before token request so macOS keychain auth (including Touch ID where available) can prompt.
+
+### Lessons Learned
+
+- Credential-store key naming must be stable and backward compatible; otherwise auth failures look like bad credentials instead of lookup mismatches.
+
+## 2026-07-23 - Enforce Native macOS Keychain Path for Touch ID-Capable Prompts
+
+### Problem
+
+- Users could still see vault-password style prompts without Touch ID even after keyring-backend preference updates.
+
+### Root Cause
+
+- Python keyring backend selection can still vary by environment/config, and some backend paths do not use native macOS Keychain authentication UI.
+
+### Final Resolution
+
+- Added native macOS Keychain operations using the `security` CLI and routed secret read/write/delete helpers through this path first.
+- Kept python-keyring as a compatibility fallback for non-macOS and edge cases.
+- Updated startup/about diagnostics to reflect native Keychain CLI availability for Touch ID-capable prompts.
+
+### Lessons Learned
+
+- On macOS, direct Keychain access (`security`) is the most reliable way to avoid non-native vault prompts and preserve Touch ID-capable auth flows.
+
+### Follow-up Hardening
+
+- Observed that fallback reads could still hit non-native vault backends when native keychain had no stored item yet.
+- Updated `_read_secret_from_keyring(...)` to return native-only results on macOS when `security` CLI is available (no fallback read).
+- Added explicit Connect/Test guidance dialog when no native keychain secret exists, instructing user to enter secret and Save Profile once to seed native keychain.
+
+## 2026-07-23 - Fix macOS Keychain Save Error -25244 During Profile Save
+
+### Problem
+
+- Saving profile secret could show: `Failed to save client secret to keyring: can't store password on keychain (-25244, 'unknown error')`.
+
+### Root Cause
+
+- After native keychain write attempt, code still executed secondary python-keyring write calls.
+- In some local keychain/backend states, fallback write path throws `-25244` even when native write is the intended storage path.
+
+### Final Resolution
+
+- Added canonical keyring username helper (`_preferred_keyring_username`) for stable writes.
+- Changed native macOS write helper to return `(ok, error_message)`.
+- Updated `_write_secret_to_keyring(...)` logic:
+    - On macOS with native keychain available, return immediately after successful native write.
+    - Only attempt fallback backend write if native write fails.
+    - Surface combined native/fallback error context when both fail.
+
+### Lessons Learned
+
+- On macOS, once native Keychain write succeeds, avoid redundant backend writes that can emit false-negative failures.
+
+## 2026-07-23 - Add Explicit Touch ID Prompt for Interactive Secret Retrieval
+
+### Problem
+
+- Users still reported no Touch ID prompt during Connect/Test secret retrieval, despite native keychain routing.
+
+### Root Cause
+
+- Native keychain access alone does not guarantee a visible biometric prompt in all local keychain/backend states.
+- Explicit biometric challenge via macOS LocalAuthentication was not being invoked before secret retrieval.
+
+### Final Resolution
+
+- Added optional LocalAuthentication integration (`pyobjc-framework-LocalAuthentication`) with runtime capability detection.
+- Added `_request_touch_id_auth(...)` and wired interactive Connect/Test secret reads to require biometric/device-owner auth before keychain lookup.
+- Added About/status visibility for LocalAuthentication availability and startup warning when LocalAuthentication support is missing.
+- Added macOS-only dependency marker in `requirements.txt`.
+
+### Lessons Learned
+
+- For deterministic Touch ID UX, trigger LocalAuthentication explicitly in interactive flows rather than relying only on backend keychain prompt behavior.
 - URLs remain clickable and `pip install ...` commands remain readable.
 
 ## 2026-06-12 - Prevent Repeated profiles.json Truncation (JSONDecodeError)

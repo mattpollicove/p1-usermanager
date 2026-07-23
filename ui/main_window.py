@@ -13,6 +13,8 @@ import platform
 import threading
 import os
 import tempfile
+import subprocess
+import time
 
 # If this file is executed directly (e.g. via the editor), ensure the
 # project root is on `sys.path` so local packages like `api` and `workers`
@@ -24,8 +26,19 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from PySide6 import QtWidgets, QtCore, QtGui
 
+MACOS_LOCAL_AUTH_AVAILABLE = False
+MACOS_LOCAL_AUTH_IMPORT_ERROR = ""
+if platform.system() == 'Darwin':
+    try:
+        import LocalAuthentication  # type: ignore
+        MACOS_LOCAL_AUTH_AVAILABLE = True
+    except Exception as _local_auth_err:
+        MACOS_LOCAL_AUTH_IMPORT_ERROR = str(_local_auth_err)
+
 KEYRING_AVAILABLE = True
 KEYRING_UNAVAILABLE_REASON = ""
+KEYRING_BACKEND_NAME = "Unavailable"
+KEYRING_TOUCH_ID_SUPPORTED = False
 
 try:
     import keyring  # type: ignore
@@ -50,6 +63,38 @@ except Exception as _keyring_import_error:
 
     keyring = _UnavailableKeyring()
 
+if KEYRING_AVAILABLE:
+    try:
+        _active_backend = keyring.get_keyring()
+        KEYRING_BACKEND_NAME = f"{_active_backend.__class__.__module__}.{_active_backend.__class__.__name__}"
+    except Exception:
+        _active_backend = None
+
+    # On macOS, prefer native Keychain backend so system authentication
+    # (including Touch ID when enabled by the OS) is used instead of a
+    # fallback encrypted-file vault prompt.
+    if platform.system() == 'Darwin':
+        try:
+            backend_module = ""
+            if _active_backend is not None:
+                backend_module = _active_backend.__class__.__module__.lower()
+
+            if "keyring.backends.macos" not in backend_module:
+                from keyring.backends import macOS as _macos_keyring  # type: ignore
+
+                keyring.set_keyring(_macos_keyring.Keyring())
+                _active_backend = keyring.get_keyring()
+                backend_module = _active_backend.__class__.__module__.lower()
+
+            KEYRING_TOUCH_ID_SUPPORTED = "keyring.backends.macos" in backend_module
+            KEYRING_BACKEND_NAME = f"{_active_backend.__class__.__module__}.{_active_backend.__class__.__name__}"
+        except Exception as _macos_backend_error:
+            KEYRING_TOUCH_ID_SUPPORTED = False
+            if not KEYRING_UNAVAILABLE_REASON:
+                KEYRING_UNAVAILABLE_REASON = (
+                    f"Unable to initialize macOS Keychain backend: {_macos_backend_error}"
+                )
+
 import api.client as api_client
 from workers import UserFetchWorker, BulkDeleteWorker, UserUpdateWorker, BulkCreateWorker, BulkUpdateWorker
 from tps_tracker import TPSTracker
@@ -73,6 +118,10 @@ IS_MACOS = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX = platform.system() == 'Linux'
 
+if IS_MACOS and shutil.which("security"):
+    # Native Keychain path can offer Touch ID based on OS settings.
+    KEYRING_TOUCH_ID_SUPPORTED = True
+
 # Platform-aware keyboard shortcut modifier
 SHORTCUT_MODIFIER = QtCore.Qt.KeyboardModifier.ControlModifier
 if IS_MACOS:
@@ -87,8 +136,9 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.81"
+APP_VERSION = "0.82"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
+KEYRING_SERVICE = "pingone_usermanager"
 
 
 # Predefined help texts to avoid reallocating large strings on each call.
@@ -326,9 +376,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_keyring_startup_warning(self):
         """Show a startup warning when keyring support is unavailable."""
-        if KEYRING_AVAILABLE:
+        if IS_MACOS and self._macos_keychain_cli_available() and MACOS_LOCAL_AUTH_AVAILABLE:
             return
-        msg = "Keyring unavailable: saved client secrets may not persist on this system."
+        if KEYRING_AVAILABLE and not (IS_MACOS and not KEYRING_TOUCH_ID_SUPPORTED):
+            return
+
+        if not KEYRING_AVAILABLE:
+            msg = "Keyring unavailable: saved client secrets may not persist on this system."
+        elif IS_MACOS and not MACOS_LOCAL_AUTH_AVAILABLE:
+            msg = (
+                "Touch ID prompt library unavailable. Install pyobjc LocalAuthentication support "
+                "to enable explicit Touch ID prompts."
+            )
+        else:
+            msg = (
+                "Touch ID unavailable for credential vault prompts. "
+                "Native macOS Keychain CLI was not detected; install/enable Command Line Tools."
+            )
+
         try:
             self._set_processing_message(msg, 15000)
         except Exception:
@@ -363,6 +428,193 @@ class MainWindow(QtWidgets.QMainWindow):
         if normalized and normalized not in keys:
             keys.append(normalized)
         return keys
+
+    def _keyring_usernames(self, profile_name: str) -> list:
+        """Return keyring username variants for backward compatibility."""
+        names = []
+        for base in self._profile_cache_keys(profile_name):
+            if base and base not in names:
+                names.append(base)
+            suffixed = f"{base}_client_secret" if base else ""
+            if suffixed and suffixed not in names:
+                names.append(suffixed)
+        return names
+
+    def _preferred_keyring_username(self, profile_name: str) -> str:
+        """Return canonical keyring username for new writes."""
+        keys = self._profile_cache_keys(profile_name)
+        if not keys:
+            return ""
+        # Prefer normalized profile name for stable storage.
+        return keys[-1]
+
+    def _macos_keychain_cli_available(self) -> bool:
+        """Return True when native macOS Keychain CLI is available."""
+        return IS_MACOS and bool(shutil.which("security"))
+
+    def _read_secret_from_macos_keychain(self, profile_name: str) -> str:
+        """Read secret from macOS Keychain using known profile key variants."""
+        if not self._macos_keychain_cli_available():
+            return ""
+
+        for username in self._keyring_usernames(profile_name):
+            try:
+                proc = subprocess.run(
+                    ["security", "find-generic-password", "-s", KEYRING_SERVICE, "-a", username, "-w"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if proc.returncode == 0:
+                    secret = (proc.stdout or "").rstrip("\n")
+                    if secret:
+                        return secret
+            except Exception:
+                continue
+        return ""
+
+    def _request_touch_id_auth(self, reason: str = "Authenticate to access saved credentials") -> bool:
+        """Prompt for Touch ID (or device owner auth) on macOS when available."""
+        if not IS_MACOS:
+            return True
+        if not MACOS_LOCAL_AUTH_AVAILABLE:
+            return False
+
+        try:
+            context = LocalAuthentication.LAContext.alloc().init()
+            policy = LocalAuthentication.LAPolicyDeviceOwnerAuthenticationWithBiometrics
+            can_eval, _ = context.canEvaluatePolicy_error_(policy, None)
+            if not can_eval:
+                policy = LocalAuthentication.LAPolicyDeviceOwnerAuthentication
+                can_eval, _ = context.canEvaluatePolicy_error_(policy, None)
+                if not can_eval:
+                    return False
+
+            outcome = {"ok": False}
+            done = threading.Event()
+
+            def _reply(success, _error):
+                outcome["ok"] = bool(success)
+                done.set()
+
+            context.evaluatePolicy_localizedReason_reply_(policy, reason, _reply)
+
+            deadline = time.monotonic() + 20.0
+            while not done.is_set() and time.monotonic() < deadline:
+                QtWidgets.QApplication.processEvents()
+                done.wait(0.05)
+
+            return bool(outcome.get("ok", False))
+        except Exception:
+            return False
+
+    def _write_secret_to_macos_keychain(self, profile_name: str, secret: str) -> tuple:
+        """Write secret to macOS Keychain and return ``(ok, error_message)``."""
+        if not self._macos_keychain_cli_available():
+            return False, "Native macOS Keychain CLI is unavailable."
+
+        username = self._preferred_keyring_username(profile_name)
+        if not username:
+            return False, "Profile name is empty."
+
+        try:
+            proc = subprocess.run(
+                ["security", "add-generic-password", "-U", "-s", KEYRING_SERVICE, "-a", username, "-w", secret or ""],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as e:
+            return False, str(e)
+
+        if proc.returncode == 0:
+            return True, ""
+
+        err = (proc.stderr or proc.stdout or "unknown error").strip()
+        return False, err
+
+    def _delete_secret_from_macos_keychain(self, profile_name: str):
+        """Delete secret from macOS Keychain for known profile key variants."""
+        if not self._macos_keychain_cli_available():
+            return
+
+        for username in self._keyring_usernames(profile_name):
+            try:
+                subprocess.run(
+                    ["security", "delete-generic-password", "-s", KEYRING_SERVICE, "-a", username],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                pass
+
+    def _read_secret_from_keyring(self, profile_name: str, require_touch_id: bool = False) -> str:
+        """Read secret from keyring using known profile key variants."""
+        if require_touch_id and IS_MACOS:
+            if not self._request_touch_id_auth("Use Touch ID to unlock saved client secret"):
+                return ""
+
+        # Prefer native Keychain access on macOS for Touch ID-capable prompts.
+        native_secret = self._read_secret_from_macos_keychain(profile_name)
+        if native_secret:
+            return native_secret
+
+        # When native macOS keychain access is available, do not fall back to
+        # alternate keyring backends that can prompt for a vault password
+        # without Touch ID support.
+        if self._macos_keychain_cli_available():
+            return ""
+
+        if not KEYRING_AVAILABLE:
+            return ""
+        for username in self._keyring_usernames(profile_name):
+            try:
+                secret = keyring.get_password(KEYRING_SERVICE, username) or ""
+                if secret:
+                    return secret
+            except Exception:
+                continue
+        return ""
+
+    def _write_secret_to_keyring(self, profile_name: str, secret: str):
+        """Write secret to keyring under all profile key variants."""
+        native_ok = False
+        native_err = ""
+        if self._macos_keychain_cli_available():
+            native_ok, native_err = self._write_secret_to_macos_keychain(profile_name, secret)
+            if native_ok:
+                # Native keychain write succeeded; avoid secondary backend writes
+                # that can trigger unrelated vault/keychain backend failures.
+                return
+
+        if not KEYRING_AVAILABLE:
+            if native_err:
+                raise RuntimeError(native_err)
+            return
+
+        username = self._preferred_keyring_username(profile_name)
+        if not username:
+            return
+
+        try:
+            keyring.set_password(KEYRING_SERVICE, username, secret or "")
+        except Exception as e:
+            if native_err:
+                raise RuntimeError(f"Native keychain save failed: {native_err}; fallback save failed: {e}")
+            raise
+
+    def _delete_secret_from_keyring(self, profile_name: str):
+        """Delete secret from keyring for all profile key variants."""
+        self._delete_secret_from_macos_keychain(profile_name)
+
+        if not KEYRING_AVAILABLE:
+            return
+        for username in self._keyring_usernames(profile_name):
+            try:
+                keyring.delete_password(KEYRING_SERVICE, username)
+            except Exception:
+                pass
 
     def _cache_secret(self, profile_name: str, secret: str):
         """Store secret in session cache under raw and normalized profile keys."""
@@ -413,7 +665,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def worker():
             secret = ""
             try:
-                secret = keyring.get_password("pingone_usermanager", profile_name) or ""
+                secret = self._read_secret_from_keyring(profile_name)
             except Exception:
                 secret = ""
             finally:
@@ -476,9 +728,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "- Live API capture and log viewers",
             "",
             f"Keyring: {keyring_line}",
+            f"Keyring Backend: {KEYRING_BACKEND_NAME}",
         ]
+        if IS_MACOS:
+            lines.append(
+                f"Touch ID for Keychain Prompts: {'Enabled' if (KEYRING_TOUCH_ID_SUPPORTED or self._macos_keychain_cli_available()) else 'Unavailable'}"
+            )
+            lines.append(
+                f"Explicit LocalAuthentication Prompt: {'Available' if MACOS_LOCAL_AUTH_AVAILABLE else 'Unavailable'}"
+            )
         if not KEYRING_AVAILABLE:
             lines.append("Saved client secrets may not persist on this system.")
+        elif IS_MACOS and not (KEYRING_TOUCH_ID_SUPPORTED or self._macos_keychain_cli_available()):
+            lines.append("macOS Keychain backend not active; vault password prompts may be shown without Touch ID.")
         QtWidgets.QMessageBox.about(self, f"About {APP_NAME}", "\n".join(lines))
 
     def show_preferences_dialog(self):
@@ -1805,7 +2067,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p['__meta__'] = meta
             self._write_config(p)
             try:
-                keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+                self._write_secret_to_keyring(name, self.cl_sec.text())
                 self._cache_secret(name, self.cl_sec.text())
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Keyring Error", f"Failed to save client secret to keyring: {e}\n\nCredentials will not be stored persistently.")
@@ -2219,9 +2481,11 @@ class MainWindow(QtWidgets.QMainWindow):
             action_row = QtWidgets.QHBoxLayout()
             test_btn = QtWidgets.QPushButton("Test Connection")
             edit_btn = QtWidgets.QPushButton("Edit...")
+            remove_btn = QtWidgets.QPushButton("Remove")
             manage_btn = QtWidgets.QPushButton("Manage...")
             action_row.addWidget(test_btn)
             action_row.addWidget(edit_btn)
+            action_row.addWidget(remove_btn)
             action_row.addWidget(manage_btn)
             action_row.addStretch()
             layout.addLayout(action_row)
@@ -4672,6 +4936,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def connect_only(self, interactive: bool = True):
         """Attempt to obtain a token using the UI credentials and log success/failure."""
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        profile_name = self.profile_list.currentText().strip() if hasattr(self, 'profile_list') else ""
+        if not self.cl_sec.text().strip() and profile_name:
+            # Manual connect/test should actively try keychain so macOS can show
+            # Touch ID/password auth when needed.
+            loaded_secret = ""
+            try:
+                loaded_secret = self._read_secret_from_keyring(profile_name, require_touch_id=True)
+            except Exception:
+                loaded_secret = ""
+            if loaded_secret:
+                self.cl_sec.setText(loaded_secret)
+                self._cache_secret(profile_name, loaded_secret)
+                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+            elif self._macos_keychain_cli_available():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Missing Keychain Secret",
+                    (
+                        f"No native macOS Keychain secret was found for profile '{profile_name}'.\n\n"
+                        "Enter the Client Secret in Configuration and use Save Profile once to store it in native Keychain.\n"
+                        "After that, future retrieval uses the native Keychain path (Touch ID-capable)."
+                    ),
+                )
         self.prog.show(); self.prog.setRange(0, 0)
         try:
             token = asyncio.run(client.get_token())
@@ -4739,7 +5026,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 del p[name]
                 self._write_config(p)
                 try:
-                    keyring.delete_password("pingone_usermanager", name)
+                    self._delete_secret_from_keyring(name)
                 except Exception:
                     pass
                 self._clear_cached_secret(name)
@@ -4775,7 +5062,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 env_id, client_id, secret = new_credentials
                 try:
                     if secret:
-                        keyring.set_password("pingone_usermanager", new_profile, secret)
+                        self._write_secret_to_keyring(new_profile, secret)
                         self._cache_secret(new_profile, secret)
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(
@@ -4842,7 +5129,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     env_id, client_id, secret = new_credentials
                     try:
                         if secret:
-                            keyring.set_password("pingone_usermanager", new_profile, secret)
+                            self._write_secret_to_keyring(new_profile, secret)
                             self._cache_secret(new_profile, secret)
                     except Exception as e:
                         QtWidgets.QMessageBox.warning(
@@ -4880,7 +5167,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if deleted:
                 for profile_name in deleted:
                     try:
-                        keyring.delete_password("pingone_usermanager", profile_name)
+                        self._delete_secret_from_keyring(profile_name)
                     except Exception:
                         pass
                     self._clear_cached_secret(profile_name)
@@ -5778,6 +6065,27 @@ class MainWindow(QtWidgets.QMainWindow):
         detail window when available.
         """
         client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+        profile_name = self.profile_list.currentText().strip() if hasattr(self, 'profile_list') else ""
+        if not self.cl_sec.text().strip() and profile_name:
+            loaded_secret = ""
+            try:
+                loaded_secret = self._read_secret_from_keyring(profile_name, require_touch_id=True)
+            except Exception:
+                loaded_secret = ""
+            if loaded_secret:
+                self.cl_sec.setText(loaded_secret)
+                self._cache_secret(profile_name, loaded_secret)
+                client = api_client.PingOneClient(self.env_id.text(), self.cl_id.text(), self.cl_sec.text())
+            elif self._macos_keychain_cli_available():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Missing Keychain Secret",
+                    (
+                        f"No native macOS Keychain secret was found for profile '{profile_name}'.\n\n"
+                        "Enter the Client Secret in Configuration and use Save Profile once to store it in native Keychain.\n"
+                        "After that, future retrieval uses the native Keychain path (Touch ID-capable)."
+                    ),
+                )
         err = None
         try:
             token = asyncio.run(client.get_token())
@@ -5899,7 +6207,7 @@ class MainWindow(QtWidgets.QMainWindow):
             with open(self.config_file, "w") as f:
                 json.dump(p, f, indent=4)
             try:
-                keyring.set_password("pingone_usermanager", name, self.cl_sec.text())
+                self._write_secret_to_keyring(name, self.cl_sec.text())
                 self._cache_secret(name, self.cl_sec.text())
             except Exception as e:
                 QtWidgets.QMessageBox.warning(
