@@ -1,3 +1,5 @@
+<!-- markdownlint-disable -->
+
 # Development Issues Log
 
 ## 2026-06-12 - Fix DB Import Rows Not Importing Due to Source Key Mismatch
@@ -1267,3 +1269,37 @@ ok, err = db_utils.test_connection(..., conn.get('driver'), encrypt_mode=conn.ge
 
 ### Lessons Learned
 - Transport/security toggles that impact connectivity must be explicit per connection profile, not implicit in backend-only fallback logic.
+
+## 2026-07-27 - macOS Keychain ACL Updated to Allow All Applications (Reduce Password Prompts)
+
+### Problem
+- Users received Touch ID prompts and separate Keychain password prompts when reading saved client secrets.
+- Per-application Keychain ACL checks could trigger additional authorization prompts in some launch paths.
+
+### Root Cause
+- Keychain items were saved without explicit "allow all applications" ACL.
+- Existing item ACL behavior could require a separate Keychain authorization step depending on requesting executable context.
+
+### Final Resolution
+- Updated native macOS keychain write path to include `-A` on `security add-generic-password`.
+- Kept `-U` so existing items are updated in place when profile secrets are re-saved.
+- Added `KEYCHAIN_ALLOW_ALL_APPS = True` to make behavior explicit in code.
+
+### Before/After Snippets
+
+#### Before
+```python
+["security", "add-generic-password", "-U", "-s", KEYRING_SERVICE, "-a", username, "-w", secret or ""]
+```
+
+#### After
+```python
+cmd = ["security", "add-generic-password", "-U"]
+if KEYCHAIN_ALLOW_ALL_APPS:
+    cmd.append("-A")
+cmd.extend(["-s", KEYRING_SERVICE, "-a", username, "-w", secret or ""])
+```
+
+### Lessons Learned
+- macOS Keychain ACL behavior can differ by calling executable even when the item/service is the same.
+- `-A` can reduce prompt friction but broadens access scope; use only when this tradeoff is acceptable.

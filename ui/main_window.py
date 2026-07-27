@@ -136,9 +136,10 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.82"
+APP_VERSION = "0.83"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 KEYRING_SERVICE = "pingone_usermanager"
+KEYCHAIN_ALLOW_ALL_APPS = True
 
 
 # Predefined help texts to avoid reallocating large strings on each call.
@@ -155,18 +156,25 @@ Connecting to PingOne:
 
 2. Select an existing profile or create a new one using the "Active Profile" dropdown.
 
-3. Enter the Environment ID, Client ID, and Client Secret in the respective fields. 
-   The Client Secret is stored securely in your system's keyring.
+3. Enter the Environment ID, Client ID, and Client Secret in the respective fields.
+    The Client Secret is stored securely in your system keychain.
 
-4. Click "Save Profile" to persist the credentials and settings.  (Alternatively, use the new "New Connection" button to clear the boxes and enter a fresh set of credentials.)
+4. Click "Save Profile" to persist credentials and settings.
+    (Alternatively, use "New Connection" to clear fields and enter a new profile.)
 
-5. Click "Connect & Sync" to authenticate and fetch users from PingOne.
+5. Click "Connect" to authenticate and fetch users from PingOne.
 
 Profile Settings:
 - Credentials (Env ID, Client ID, Secret) are saved per-profile.
+- On macOS, the app prefers native Keychain access for Touch ID-capable prompts.
+- Secret reads are cached in memory for the current app session to reduce repeat prompts.
 - Column selection and order are saved per-profile.
 - Import/export preferences are saved per-profile when "Remember" is checked.
 - The last active profile can auto-connect on startup (see Preferences).
+
+Keychain Actions (Configuration -> Action):
+- Keychain Diagnostics: shows backend, Touch ID capability, fallback risk, cache state, and per-profile item checks.
+- Apply Keychain ACL To All Profiles: one-click re-save to apply current ACL policy to all saved profile secrets.
 
 Managing Profiles:
 - Use File → Manage Profiles (Cmd/Ctrl+Shift+M) to view all saved profiles.
@@ -517,9 +525,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not username:
             return False, "Profile name is empty."
 
+        cmd = ["security", "add-generic-password", "-U"]
+        if KEYCHAIN_ALLOW_ALL_APPS:
+            # Allow all applications to read this item without per-app ACL prompts.
+            cmd.append("-A")
+        cmd.extend(["-s", KEYRING_SERVICE, "-a", username, "-w", secret or ""])
+
         try:
             proc = subprocess.run(
-                ["security", "add-generic-password", "-U", "-s", KEYRING_SERVICE, "-a", username, "-w", secret or ""],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -742,6 +756,203 @@ class MainWindow(QtWidgets.QMainWindow):
         elif IS_MACOS and not (KEYRING_TOUCH_ID_SUPPORTED or self._macos_keychain_cli_available()):
             lines.append("macOS Keychain backend not active; vault password prompts may be shown without Touch ID.")
         QtWidgets.QMessageBox.about(self, f"About {APP_NAME}", "\n".join(lines))
+
+    def show_keychain_diagnostics(self):
+        """Show native Keychain diagnostics for configured profiles.
+
+        This check avoids reading secrets. It only reports whether expected
+        keychain items exist and whether macOS-native access paths are active.
+        """
+        lines = [
+            "Keychain Diagnostics",
+            "",
+            f"Platform: {platform.system()}",
+            f"Service: {KEYRING_SERVICE}",
+            f"Keyring available: {'Yes' if KEYRING_AVAILABLE else 'No'}",
+            f"Keyring backend: {KEYRING_BACKEND_NAME}",
+            f"macOS security CLI available: {'Yes' if self._macos_keychain_cli_available() else 'No'}",
+            f"Touch ID-capable path detected: {'Yes' if (KEYRING_TOUCH_ID_SUPPORTED or self._macos_keychain_cli_available()) else 'No'}",
+            f"LocalAuthentication bridge: {'Available' if MACOS_LOCAL_AUTH_AVAILABLE else 'Unavailable'}",
+        ]
+
+        backend_lower = str(KEYRING_BACKEND_NAME or "").lower()
+        backend_is_macos = "keyring.backends.macos" in backend_lower
+        fallback_risk = (
+            IS_MACOS
+            and KEYRING_AVAILABLE
+            and not self._macos_keychain_cli_available()
+            and not backend_is_macos
+        )
+
+        lines.append("")
+        if fallback_risk:
+            lines.append("Fallback backend risk: HIGH (non-native backend may prompt for vault password)")
+        elif IS_MACOS and (self._macos_keychain_cli_available() or backend_is_macos):
+            lines.append("Fallback backend risk: LOW (native Keychain path available)")
+        else:
+            lines.append("Fallback backend risk: N/A for this platform")
+
+        lines.append("")
+        lines.append("Session cache state:")
+        lines.append(f"- Cached secret entries: {len(getattr(self, '_secret_cache', {}) or {})}")
+        lines.append(f"- Read-attempt markers: {len(getattr(self, '_secret_read_attempted', set()) or set())}")
+        lines.append(f"- In-flight background reads: {len(getattr(self, '_secret_read_inflight', set()) or set())}")
+
+        cfg = self._read_config()
+        profile_names = []
+        for name, value in cfg.items():
+            if name == "__meta__":
+                continue
+            if isinstance(value, dict) and value.get("env_id") and value.get("cl_id"):
+                profile_names.append(name)
+
+        lines.append("")
+        lines.append("Profile keychain item checks (no secrets read):")
+        if not profile_names:
+            lines.append("- No profiles found.")
+        elif not self._macos_keychain_cli_available():
+            lines.append("- Native security CLI unavailable; cannot verify per-item existence.")
+        else:
+            for profile_name in sorted(profile_names):
+                usernames = self._keyring_usernames(profile_name)
+                username_results = []
+                for username in usernames:
+                    exists = False
+                    try:
+                        proc = subprocess.run(
+                            [
+                                "security",
+                                "find-generic-password",
+                                "-s",
+                                KEYRING_SERVICE,
+                                "-a",
+                                username,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        exists = proc.returncode == 0
+                    except Exception:
+                        exists = False
+                    username_results.append(f"{username}={'FOUND' if exists else 'MISSING'}")
+
+                lines.append(f"- {profile_name}: " + ", ".join(username_results))
+
+        lines.append("")
+        lines.append("Recommendation:")
+        lines.append("- Keep native Keychain path enabled and avoid non-native fallback backends.")
+        lines.append("- Allow only required executables for this service/account in Keychain Access.")
+        lines.append("- Save profile once so canonical account names exist for each profile.")
+
+        self.show_detail_message_window("Keychain Diagnostics", "\n".join(lines))
+
+    def apply_keychain_acl_all_profiles(self):
+        """Re-save profile secrets to apply current macOS Keychain ACL policy."""
+        if not IS_MACOS:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Apply Keychain ACL",
+                "This action is only available on macOS.",
+            )
+            return
+
+        if not self._macos_keychain_cli_available():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Apply Keychain ACL",
+                "Native macOS Keychain CLI is unavailable.",
+            )
+            return
+
+        cfg = self._read_config()
+        profile_names = []
+        for name, value in cfg.items():
+            if name == "__meta__":
+                continue
+            if isinstance(value, dict) and value.get("env_id") and value.get("cl_id"):
+                profile_names.append(name)
+
+        if not profile_names:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Apply Keychain ACL",
+                "No saved profiles were found.",
+            )
+            return
+
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Apply Keychain ACL",
+            (
+                "This will re-save keychain secrets for all saved profiles using the current ACL policy\n"
+                "(Allow all applications for each item).\n\n"
+                "Continue?"
+            ),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        success = []
+        skipped = []
+        failed = []
+
+        for profile_name in sorted(profile_names):
+            secret = ""
+            try:
+                secret = self._read_secret_from_macos_keychain(profile_name)
+            except Exception:
+                secret = ""
+
+            # If native lookup is empty but the user already loaded it this
+            # session, reuse cache to apply ACL on canonical key name.
+            if not secret:
+                secret = self._get_cached_secret(profile_name) or ""
+
+            if not secret:
+                skipped.append(f"{profile_name}: no existing secret found")
+                continue
+
+            ok, err = self._write_secret_to_macos_keychain(profile_name, secret)
+            if ok:
+                self._cache_secret(profile_name, secret)
+                success.append(profile_name)
+            else:
+                failed.append(f"{profile_name}: {err or 'unknown error'}")
+
+        lines = [
+            "Apply Keychain ACL To All Profiles",
+            "",
+            f"Profiles processed: {len(profile_names)}",
+            f"Updated: {len(success)}",
+            f"Skipped: {len(skipped)}",
+            f"Failed: {len(failed)}",
+        ]
+        if success:
+            lines.append("")
+            lines.append("Updated profiles:")
+            for name in success:
+                lines.append(f"- {name}")
+        if skipped:
+            lines.append("")
+            lines.append("Skipped profiles:")
+            for row in skipped:
+                lines.append(f"- {row}")
+        if failed:
+            lines.append("")
+            lines.append("Failed profiles:")
+            for row in failed:
+                lines.append(f"- {row}")
+
+        self.show_detail_message_window("Apply Keychain ACL", "\n".join(lines))
+        try:
+            self._set_processing_message(
+                f"Keychain ACL apply complete: updated={len(success)}, skipped={len(skipped)}, failed={len(failed)}"
+            )
+        except Exception:
+            pass
 
     def show_preferences_dialog(self):
         """Show the dedicated settings window for runtime application options."""
@@ -1105,6 +1316,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Connect",
             "Delete Profile",
             "View Connection Log",
+            "Keychain Diagnostics",
+            "Apply Keychain ACL To All Profiles",
             "Manage DB Connections",
             "Manage LDAP Connections",
             "Open Preferences",
@@ -1400,6 +1613,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Connect": self.connect_only,
             "Delete Profile": self.delete_current_profile,
             "View Connection Log": self.view_connection_log,
+            "Keychain Diagnostics": self.show_keychain_diagnostics,
+            "Apply Keychain ACL To All Profiles": self.apply_keychain_acl_all_profiles,
             "Manage DB Connections": self.manage_db_connections,
             "Manage LDAP Connections": self.manage_ldap_connections,
             "Open Preferences": self.show_preferences_dialog,

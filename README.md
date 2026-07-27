@@ -2,22 +2,22 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.82 - Alpha)
+PingOne UserManager (v0.83 - Alpha)
 
-⚠️ **Alpha Release**: Version 0.82 features MySQL and MSSQL database support with LDAP and CSV for import and export. This is most likely the last update before UI/Docker migrations. Please report issues or send requests—thank you!
+⚠️ **Alpha Release**: Version 0.83 adds native macOS Keychain diagnostics, Touch ID-oriented credential flow improvements, and one-click ACL reapply for saved profile secrets. Please report issues or send requests—thank you!
 
-**Version 0.82 Updates**:
-- MySQL and MSSQL database import/export support
-- Enhanced LDAP compatibility
-- Improved CSV import/export workflows
-- Database connection management UI
+**Version 0.83 Updates**:
+- Native Keychain diagnostics in Configuration actions
+- One-click "Apply Keychain ACL To All Profiles" action for macOS
+- Improved Touch ID-capable keychain path guidance and secret caching docs
+- Updated in-app help and README for keychain and credential behavior
 
 PingOne UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
 🚀 Key Features
 Multi-Profile Support: Manage multiple PingOne environments (Dev, Staging, Prod) with easy switching. Use the Profile Manager (File → Manage Profiles) to view all configurations and delete unwanted profiles.
 
-Hardware-Backed Security: Sensitive Client Secrets are never stored in plain text; they are vaulted in the OS-native keychain (Windows Credential Manager, macOS Keychain, or Linux Secret Service).
+Hardware-Backed Security: Sensitive Client Secrets are never stored in plain text; they are vaulted in the OS-native keychain (Windows Credential Manager, macOS Keychain, or Linux Secret Service). On macOS, the app prefers the native Keychain path and supports Touch ID-capable authentication prompts when available.
 
 Dynamic Attribute Editor: A recursive JSON editor that flattens nested PingOne identity objects for easy modification.
 
@@ -93,9 +93,16 @@ Enter your Environment ID, Client ID, and Client Secret.
 
 Click Save Profile.
 
+macOS Keychain Notes:
+
+- Secrets are saved under the service name `pingone_usermanager`.
+- The app caches loaded secrets in memory for the current session to reduce repeated Keychain prompts.
+- Use Configuration -> Action -> Keychain Diagnostics to view backend status, Touch ID capability, and per-profile keychain item checks (no secret values are displayed).
+- Use Configuration -> Action -> Apply Keychain ACL To All Profiles to re-save all profile secrets with the app's current ACL policy in one click.
+
 Sync Data:
 
-Click Connect & Sync. The app will fetch your population mapping and user list.
+Click Connect. The app will fetch your population mapping and user list.
 
 Manage Users:
 
