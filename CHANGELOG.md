@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- Bumped application version to `0.83`.
+- Bumped application version to `0.84`.
+- Improved CSV import dialog initialization reliability.
 - Database connectivity is now JDBC-only for MSSQL, MySQL, and Oracle.
 - Removed non-JDBC fallback guidance from active docs and UI guidance.
 

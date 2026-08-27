@@ -2,11 +2,12 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.83 - Alpha)
+PingOne UserManager (v0.84 - Alpha)
 
-⚠️ **Alpha Release**: Version 0.83 adds native macOS Keychain diagnostics, Touch ID-oriented credential flow improvements, and one-click ACL reapply for saved profile secrets. Please report issues or send requests—thank you!
+⚠️ **Alpha Release**: Version 0.84 includes the latest CSV import reliability fixes alongside native macOS Keychain diagnostics, Touch ID-oriented credential flow improvements, and one-click ACL reapply for saved profile secrets. Please report issues or send requests—thank you!
 
-**Version 0.83 Updates**:
+**Version 0.84 Updates**:
+- More reliable CSV import dialog initialization
 - Native Keychain diagnostics in Configuration actions
 - One-click "Apply Keychain ACL To All Profiles" action for macOS
 - Improved Touch ID-capable keychain path guidance and secret caching docs

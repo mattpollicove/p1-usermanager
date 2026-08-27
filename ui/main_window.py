@@ -136,7 +136,7 @@ logs/errors to the user.
 """
 
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.83"
+APP_VERSION = "0.84"
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 KEYRING_SERVICE = "pingone_usermanager"
 KEYCHAIN_ALLOW_ALL_APPS = True
