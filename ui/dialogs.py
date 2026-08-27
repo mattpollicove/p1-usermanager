@@ -739,6 +739,7 @@ class AttributeMappingDialog(QtWidgets.QDialog):
 
         self.headers = list(headers or [])
         self.pop_map = pop_map or {}
+        self.initial_mapping = dict(initial_mapping or {})
         self.sample_row = sample_row or {}
         self.client = client
         self.initial_fixed_pop_id = initial_fixed_pop_id

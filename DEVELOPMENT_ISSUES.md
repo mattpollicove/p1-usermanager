@@ -2,6 +2,32 @@
 
 # Development Issues Log
 
+## 2026-08-21 - Fix CSV Import Crash: AttributeMappingDialog Missing initial_mapping
+
+### Problem
+
+- CSV import could fail when opening the attribute mapping dialog with:
+    - `'AttributeMappingDialog' object has no attribute 'initial_mapping'`
+
+### Root Cause
+
+- `AttributeMappingDialog._populate_table()` references `self.initial_mapping` when restoring saved mappings.
+- In the dialog constructor, `initial_mapping` was accepted as a parameter but never assigned to an instance attribute.
+
+### Final Resolution
+
+- Initialized the missing attribute in `AttributeMappingDialog.__init__`:
+
+```python
+self.initial_mapping = dict(initial_mapping or {})
+```
+
+- This guarantees `_populate_table()` can safely read the mapping state on first render and during table rebuilds.
+
+### Lessons Learned
+
+- Any constructor parameter that is consumed by helper methods should be normalized and assigned during initialization to avoid runtime attribute errors.
+
 ## 2026-06-12 - Fix DB Import Rows Not Importing Due to Source Key Mismatch
 
 ### Problem
