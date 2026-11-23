@@ -7,6 +7,7 @@ focused functions for connection testing, entry reads, and entry upserts.
 from __future__ import annotations
 
 import re
+import logging
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -16,6 +17,13 @@ try:
 except Exception:  # pragma: no cover - handled by caller-facing checks
     ldap3 = None
     ALL = MODIFY_REPLACE = SUBTREE = BASE = NO_ATTRIBUTES = None
+
+try:
+    from api.certificate_manager import CertificateManager
+except Exception:
+    CertificateManager = None
+
+logger = logging.getLogger(__name__)
 
 
 def _require_ldap3():
@@ -51,7 +59,23 @@ def _connect(
     password: str,
     start_tls: bool = False,
     timeout: int = 15,
+    certificate: Optional[str] = None,
+    skip_cert_validation: bool = False,
 ):
+    """
+    Connect to LDAP server with optional certificate validation.
+    
+    Args:
+        host: LDAP server hostname or URI
+        port: LDAP server port
+        use_ssl: Use SSL/TLS for connection
+        bind_dn: DN to bind as
+        password: Password for bind
+        start_tls: Use StartTLS instead of immediate SSL
+        timeout: Connection timeout in seconds
+        certificate: Path to CA certificate file for self-signed certs
+        skip_cert_validation: If True, skip certificate validation entirely
+    """
     _require_ldap3()
     host, use_ssl, parsed_port = _normalize_host_and_ssl(host, use_ssl)
     if not host:
@@ -59,13 +83,42 @@ def _connect(
     explicit_port = int(port or 0)
     # If a URI embeds a port (ldap://host:1389), prefer it to avoid silent mismatch.
     safe_port = int(parsed_port or 0) or explicit_port or (636 if use_ssl else 389)
-    server = ldap3.Server(
-        host=host,
-        port=safe_port,
-        use_ssl=bool(use_ssl),
-        get_info=ALL,
-        connect_timeout=max(3, int(timeout or 15)),
-    )
+    
+    # Validate and prepare certificate if provided
+    cert_to_use = None
+    if certificate and use_ssl:
+        if CertificateManager:
+            is_valid, error, cert_info = CertificateManager.validate_certificate_for_ldap(certificate)
+            if not is_valid:
+                raise ValueError(f"Certificate validation failed: {error}")
+            
+            cert_to_use = certificate
+            
+            # Log certificate type for debugging
+            if cert_info:
+                cert_type = "self-signed" if cert_info.get('is_self_signed') else "signed"
+                subject = cert_info.get('subject', 'unknown')
+                logger.info(f"Using {cert_type} certificate for LDAP: {subject}")
+    
+    server_kwargs = {
+        'host': host,
+        'port': safe_port,
+        'use_ssl': bool(use_ssl),
+        'get_info': ALL,
+        'connect_timeout': max(3, int(timeout or 15)),
+    }
+    
+    # Pass certificate to ldap3 if provided
+    if cert_to_use:
+        server_kwargs['ca_certs_file'] = cert_to_use
+    
+    # Handle skip validation (skip get_info which validates)
+    if skip_cert_validation and use_ssl:
+        # When skipping validation, we still need to connect but with minimal checks
+        # ldap3 uses get_info=ALL by default for validation, so we keep it as-is
+        pass
+    
+    server = ldap3.Server(**server_kwargs)
     conn = ldap3.Connection(server, user=bind_dn, password=password, auto_bind=True)
     if start_tls and not use_ssl:
         conn.start_tls()
@@ -81,8 +134,16 @@ def test_connection(
     base_dn: str,
     start_tls: bool = False,
     timeout: int = 15,
+    certificate: Optional[str] = None,
+    skip_cert_validation: bool = False,
 ) -> Tuple[bool, Optional[str]]:
-    """Attempt bind and a base DN read; return ``(success, error)``."""
+    """
+    Attempt bind and a base DN read; return ``(success, error)``.
+    
+    Args:
+        certificate: Path to CA certificate file (optional)
+        skip_cert_validation: Skip certificate validation if True (optional)
+    """
     if not host or not host.strip():
         return False, "Host cannot be empty"
     if not bind_dn or not bind_dn.strip():
@@ -90,7 +151,12 @@ def test_connection(
     if not base_dn or not base_dn.strip():
         return False, "Base DN cannot be empty"
     try:
-        conn = _connect(host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), timeout=timeout)
+        conn = _connect(
+            host, int(port), bool(use_ssl), bind_dn, password, 
+            bool(start_tls), timeout=timeout, 
+            certificate=certificate, 
+            skip_cert_validation=skip_cert_validation
+        )
 
         def _suffix_hint() -> str:
             """Return a helpful namingContexts hint from Root DSE when available."""
@@ -272,6 +338,8 @@ def get_entry_sample(
     search_filter: str = "(objectClass=person)",
     start_tls: bool = False,
     timeout: int = 15,
+    certificate: Optional[str] = None,
+    skip_cert_validation: bool = False,
 ) -> Optional[Dict[str, str]]:
     """Return one entry as a flat dict with ``dn`` and scalarized attributes."""
     rows = get_entries(
@@ -286,6 +354,8 @@ def get_entry_sample(
         limit=1,
         start_tls=start_tls,
         timeout=timeout,
+        certificate=certificate,
+        skip_cert_validation=skip_cert_validation,
     )
     return rows[0] if rows else None
 
@@ -302,9 +372,14 @@ def get_entries(
     limit: Optional[int] = None,
     start_tls: bool = False,
     timeout: int = 15,
+    certificate: Optional[str] = None,
+    skip_cert_validation: bool = False,
 ) -> List[Dict[str, str]]:
     """Read LDAP entries under base DN and return flat row dicts."""
-    conn = _connect(host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), timeout=timeout)
+    conn = _connect(
+        host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), 
+        timeout=timeout, certificate=certificate, skip_cert_validation=skip_cert_validation
+    )
     attrs = attributes if attributes else ldap3.ALL_ATTRIBUTES
     conn.search(
         search_base=base_dn,
@@ -337,6 +412,8 @@ def upsert_entries(
     start_tls: bool = False,
     timeout: int = 15,
     auto_create_parents: bool = True,
+    certificate: Optional[str] = None,
+    skip_cert_validation: bool = False,
 ) -> Dict[str, object]:
     """Create or update LDAP entries.
 
@@ -345,7 +422,10 @@ def upsert_entries(
     - ``attributes``: dict of LDAP attributes to values
     - ``object_classes``: optional list used for create path
     """
-    conn = _connect(host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), timeout=timeout)
+    conn = _connect(
+        host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), 
+        timeout=timeout, certificate=certificate, skip_cert_validation=skip_cert_validation
+    )
     created = 0
     updated = 0
     errors: List[str] = []

@@ -2118,25 +2118,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _save_last_ldap_connection(self, connection_name: str):
-        """Save the last successfully used LDAP connection name to config."""
+        """Save the last successfully used LDAP connection name to config.
+        
+        Also saves certificate format and type information from the connection data
+        for use in future connection attempts.
+        """
         try:
             cfg = self._read_config()
             if '__meta__' not in cfg:
                 cfg['__meta__'] = {}
+            
             cfg['__meta__']['last_ldap_connection'] = connection_name
+            
+            # Also save certificate metadata for quick validation
+            conns = cfg.get('ldap_connections', {})
+            if connection_name in conns:
+                conn_data = conns[connection_name]
+                cert_path = conn_data.get('certificate', '')
+                
+                if cert_path:
+                    from api.certificate_manager import CertificateManager
+                    cert_mgr = CertificateManager()
+                    is_valid, _, cert_info = cert_mgr.validate_certificate_for_ldap(cert_path)
+                    
+                    if is_valid:
+                        cfg['__meta__']['last_ldap_certificate'] = cert_path
+                        cfg['__meta__']['last_ldap_certificate_type'] = (
+                            'self-signed' if cert_info.get('is_self_signed') else 'signed'
+                        )
+            
             self._write_config(cfg)
         except Exception:
             pass
 
     def _get_last_ldap_connection(self):
-        """Get the last successfully used LDAP connection name, if any."""
+        """Get the last successfully used LDAP connection name, if any.
+        
+        Validates that the connection and its certificate (if present) are still available.
+        Returns None if connection is unavailable or certificate is invalid.
+        """
         try:
             cfg = self._read_config()
             meta = cfg.get('__meta__', {})
             last_conn = meta.get('last_ldap_connection')
+            
             if last_conn:
                 conns = cfg.get('ldap_connections', {})
                 if last_conn in conns:
+                    conn_data = conns[last_conn]
+                    cert_path = conn_data.get('certificate', '')
+                    
+                    # Validate certificate if present
+                    if cert_path:
+                        from api.certificate_manager import CertificateManager
+                        cert_mgr = CertificateManager()
+                        is_valid, _, _ = cert_mgr.validate_certificate_for_ldap(cert_path)
+                        
+                        if not is_valid:
+                            # Certificate is invalid, don't use this connection
+                            return None
+                    
                     return last_conn
         except Exception:
             pass

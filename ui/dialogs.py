@@ -1970,6 +1970,8 @@ def test_ldap_connection_with_status(parent, connection):
             connection.get('base_dn', ''),
             bool(connection.get('start_tls', False)),
             timeout=int(connection.get('timeout') or 30),
+            certificate=connection.get('certificate', ''),
+            skip_cert_validation=bool(connection.get('skip_cert_validation', False)),
         )
 
     return background(parent, "Test LDAP Connection", test,
@@ -2026,6 +2028,28 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.timeout_edit.setPlaceholderText("30")
         self.timeout_edit.setToolTip("LDAP connect timeout in seconds (3-120)")
 
+        # NEW: Certificate section
+        self.use_cert_cb = QtWidgets.QCheckBox("Use Certificate File (for self-signed)")
+        self.use_cert_cb.toggled.connect(self._on_cert_toggle)
+
+        cert_row = QtWidgets.QHBoxLayout()
+        self.cert_path_edit = QtWidgets.QLineEdit()
+        self.cert_path_edit.setPlaceholderText("/path/to/ca-cert.pem")
+        self.cert_browse_btn = QtWidgets.QPushButton("Browse")
+        self.cert_browse_btn.clicked.connect(self._browse_certificate)
+        cert_row.addWidget(self.cert_path_edit, 1)
+        cert_row.addWidget(self.cert_browse_btn)
+
+        # NEW: Certificate info display
+        self.cert_info_label = QtWidgets.QLabel("")
+        self.cert_info_label.setWordWrap(True)
+        self.cert_info_label.setStyleSheet("background-color: #f9f9f9; padding: 8px; border-radius: 4px; border: 1px solid #ddd;")
+        self.cert_info_label.setVisible(False)
+
+        # NEW: Skip validation option
+        self.skip_cert_validation_cb = QtWidgets.QCheckBox("Skip certificate validation (not recommended)")
+        self.skip_cert_validation_cb.setStyleSheet("color: #cc0000;")
+
         form.addRow("Name:", self.name_edit)
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
@@ -2038,7 +2062,13 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         form.addRow("Search Filter:", self.filter_edit)
         form.addRow("RDN Attribute:", self.rdn_attr_edit)
         form.addRow("Timeout (sec):", self.timeout_edit)
+        form.addRow("", self.use_cert_cb)  # NEW
+        form.addRow("", cert_row)  # NEW
+        form.addRow("", self.cert_info_label)  # NEW
+        form.addRow("", self.skip_cert_validation_cb)  # NEW
         layout.addLayout(form)
+
+        self._on_cert_toggle(False)  # NEW: Initial state
 
         self.sample_label = QtWidgets.QLabel("")
         self.sample_label.setWordWrap(True)
@@ -2093,6 +2123,15 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             self.filter_edit.setText(initial.get('search_filter', '(objectClass=person)'))
             self.rdn_attr_edit.setText(initial.get('rdn_attribute', 'uid'))
             self.timeout_edit.setText(str(initial.get('timeout', 30)))
+            # NEW: Pre-populate certificate fields
+            cert_path = initial.get('certificate', '')
+            if cert_path:
+                self.use_cert_cb.setChecked(True)
+                self.cert_path_edit.setText(cert_path)
+                self._update_certificate_info_display(cert_path)
+            self.skip_cert_validation_cb.setChecked(
+                bool(initial.get('skip_cert_validation', False))
+            )
         else:
             self.auto_create_parents_cb.setChecked(True)
 
@@ -2120,6 +2159,10 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.filter_edit.setText('(objectClass=person)')
         self.rdn_attr_edit.setText('uid')
         self.timeout_edit.setText('30')
+        self.use_cert_cb.setChecked(False)  # NEW
+        self.cert_path_edit.clear()  # NEW
+        self.skip_cert_validation_cb.setChecked(False)  # NEW
+        self.cert_info_label.setVisible(False)  # NEW
         self.sample_label.setVisible(False)
         self.status_label.setText('')
         self.save_cb.setChecked(True)
@@ -2186,6 +2229,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                 return ldap_utils.get_entry_sample(
                     data['host'], data['port'], data['use_ssl'], data['bind_dn'], data['password'],
                     data['base_dn'], data['search_filter'], data['start_tls'], timeout=data['timeout'],
+                    certificate=data.get('certificate', ''),
+                    skip_cert_validation=data.get('skip_cert_validation', False),
                 )
             except LDAPException as exc:
                 raise ValueError(str(exc)) from exc
@@ -2212,6 +2257,47 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         if self.result() == QtWidgets.QDialog.Accepted:
             self.use_connection = True
 
+    def _on_cert_toggle(self, checked: bool):
+        """Toggle certificate-related controls."""
+        self.cert_path_edit.setEnabled(checked)
+        self.cert_browse_btn.setEnabled(checked)
+        self.skip_cert_validation_cb.setEnabled(checked)
+        if not checked:
+            self.cert_info_label.setVisible(False)
+
+    def _browse_certificate(self):
+        """Open file browser to select a certificate file."""
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Certificate File",
+            "",
+            "Certificate Files (*.pem *.der *.cer *.crt *.p12 *.pfx);;All Files (*)"
+        )
+        if file_path:
+            self.cert_path_edit.setText(file_path)
+            self._update_certificate_info_display(file_path)
+
+    def _update_certificate_info_display(self, cert_path: str):
+        """Display certificate information if file is valid."""
+        from api.certificate_manager import CertificateManager
+        
+        if not cert_path or not cert_path.strip():
+            self.cert_info_label.setVisible(False)
+            return
+        
+        cert_mgr = CertificateManager()
+        is_valid, error, cert_info = cert_mgr.validate_certificate_for_ldap(cert_path)
+        
+        if not is_valid:
+            self.cert_info_label.setText(f"<span style='color: #cc0000;'>✗ Invalid: {error}</span>")
+            self.cert_info_label.setVisible(True)
+            return
+        
+        # Display certificate info with type indicator
+        display = cert_mgr.get_certificate_info_display(cert_info)
+        self.cert_info_label.setText(display)
+        self.cert_info_label.setVisible(True)
+
     def get_connection_data(self) -> dict:
         return {
             'name': self.name_edit.text().strip(),
@@ -2226,6 +2312,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             'search_filter': (self.filter_edit.text().strip() or '(objectClass=person)'),
             'rdn_attribute': (self.rdn_attr_edit.text().strip() or 'uid'),
             'timeout': int(self.timeout_edit.text() or 30),
+            'certificate': self.cert_path_edit.text().strip() if self.use_cert_cb.isChecked() else '',
+            'skip_cert_validation': bool(self.skip_cert_validation_cb.isChecked()),
             'save': bool(self.save_cb.isChecked()),
             'use': getattr(self, 'use_connection', False),
         }
@@ -2278,7 +2366,26 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         for name in sorted(connections.keys()):
-            item = QtWidgets.QListWidgetItem(name)
+            conn_data = connections[name]
+            cert_path = conn_data.get('certificate', '')
+            
+            # Build display label with certificate status
+            display_label = name
+            if cert_path:
+                from api.certificate_manager import CertificateManager
+                cert_mgr = CertificateManager()
+                is_valid, _, cert_info = cert_mgr.validate_certificate_for_ldap(cert_path)
+                if is_valid:
+                    is_self_signed = cert_info.get('is_self_signed', False)
+                    if is_self_signed:
+                        display_label += " ⚠️ Self-Signed"
+                    else:
+                        display_label += " ✓ Signed"
+                else:
+                    display_label += " ✗ No Cert"
+            
+            item = QtWidgets.QListWidgetItem(display_label)
+            item.setData(QtCore.Qt.UserRole, name)  # Store actual name for reference
             if name in self.deleted:
                 # Mark deleted items visually
                 font = item.font()
@@ -2298,12 +2405,14 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         self.del_btn.setEnabled(has_selection)
         if self.use_btn is not None:
             item = self.list_widget.currentItem()
-            self.use_btn.setEnabled(item is not None and item.text() not in self.deleted)
+            actual_name = item.data(QtCore.Qt.UserRole) if item else None
+            self.use_btn.setEnabled(actual_name is not None and actual_name not in self.deleted)
         
         # Update delete button text based on whether selected item is marked for deletion
         if has_selection:
             item = self.list_widget.currentItem()
-            if item and item.text() in self.deleted:
+            actual_name = item.data(QtCore.Qt.UserRole) if item else None
+            if actual_name and actual_name in self.deleted:
                 self.del_btn.setText("Undelete")
                 self.del_btn.setToolTip("Restore this connection (cancel deletion)")
             else:
@@ -2315,8 +2424,9 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
 
     def _use_selected(self):
         item = self.list_widget.currentItem()
-        if item is not None and item.text() not in self.deleted:
-            self.selected_connection = item.text()
+        actual_name = item.data(QtCore.Qt.UserRole) if item else None
+        if actual_name is not None and actual_name not in self.deleted:
+            self.selected_connection = actual_name
             self.accept()
 
     def add(self):
@@ -2343,18 +2453,18 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         item = self.list_widget.currentItem()
         if not item:
             return
-        name = item.text()
-        dlg = LDAPConnectionDialog(initial=self.result.get(name, {}), parent=self)
+        actual_name = item.data(QtCore.Qt.UserRole)
+        dlg = LDAPConnectionDialog(initial=self.result.get(actual_name, {}), parent=self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             data = dlg.get_connection_data()
             if not data.get('save', True):
-                if name in self.result:
-                    del self.result[name]
+                if actual_name in self.result:
+                    del self.result[actual_name]
                     self._populate(self.result)
                 return
             new_name = data.get('name')
-            if new_name and new_name != name:
-                del self.result[name]
+            if new_name and new_name != actual_name:
+                del self.result[actual_name]
             self.result[new_name] = data
             self._populate(self.result)
 
@@ -2362,15 +2472,15 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         item = self.list_widget.currentItem()
         if not item:
             return
-        name = item.text()
-        if name in self.deleted:
+        actual_name = item.data(QtCore.Qt.UserRole)
+        if actual_name in self.deleted:
             # Undelete if already marked for deletion
-            self.deleted.remove(name)
+            self.deleted.remove(actual_name)
             self._populate(self.result)
         else:
             # Mark for deletion
-            if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{name}'?") == QtWidgets.QMessageBox.Yes:
-                self.deleted.add(name)
+            if QtWidgets.QMessageBox.question(self, "Delete", f"Delete connection '{actual_name}'?") == QtWidgets.QMessageBox.Yes:
+                self.deleted.add(actual_name)
                 self._populate(self.result)
 
     def get_connections(self) -> dict:
