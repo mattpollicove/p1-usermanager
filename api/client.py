@@ -178,6 +178,40 @@ def write_connection_log(message: str):
         pass
 
 
+def run_async_in_ui_context(coro):
+    """Run an async coroutine safely in a Qt UI context.
+    
+    Qt applications have their own event loop running. When we try to call
+    asyncio.run() from within that loop, it fails with 'lazy_import' error
+    because asyncio tries to create a new event loop while one is already running.
+    
+    This function detects if we're in a Qt context and handles it appropriately.
+    """
+    try:
+        # Try to get the current event loop
+        loop = asyncio.get_running_loop()
+        # If we get here, we're already in an event loop (Qt context)
+        # We need to run this in a separate thread to avoid conflicts
+        import concurrent.futures
+        import threading
+        
+        def run_in_thread():
+            # Create a new event loop for this thread
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(run_in_thread)
+            return future.result()
+    except RuntimeError:
+        # No event loop running, we're not in Qt context
+        # Safe to use asyncio.run()
+        return asyncio.run(coro)
+
 
 class PingOneClient:
     """Client for interacting with PingOne API."""
@@ -241,7 +275,9 @@ class PingOneClient:
 
             return self._token
         except Exception as e:
+            import traceback
             error_message = str(e)
+            full_traceback = traceback.format_exc()
             if isinstance(e, httpx.HTTPStatusError):
                 try:
                     response_text = e.response.text.strip()
@@ -253,11 +289,78 @@ class PingOneClient:
             # Log the exception to credential logger and API logger/connection log
             try:
                 if CREDENTIALS_LOGGING_ENABLED:
-                    credential_logger.error(f"Token request failed for env={self.env_id}, client_id={self.client_id} - {error_message}")
+                    credential_logger.error(f"Token request failed for env={self.env_id}, client_id={self.client_id} - {error_message}\n{full_traceback}")
             except Exception:
                 pass
             if API_LOGGING_ENABLED:
-                api_logger.error(f"Token request failed: {error_message}")
+                api_logger.error(f"Token request failed: {error_message}\n{full_traceback}")
+                try:
+                    write_connection_log(f"POST {auth_url} - ERROR - {error_message}")
+                except Exception:
+                    pass
+            return None
+
+    def get_token_sync(self) -> Optional[str]:
+        """Synchronous version of get_token for use in UI threads.
+        
+        This uses httpx.Client (synchronous) instead of AsyncClient to avoid
+        event loop conflicts when called from a PySide6 UI context.
+        
+        Returns:
+            Access token string on success, None on failure
+        """
+        now = time.time()
+        if self._token and now < self._token_expires:
+            return self._token
+
+        auth_url = f"https://auth.pingone.com/{self.env_id}/as/token"
+        self.last_error = None
+        try:
+            append_live_event(f"TOKEN POST {auth_url}")
+            # Use synchronous httpx.Client instead of AsyncClient
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(
+                    auth_url,
+                    data={"grant_type": "client_credentials"},
+                    auth=(self.client_id, self.client_secret),
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data.get("access_token")
+            self._token_expires = now + data.get("expires_in", 3600) - 60
+
+            if CREDENTIALS_LOGGING_ENABLED:
+                try:
+                    credential_logger.info(f"Token obtained for env={self.env_id}, client_id={self.client_id}, expires_in={data.get('expires_in', 3600)}s")
+                except Exception:
+                    pass
+            if API_LOGGING_ENABLED:
+                api_logger.info(f"Token obtained: expires_in={data.get('expires_in', 3600)}s")
+                try:
+                    write_connection_log(f"POST {auth_url} - 200 OK - token_expires_in={data.get('expires_in', 3600)}")
+                except Exception:
+                    pass
+
+            return self._token
+        except Exception as e:
+            import traceback
+            error_message = str(e)
+            full_traceback = traceback.format_exc()
+            if isinstance(e, httpx.HTTPStatusError):
+                try:
+                    response_text = e.response.text.strip()
+                    if response_text:
+                        error_message = f"{error_message} - {response_text}"
+                except Exception:
+                    pass
+            self.last_error = error_message
+            try:
+                if CREDENTIALS_LOGGING_ENABLED:
+                    credential_logger.error(f"Token request failed for env={self.env_id}, client_id={self.client_id} - {error_message}\n{full_traceback}")
+            except Exception:
+                pass
+            if API_LOGGING_ENABLED:
+                api_logger.error(f"Token request failed: {error_message}\n{full_traceback}")
                 try:
                     write_connection_log(f"POST {auth_url} - ERROR - {error_message}")
                 except Exception:

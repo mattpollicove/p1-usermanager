@@ -1930,6 +1930,26 @@ class DBConnectionsManager(QtWidgets.QDialog):
         return self.result
 
 
+def test_ldap_connection_with_status(parent, connection):
+    from api import ldap_utils
+    from ui.background import background
+
+    def test(_progress):
+        return ldap_utils.test_connection(
+            connection.get('host', ''),
+            int(connection.get('port') or 0),
+            bool(connection.get('use_ssl', False)),
+            connection.get('bind_dn', ''),
+            connection.get('password', ''),
+            connection.get('base_dn', ''),
+            bool(connection.get('start_tls', False)),
+            timeout=int(connection.get('timeout') or 30),
+        )
+
+    return background(parent, "Test LDAP Connection", test,
+                      status="Testing the LDAP bind and Base DN...")
+
+
 class LDAPConnectionDialog(QtWidgets.QDialog):
     """Dialog for creating or editing an LDAP connection definition."""
 
@@ -2104,7 +2124,13 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.accept()
 
     def _on_test(self):
+        from ui.background import background
+
+        self.status_label.setText("Testing connection...")
+        self.sample_label.hide()
         try:
+            data = self.get_connection_data()
+            ok, err = test_ldap_connection_with_status(self, data)
             from api import ldap_utils
         except ModuleNotFoundError:
             QtWidgets.QMessageBox.critical(
@@ -2114,22 +2140,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             )
             self.status_label.setText("Dependency missing.")
             return
-
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        self.status_label.setText("Testing connection...")
-        QtWidgets.QApplication.processEvents()
-        timeout = int(self.timeout_edit.text() or 30)
-        ok, err = ldap_utils.test_connection(
-            self.host_edit.text().strip(),
-            int(self.port_edit.text() or 0),
-            bool(self.use_ssl_cb.isChecked()),
-            self.bind_dn_edit.text().strip(),
-            self.pw_edit.text(),
-            self.base_dn_edit.text().strip(),
-            bool(self.start_tls_cb.isChecked()),
-            timeout=timeout,
-        )
-        QtWidgets.QApplication.restoreOverrideCursor()
+        except ValueError as exc:
+            ok, err = False, str(exc)
 
         if not ok:
             self.status_label.setText("Connection failed.")
@@ -2141,18 +2153,20 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             return
 
         self.status_label.setText("Connection successful.")
+        from ldap3.core.exceptions import LDAPException
+
+        def read_sample(_progress):
+            try:
+                return ldap_utils.get_entry_sample(
+                    data['host'], data['port'], data['use_ssl'], data['bind_dn'], data['password'],
+                    data['base_dn'], data['search_filter'], data['start_tls'], timeout=data['timeout'],
+                )
+            except LDAPException as exc:
+                raise ValueError(str(exc)) from exc
+
         try:
-            sample = ldap_utils.get_entry_sample(
-                self.host_edit.text().strip(),
-                int(self.port_edit.text() or 0),
-                bool(self.use_ssl_cb.isChecked()),
-                self.bind_dn_edit.text().strip(),
-                self.pw_edit.text(),
-                self.base_dn_edit.text().strip(),
-                self.filter_edit.text().strip() or "(objectClass=person)",
-                bool(self.start_tls_cb.isChecked()),
-                timeout=timeout,
-            )
+            sample = background(self, "Test LDAP Connection", read_sample,
+                                status="Connection successful. Reading a sample entry...")
             if sample:
                 fields = []
                 for key in sorted(sample.keys())[:6]:
@@ -2162,9 +2176,10 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             else:
                 self.sample_label.setText("Connected, but no matching entries found.")
                 self.sample_label.setVisible(True)
-        except Exception as exc:
+        except ValueError as exc:
             self.sample_label.setText(f"Connected, but sample read failed: {exc}")
             self.sample_label.setVisible(True)
+        QtWidgets.QMessageBox.information(self, "Test Connection", "LDAP connection successful.")
 
     def _on_use(self):
         self._validate_and_accept()
@@ -2193,7 +2208,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 class LDAPConnectionsManager(QtWidgets.QDialog):
     """List, create, edit, and delete saved LDAP connections."""
 
-    def __init__(self, connections: dict, parent=None):
+    def __init__(self, connections: dict, parent=None, *, allow_selection=False):
         super().__init__(parent)
         self.setWindowTitle("Manage LDAP Connections")
         self.setModal(True)
@@ -2221,6 +2236,11 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         layout.addLayout(btn_row)
 
         close_btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        self.selected_connection = None
+        self.use_btn = None
+        if allow_selection:
+            self.use_btn = close_btns.addButton("Use Selected", QtWidgets.QDialogButtonBox.ActionRole)
+            self.use_btn.clicked.connect(self._use_selected)
         close_btns.rejected.connect(self.reject)
         layout.addWidget(close_btns)
 
@@ -2250,6 +2270,9 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         has_selection = self.list_widget.currentItem() is not None
         self.edit_btn.setEnabled(has_selection)
         self.del_btn.setEnabled(has_selection)
+        if self.use_btn is not None:
+            item = self.list_widget.currentItem()
+            self.use_btn.setEnabled(item is not None and item.text() not in self.deleted)
         
         # Update delete button text based on whether selected item is marked for deletion
         if has_selection:
@@ -2263,6 +2286,12 @@ class LDAPConnectionsManager(QtWidgets.QDialog):
         else:
             self.del_btn.setText("Delete")
             self.del_btn.setToolTip("Mark this connection for deletion")
+
+    def _use_selected(self):
+        item = self.list_widget.currentItem()
+        if item is not None and item.text() not in self.deleted:
+            self.selected_connection = item.text()
+            self.accept()
 
     def add(self):
         dlg = LDAPConnectionDialog(parent=self)
@@ -3783,7 +3812,7 @@ class ImportWizardDialog(QtWidgets.QDialog):
             self.show_query_mode_selection()
         
         self.current_step = step
-        self.next_btn.setEnabled(True)
+        self.next_btn.setEnabled(step != 1 or self.conn_combo.isEnabled())
         self.back_btn.setEnabled(step > 0)
         self.next_btn.setText("Next" if step < 2 else "Finish")
     
@@ -3828,9 +3857,11 @@ class ImportWizardDialog(QtWidgets.QDialog):
             else:
                 self.conn_combo.addItem(self._new_db_option)
             self.conn_combo.addItems(list(source_connections.keys()))
+            if source_type == 'ldap':
+                self.conn_combo.setCurrentIndex(1)
         else:
             self.conn_combo.addItem("(No connections available)")
-            self.next_btn.setEnabled(False)
+            self.conn_combo.setEnabled(False)
         
         self.content_layout.addWidget(self.conn_combo)
         
@@ -3874,13 +3905,15 @@ class ImportWizardDialog(QtWidgets.QDialog):
 
     def _manage_ldap_connections(self):
         """Open LDAP connection manager and refresh wizard connection list."""
+        previous = self.conn_combo.currentText()
+        selected = None
         if callable(self.manage_ldap_callback):
-            try:
-                self.manage_ldap_callback()
-            except Exception:
-                pass
+            selected = self.manage_ldap_callback()
         self._reload_connections_from_parent()
         self.show_step(1)
+        name = selected or previous
+        if name in self.ldap_connections:
+            self.conn_combo.setCurrentText(name)
 
     def _reload_connections_from_parent(self):
         """Refresh local connection snapshots after manager dialogs close."""
@@ -3913,13 +3946,7 @@ class ImportWizardDialog(QtWidgets.QDialog):
             pass
     
     def show_query_mode_selection(self):
-        """Step 2: Select DB table/query mode or skip for LDAP."""
-        if self.result.get('source_type') == 'ldap':
-            label = QtWidgets.QLabel("LDAP import is ready.")
-            self.content_layout.addWidget(label)
-            self.content_layout.addStretch()
-            return
-
+        """Step 2: Select DB table/query mode."""
         label = QtWidgets.QLabel("Select Import Source:")
         self.content_layout.addWidget(label)
         
@@ -3959,7 +3986,10 @@ class ImportWizardDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "No Connection", "Please select a valid connection.")
                 return
             self.result['connection_name'] = self.selected_connection
-            self.show_step(2)
+            if self.result.get('source_type') == 'ldap':
+                self.accept()
+            else:
+                self.show_step(2)
         elif self.current_step == 2:
             if self.result.get('source_type') == 'db':
                 query_mode = 'custom' if self.rb_custom.isChecked() else 'table'

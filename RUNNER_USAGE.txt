@@ -1,0 +1,123 @@
+╔════════════════════════════════════════════════════════════════╗
+║          PingOne User Manager - Test Runner Scripts           ║
+╚════════════════════════════════════════════════════════════════╝
+
+TWO CONVENIENT WAYS TO RUN THE APP:
+
+1. BASH SCRIPT (Recommended for macOS/Linux)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+   From the project directory, simply run:
+   
+     ./run.sh
+   
+   Features:
+   • Colored output with progress indicators
+   • Automatic venv setup and activation
+   • Dependency checking and installation
+   • Fast and efficient
+   
+   The script will:
+   ✓ Activate virtual environment
+   ✓ Check dependencies (PySide6, httpx, sqlalchemy, ldap3, keyring)
+   ✓ Install any missing packages
+   ✓ Launch the application
+
+
+2. PYTHON SCRIPT (Cross-platform)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   
+   From the project directory, run:
+   
+     python3 run.py
+     
+   Or make it executable first:
+   
+     chmod +x run.py
+     ./run.py
+   
+   Features:
+   • Works on macOS, Linux, and Windows
+   • More detailed error reporting
+   • Python-based (no shell required)
+   • Can be integrated into other Python scripts
+
+
+WHAT BOTH SCRIPTS DO:
+
+   1. Check if virtual environment exists
+   2. Create venv if needed
+   3. Verify Python is installed
+   4. Check all required dependencies
+   5. Install missing packages
+   6. Launch the app with proper environment
+
+
+QUICK REFERENCE:
+
+   First time:
+     ./run.sh                    (bash)
+     python3 run.py              (python)
+   
+   Subsequent runs:
+     ./run.sh                    (fast startup)
+     python3 run.py              (python)
+
+
+MANUAL ALTERNATIVE:
+
+   If you prefer to set up manually:
+   
+     source venv/bin/activate
+     pip install -r requirements.txt
+     python3 app.py
+
+
+KEY FEATURES IN CURRENT VERSION:
+
+   ✨ Enhanced Connection Feedback
+      • Test Credentials shows instance name on success
+      • Connect status includes profile name
+   
+   ✨ Groups Tab
+      • Import/Export groups from CSV
+      • Import/Export groups from LDAP
+      • Buttons automatically enable when connected
+   
+   ✨ Smart Profile Management
+      • Save profiles with credentials
+      • Native macOS Keychain integration
+      • Auto-load last working profile
+
+
+KEYBOARD SHORTCUTS:
+
+   Cmd+C    Connect to PingOne
+   Cmd+T    Test Credentials
+   Cmd+Q    Quit Application
+
+
+TROUBLESHOOTING:
+
+   "Permission denied" error:
+     chmod +x run.sh
+   
+   Virtual environment issues:
+     rm -rf venv
+     ./run.sh
+   
+   Missing dependencies:
+     The scripts install them automatically, or:
+     source venv/bin/activate
+     pip install PySide6 httpx sqlalchemy ldap3 keyring
+   
+   For more details, see TEST_RUNNER_README.md
+
+
+FILES INCLUDED:
+
+   run.sh                      ← Bash test runner script
+   run.py                      ← Python test runner script
+   TEST_RUNNER_README.md       ← Detailed documentation
+   RUNNER_USAGE.txt            ← This file
+

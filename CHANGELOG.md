@@ -4,19 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- Bumped application version to `0.84`.
-- Improved CSV import dialog initialization reliability.
-- Database connectivity is now JDBC-only for MSSQL, MySQL, and Oracle.
-- Removed non-JDBC fallback guidance from active docs and UI guidance.
-
 ### Added
+- Separate Groups menu for CSV and LDAP group migration, with nesting and direct user memberships, read-only previews, and opt-in replacement of direct PingOne memberships.
+- Explicit `jsonschema` entry in `requirements.txt` for optional local user-record validation.
 - Oracle support in database connection configuration and JDBC URL preview.
 - Explicit prerequisites documentation for JDBC bridge (`jaydebeapi`, `JPype1`) and vendor JDBC jars.
 - MSSQL Encrypt Mode selector (`Auto` / `On` / `Off`) in DB connection dialog, wired through all JDBC operations.
 - macOS native Keychain diagnostics action in Configuration workflow.
 - One-click "Apply Keychain ACL To All Profiles" action for reapplying ACL policy.
 - Native keychain write path option to allow all applications (`security add-generic-password -A`) to reduce extra keychain password prompts.
+
+### Changed
+- LDAP connection tests show progress and report the result. In the import wizard, **Manage LDAP Connections** can return the selected connection and **Next** opens the LDAP import prompt directly.
+- Bumped application version to `0.84`.
+- Improved CSV import dialog initialization reliability.
+- Database connectivity is now JDBC-only for MSSQL, MySQL, and Oracle.
+- Removed non-JDBC fallback guidance from active docs and UI guidance.
 
 ### Documentation
 - Updated `README.md`, `INSTALL.md`, `DEVELOPMENT_SPEC.md`, and `DEVELOPMENT_RULES.md` to reflect JDBC-only database policy.

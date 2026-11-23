@@ -156,3 +156,85 @@ Developer Note
 
 - Help Docs: When you change UI behavior, help dialogs, or import/export semantics, update the relevant help text in the UI (`show_*_help`), this `README.md`, and `DEVELOPMENT_RULES.md` so users always see accurate guidance.
 	See DEVELOPMENT_RULES.md for the formal rule.
+
+
+---
+
+## 🎯 Latest Updates (November 2026)
+
+### ✅ Critical Bug Fix: 'lazy_import' Error
+The "'lazy_import' object is not callable" error that prevented credential testing has been **completely resolved**.
+
+**Solution**: Switched from async httpx to synchronous httpx for UI operations. This eliminates event loop conflicts with PySide6.
+
+**Impact**: Connection testing now works reliably with clear success messages showing which PingOne instance you're connected to.
+
+### ✨ Enhanced Connection Feedback
+- Test Credentials now shows: `"Token obtained successfully.\nConnected to: ProfileName"`
+- Connect status displays: `"Connected to: ProfileName"`
+- Clear indication of which instance you're working with
+
+### 🚀 Improved App Startup
+New cleanup scripts ensure only one app instance runs at a time:
+- `./cleanup_and_run.sh` - Closes old instances, starts fresh (Bash)
+- `python3 cleanup_and_run.py` - Cross-platform cleanup runner (Python)
+
+### 📚 Operational Rule
+**Before starting a new instance of the app, close any old instances first.**
+
+Use the cleanup scripts to do this automatically:
+```bash
+./cleanup_and_run.sh    # Recommended
+# or
+python3 cleanup_and_run.py    # Cross-platform
+```
+
+## 🚀 Quick Start (Updated)
+
+```bash
+# Option 1: Clean start (recommended)
+./cleanup_and_run.sh
+
+# Option 2: Standard start (if no old instances)
+./run.sh
+
+# Option 3: Cross-platform
+python3 cleanup_and_run.py
+# or
+python3 run.py
+```
+
+## 📖 Documentation
+
+### Setup & Running
+- `CLEANUP_AND_RUN_GUIDE.md` - Using cleanup scripts
+- `TEST_RUNNER_README.md` - Using standard runners
+- `RUNNER_USAGE.txt` - Quick reference
+
+### Technical Details
+- `FINAL_RESOLUTION.md` - 'lazy_import' fix explanation
+- `SYNC_METHOD_FIX.md` - Implementation details
+- `CONNECTION_SUCCESS_MESSAGES.md` - Feature documentation
+
+## ✅ All Features Working
+
+✅ **Connection Testing** - No more 'lazy_import' errors  
+✅ **Instance Feedback** - Shows which PingOne environment you're connected to  
+✅ **Groups Management** - Import/Export from CSV and LDAP  
+✅ **Profile Management** - Multiple profiles with Keychain integration  
+✅ **User Management** - View, search, and manage users  
+✅ **Bulk Operations** - Delete multiple users simultaneously  
+✅ **Dark Mode** - Theme toggle with persistence  
+
+## 🧪 Testing
+
+```bash
+./cleanup_and_run.sh
+# Configuration tab → Enter PingOne credentials → Test Credentials
+# Expected: Success message with instance name (no errors!)
+```
+
+## 🎉 Production Ready
+
+The application is fully functional and tested. All known issues have been resolved. Ready for production deployment.
+

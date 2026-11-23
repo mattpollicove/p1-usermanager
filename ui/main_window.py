@@ -110,6 +110,7 @@ from ui.dialogs import (
     LDAPConnectionsManager,
     DatabaseMappingDialog,
     LDAPMappingDialog,
+    test_ldap_connection_with_status,
 )
 from ui.themes import ThemeManager
 
@@ -280,6 +281,41 @@ Logging & Log Viewers:
 - Use Logs -> Clear All Logs to truncate all known logs.
 - Use Logs -> Archive Logs to create a timestamped .zip archive (with optional rotation).
 - Connection log is plain-text and does not support log levels; API and credentials logs do.
+"""
+
+HELP_GROUPS = """
+Groups Tab Help:
+
+Synchronizing Groups:
+
+The Groups tab provides a unified interface for managing group memberships and synchronizing groups 
+between PingOne and external directories (CSV or LDAP).
+
+Importing Groups:
+- Import from CSV: Load group definitions and direct user memberships from a CSV file.
+  • Use this to bulk-create groups and assign members in PingOne.
+  • Optional: replace existing direct memberships in PingOne groups with the source data.
+  
+- Import from LDAP: Synchronize groups and memberships from an LDAP directory (AD, OpenLDAP, etc.).
+  • Supports both memberOf (backlinks) and memberUid/member (direct) membership models.
+  • Optionally replace existing direct memberships in PingOne groups.
+  • Requires an LDAP directory configured in Manage LDAP Connections.
+
+Exporting Groups:
+- Export to CSV: Save all PingOne groups and their direct memberships to a CSV file.
+  • Useful for backup, audit, or preparing data for other systems.
+  
+- Export to LDAP: Synchronize PingOne groups and memberships back to an LDAP directory.
+  • Creates or updates groups and their direct membership entries.
+  • Nesting (groups as members of groups) and inherited memberships are supported.
+  • Requires an LDAP directory configured in Manage LDAP Connections.
+
+Requirements:
+- You must be connected to a PingOne environment (see Configuration tab).
+- For LDAP operations, an LDAP directory must be configured via Manage LDAP Connections.
+- The Groups tab buttons are disabled until a PingOne connection is established.
+
+For detailed information about group management workflows, see the Configuration and User Management help.
 """
 
 
@@ -1210,6 +1246,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_console_url_action.triggered.connect(self.set_pingone_console_url)
 
         # Separate Logs submenu for quick actions (reset, clear, archive)
+        groups_menu = menubar.addMenu("Groups")
+        for importing in (True, False):
+            for source in ("CSV", "LDAP"):
+                label = f"{'Import' if importing else 'Export'} Groups ({source})..."
+                action = groups_menu.addAction(label)
+                action.triggered.connect(
+                    lambda checked=False, importing=importing, source=source:
+                    self._open_group_transfer(importing, source)
+                )
+
         logs_menu = menubar.addMenu("Logs")
         self.logs_show_action = logs_menu.addAction("Show Log Files...")
         self.logs_show_action.triggered.connect(self.show_log_files)
@@ -1559,11 +1605,68 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        self.tabs.addTab(env_tab, "Configuration"); self.tabs.addTab(user_tab, "User Management")
+        # --- Groups Tab ---
+        groups_tab = QtWidgets.QWidget(); groups_lay = QtWidgets.QVBoxLayout(groups_tab)
+        
+        groups_intro = QtWidgets.QLabel(
+            "Manage group memberships and synchronize groups between PingOne and external directories."
+        )
+        groups_intro.setWordWrap(True)
+        groups_intro.setStyleSheet("QLabel { margin: 10px; }")
+        groups_lay.addWidget(groups_intro)
+        
+        groups_controls = QtWidgets.QGroupBox("Group Operations")
+        groups_controls_lay = QtWidgets.QVBoxLayout(groups_controls)
+        
+        # Import controls
+        import_label = QtWidgets.QLabel("Import Groups")
+        import_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        groups_controls_lay.addWidget(import_label)
+        
+        import_buttons_lay = QtWidgets.QHBoxLayout()
+        self.btn_import_groups_csv = QtWidgets.QPushButton("Import from CSV")
+        self.btn_import_groups_csv.clicked.connect(lambda: self._open_group_transfer(True, "CSV"))
+        self.btn_import_groups_csv.setToolTip("Load group definitions and memberships from a CSV file")
+        import_buttons_lay.addWidget(self.btn_import_groups_csv)
+        
+        self.btn_import_groups_ldap = QtWidgets.QPushButton("Import from LDAP")
+        self.btn_import_groups_ldap.clicked.connect(lambda: self._open_group_transfer(True, "LDAP"))
+        self.btn_import_groups_ldap.setToolTip("Load group definitions and memberships from an LDAP directory")
+        import_buttons_lay.addWidget(self.btn_import_groups_ldap)
+        import_buttons_lay.addStretch()
+        
+        groups_controls_lay.addLayout(import_buttons_lay)
+        
+        # Export controls
+        export_label = QtWidgets.QLabel("Export Groups")
+        export_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        groups_controls_lay.addWidget(export_label)
+        
+        export_buttons_lay = QtWidgets.QHBoxLayout()
+        self.btn_export_groups_csv = QtWidgets.QPushButton("Export to CSV")
+        self.btn_export_groups_csv.clicked.connect(lambda: self._open_group_transfer(False, "CSV"))
+        self.btn_export_groups_csv.setToolTip("Save PingOne groups to a CSV file")
+        export_buttons_lay.addWidget(self.btn_export_groups_csv)
+        
+        self.btn_export_groups_ldap = QtWidgets.QPushButton("Export to LDAP")
+        self.btn_export_groups_ldap.clicked.connect(lambda: self._open_group_transfer(False, "LDAP"))
+        self.btn_export_groups_ldap.setToolTip("Synchronize PingOne groups to an LDAP directory")
+        export_buttons_lay.addWidget(self.btn_export_groups_ldap)
+        export_buttons_lay.addStretch()
+        
+        groups_controls_lay.addLayout(export_buttons_lay)
+        groups_controls_lay.addStretch()
+        
+        groups_lay.addWidget(groups_controls)
+        groups_lay.addStretch()
+        
+        self.tabs.addTab(env_tab, "Configuration")
+        self.tabs.addTab(user_tab, "User Management")
+        self.tabs.addTab(groups_tab, "Groups")
         self.tabs.currentChanged.connect(self.on_main_tab_changed)
 
     def on_main_tab_changed(self, index):
-        """Refresh users when entering User Management after a config switch."""
+        """Handle tab changes: refresh users, enable/disable group buttons, show help."""
         try:
             if index < 0:
                 return
@@ -1571,6 +1674,25 @@ class MainWindow(QtWidgets.QMainWindow):
             if tab_text == "User Management" and self._pending_user_tab_refresh:
                 self._pending_user_tab_refresh = False
                 self.refresh_users()
+            elif tab_text == "Groups":
+                self._update_groups_tab_state()
+        except Exception:
+            pass
+
+    def _update_groups_tab_state(self):
+        """Enable/disable group management buttons based on PingOne connection status."""
+        try:
+            # Check if buttons exist (may not be initialized yet during early startup)
+            if not hasattr(self, 'btn_import_groups_csv'):
+                return
+            is_connected = bool(self.env_id.text() and self.cl_id.text() and self.cl_sec.text())
+            for btn in [self.btn_import_groups_csv, self.btn_import_groups_ldap,
+                       self.btn_export_groups_csv, self.btn_export_groups_ldap]:
+                btn.setEnabled(is_connected)
+            if not is_connected:
+                self._set_processing_message(
+                    "Groups tab: Connect to PingOne first (Configuration tab) to manage groups.", 5000
+                )
         except Exception:
             pass
 
@@ -1870,7 +1992,7 @@ class MainWindow(QtWidgets.QMainWindow):
             db_connections=dbs,
             ldap_connections=ldaps,
             manage_db_callback=self.manage_db_connections,
-            manage_ldap_callback=self.manage_ldap_connections,
+            manage_ldap_callback=lambda: self.manage_ldap_connections(allow_selection=True),
             last_method=self._get_last_transfer_method('import'),
         )
         if dlg.exec() != QtWidgets.QDialog.Accepted:
@@ -1994,6 +2116,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     os.unlink(tmp_path)
             except Exception:
                 pass
+
+    def _save_last_ldap_connection(self, connection_name: str):
+        """Save the last successfully used LDAP connection name to config."""
+        try:
+            cfg = self._read_config()
+            if '__meta__' not in cfg:
+                cfg['__meta__'] = {}
+            cfg['__meta__']['last_ldap_connection'] = connection_name
+            self._write_config(cfg)
+        except Exception:
+            pass
+
+    def _get_last_ldap_connection(self):
+        """Get the last successfully used LDAP connection name, if any."""
+        try:
+            cfg = self._read_config()
+            meta = cfg.get('__meta__', {})
+            last_conn = meta.get('last_ldap_connection')
+            if last_conn:
+                conns = cfg.get('ldap_connections', {})
+                if last_conn in conns:
+                    return last_conn
+        except Exception:
+            pass
+        return None
 
     def restore_window_geometry(self):
         """Restore saved window geometry from profiles.json __meta__ section."""
@@ -2259,6 +2406,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 try:
                     self._set_processing_message(msg)
                     self.profile_name_label.setText(f"Profile: {name}")
+                except Exception:
+                    pass
+                # Update Groups tab button states when profile changes
+                try:
+                    self._update_groups_tab_state()
                 except Exception:
                     pass
             except Exception:
@@ -2556,17 +2708,19 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "DB Connections", f"Failed to manage DB connections: {e}")
 
-    def manage_ldap_connections(self):
+    def manage_ldap_connections(self, *, allow_selection=False):
         """Show LDAP connections manager and persist updates."""
         try:
             cfg = self._read_config()
             conns = cfg.get('ldap_connections', {})
-            dlg = LDAPConnectionsManager(conns.copy(), self)
+            dlg = LDAPConnectionsManager(conns.copy(), self, allow_selection=allow_selection)
             dlg.exec()
             cfg['ldap_connections'] = dlg.get_connections()
             self._write_config(cfg)
+            return dlg.selected_connection
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "LDAP Connections", f"Failed to manage LDAP connections: {e}")
+            return None
 
     def _save_ldap_connection_settings(self, connection_name: str, updates: dict):
         """Persist additional per-connection LDAP settings."""
@@ -2908,6 +3062,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         cfg = self._read_config()
                         conns = cfg.get('ldap_connections', {})
                         if new_conn_name in conns:
+                            self._save_last_ldap_connection(new_conn_name)
                             return new_conn_name, conns
                 return None, conns
 
@@ -2920,8 +3075,11 @@ class MainWindow(QtWidgets.QMainWindow):
             combo = QtWidgets.QComboBox()
             names = [create_opt] + list(conns.keys())
             combo.addItems(names)
-            # Select first non-create option by default
-            if len(names) > 1:
+            # Try to select the last used connection; otherwise select first non-create option
+            last_conn = self._get_last_ldap_connection()
+            if last_conn and last_conn in names:
+                combo.setCurrentText(last_conn)
+            elif len(names) > 1:
                 combo.setCurrentIndex(1)
             layout.addWidget(combo)
 
@@ -2953,18 +3111,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 conn = conns[selected]
                 try:
-                    from api import ldap_utils
-                    ok, err = ldap_utils.test_connection(
-                        conn.get('host', ''),
-                        int(conn.get('port', 0) or 0),
-                        bool(conn.get('use_ssl', False)),
-                        conn.get('bind_dn', ''),
-                        conn.get('password', ''),
-                        conn.get('base_dn', ''),
-                        bool(conn.get('start_tls', False)),
-                        timeout=int(conn.get('timeout', 30) or 30),
-                    )
+                    ok, err = test_ldap_connection_with_status(dlg, conn)
                     if ok:
+                        self._save_last_ldap_connection(selected)
                         QtWidgets.QMessageBox.information(
                             dlg,
                             "Test Connection",
@@ -3041,6 +3190,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     cfg = self._read_config()
                     conns = cfg.get('ldap_connections', {})
                     if new_conn_name in conns:
+                        self._save_last_ldap_connection(new_conn_name)
                         return new_conn_name, conns
                 continue
             
@@ -3054,6 +3204,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
 
             if selected and selected in conns:
+                self._save_last_ldap_connection(selected)
                 return selected, conns
 
     def import_from_ldap_directory_wizard(self, connection_name: str):
@@ -3088,17 +3239,7 @@ class MainWindow(QtWidgets.QMainWindow):
             elif test_choice == QtWidgets.QMessageBox.Yes:
                 # Test the connection
                 try:
-                    from api import ldap_utils
-                    ok, err = ldap_utils.test_connection(
-                        conn.get('host', ''),
-                        int(conn.get('port', 0) or 0),
-                        bool(conn.get('use_ssl', False)),
-                        conn.get('bind_dn', ''),
-                        conn.get('password', ''),
-                        conn.get('base_dn', ''),
-                        bool(conn.get('start_tls', False)),
-                        timeout=int(conn.get('timeout', 30) or 30),
-                    )
+                    ok, err = test_ldap_connection_with_status(self, conn)
                     if ok:
                         QtWidgets.QMessageBox.information(
                             self,
@@ -3183,6 +3324,10 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Import LDAP", str(e))
 
+    def _open_group_transfer(self, importing, source):
+        from ui.group_transfer import run_transfer
+        run_transfer(self, importing, source)
+
     def import_from_ldap_directory(self):
         """Initiate import flow from an LDAP directory."""
         try:
@@ -3226,16 +3371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        ok, err = ldap_utils.test_connection(
-            conn.get('host', ''),
-            int(conn.get('port', 0) or 0),
-            bool(conn.get('use_ssl', False)),
-            conn.get('bind_dn', ''),
-            conn.get('password', ''),
-            conn.get('base_dn', ''),
-            bool(conn.get('start_tls', False)),
-            timeout=int(conn.get('timeout', 30) or 30),
-        )
+        ok, err = test_ldap_connection_with_status(self, conn)
         if not ok:
             QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
             return
@@ -3468,16 +3604,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
 
-            ok, err = ldap_utils.test_connection(
-                conn.get('host', ''),
-                int(conn.get('port', 0) or 0),
-                bool(conn.get('use_ssl', False)),
-                conn.get('bind_dn', ''),
-                conn.get('password', ''),
-                conn.get('base_dn', ''),
-                bool(conn.get('start_tls', False)),
-                timeout=int(conn.get('timeout', 30) or 30),
-            )
+            ok, err = test_ldap_connection_with_status(self, conn)
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Export LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
                 return
@@ -5176,7 +5303,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         self.prog.show(); self.prog.setRange(0, 0)
         try:
-            token = asyncio.run(client.get_token())
+            token = client.get_token_sync()
         except Exception as e:
             token = None
             err = str(e)
@@ -5193,9 +5320,13 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             # Show connection success in the status area instead of a modal dialog
-            self.status_label.setText("Connected")
+            if profile_name:
+                status_msg = f"Connected to {profile_name}"
+            else:
+                status_msg = "Connected"
+            self.status_label.setText(status_msg)
             try:
-                self._set_processing_message("Connected")
+                self._set_processing_message(status_msg)
             except Exception:
                 pass
             # After successful connect, update users/populations counts
@@ -5211,6 +5342,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta['last_working_profile'] = prof_name
                 cfg['__meta__'] = meta
                 self._write_config(cfg)
+            except Exception:
+                pass
+            # Update Groups tab button states after successful connection
+            try:
+                self._update_groups_tab_state()
             except Exception:
                 pass
         else:
@@ -6303,12 +6439,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         err = None
         try:
-            token = asyncio.run(client.get_token())
+            token = client.get_token_sync()
         except Exception as e:
             token = None
             err = str(e)
         if token:
-            QtWidgets.QMessageBox.information(self, "Test Credentials", "Token obtained successfully.")
+            if profile_name:
+                success_msg = f"Token obtained successfully.\nConnected to: {profile_name}"
+            else:
+                success_msg = "Token obtained successfully."
+            QtWidgets.QMessageBox.information(self, "Test Credentials", success_msg)
             try:
                 api_client.credential_logger.info(f"Test credentials succeeded: env={client.env_id}, client_id={client.client_id}")
             except Exception:

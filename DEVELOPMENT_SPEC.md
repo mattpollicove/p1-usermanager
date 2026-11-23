@@ -1,7 +1,7 @@
 # PingOne UserManager - Development Specification
 
-**Version:** 0.8 (Alpha)  
-**Last Updated:** June 11, 2026  
+**Version:** 0.84 (Alpha)
+**Last Updated:** November 20, 2026
 **Status:** Active Development  
 **Focus Area:** Database Connectivity Features
 
@@ -41,11 +41,11 @@ p1-usermanager/
 ├── app.py                    # Application entry point
 ├── api/
 │   ├── __init__.py
-│   └── client.py            # HTTP client, token management, logging
+│   ├── client.py            # HTTP client, token management, logging
 ├── ui/
 │   ├── __init__.py
-│   ├── main_window.py       # Main application window (2968 lines)
-│   ├── dialogs.py           # Reusable dialog components (1263 lines)
+│   ├── main_window.py       # Main application window
+│   ├── dialogs.py           # Reusable dialog components
 │   └── themes.py            # Theme management (light/dark modes)
 ├── workers.py               # Background worker tasks (QRunnable)
 ├── profiles.json            # Profile configurations storage
@@ -181,6 +181,7 @@ class SomeWorker(QtCore.QRunnable):
 | `BulkDeleteWorker` | Delete multiple users | `progress(current, total)`, `finished` |
 | `UserUpdateWorker` | Update single user | `finished`, `error` |
 | `BulkCreateWorker` | Create/update users from import | `progress`, `finished` |
+| `BulkUpdateWorker` | Update multiple users (sequential or parallel) | `progress`, `tps_update`, `finished` |
 
 ### 3.4 Main Window (ui/main_window.py)
 
@@ -188,7 +189,7 @@ class SomeWorker(QtCore.QRunnable):
 
 **Key Attributes:**
 ```python
-APP_VERSION = "0.6"
+APP_VERSION = "0.84"
 self.threadpool = QtCore.QThreadPool()
 self.users_cache = []           # Current user list
 self.pop_map = {}               # Population ID -> Name mapping
@@ -246,6 +247,13 @@ self.theme_manager = ThemeManager()
 | `ExportOptionsDialog` | Configure export options | All/selected users, all/visible columns |
 | `NewProfileDialog` | Create new profile | Credential entry, show/hide secret toggle |
 | `ProfileManagerDialog` | Manage saved profiles | List profiles, delete, create new, test connection |
+| `DatabaseConnectionDialog` | Define a JDBC database connection | Type/driver path, JDBC URL preview, MSSQL encrypt mode |
+| `DBConnectionsManager` | Manage saved DB connections | List, add, edit, delete |
+| `DatabaseMappingDialog` | Map DB columns to/from PingOne attributes | Saved queries and mappings per connection |
+| `LDAPConnectionDialog` | Define an LDAP directory connection | Host/bind/base DN settings |
+| `LDAPConnectionsManager` | Manage saved LDAP connections | List, add, edit, delete |
+| `LDAPMappingDialog` | Map LDAP attributes to/from PingOne | Per-connection saved mappings |
+| `ImportWizardDialog` | Choose an import source | Stepwise source/connection/query selection |
 
 **Design Principles:**
 - DPI-aware sizing with `scale_size()` helper
@@ -866,13 +874,22 @@ tests/
 pyside6       # Qt bindings for Python
 httpx         # Async HTTP client
 keyring       # OS credential storage
+sqlalchemy    # Database tooling
+ldap3         # LDAP directory connectivity
+jaydebeapi    # JDBC bridge for MSSQL/MySQL/Oracle
+JPype1        # JVM bridge required by jaydebeapi
+pyobjc-framework-LocalAuthentication ; macOS only, Touch ID prompts
 ```
 
 ### 12.2 Optional Dependencies
 
 ```
-jsonschema    # JSON schema validation for imports
+jsonschema    # Local JSON schema validation for imports (skipped if absent)
 ```
+
+Note: `test_connection.py` is a standalone legacy diagnostic that imports
+`pymysql`. The application itself is JDBC-only, so `pymysql` is intentionally
+not a project requirement.
 
 ### 12.3 Development Dependencies (Future)
 
@@ -947,6 +964,22 @@ app = BUNDLE(exe, name='UserManager.app', icon='icon.icns')
 
 ## 14. Version History
 
+### v0.84 (In Progress)
+- Database connectivity narrowed to JDBC-only for MSSQL, MySQL, and Oracle
+- Oracle support and MSSQL Encrypt Mode selector in DB connection configuration
+- macOS Keychain diagnostics and one-click ACL reapplication across profiles
+- `jsonschema` promoted to an explicitly declared optional dependency
+
+### v0.8 (April 14, 2026)
+- Import/export mapping extended with middle name, employee type, address targets, and custom PingOne attributes discovered from live tenant data
+- In-app help text updated to document mapping aliases across CSV/LDIF/DB/LDAP
+
+### v0.79 (April 10, 2026)
+- Dedicated user-management edit logging, filtered log viewer, and modeless log windows
+- Live API capture with refresh and event counters
+- User update success notifications with per-profile mute preference
+- Default column set reworked; link/JSON reference columns hidden by default
+
 ### v0.6 (February 2, 2026)
 - Added dark mode with persistence
 - Profile Manager with CRUD operations
@@ -973,6 +1006,42 @@ app = BUNDLE(exe, name='UserManager.app', icon='icon.icns')
 ## 15. Future Enhancements
 
 ### 15.1 Planned Features
+
+**CSV/LDAP Group Membership Import and Export (Implemented; live-service validation pending):**
+
+- **Scope:** Use the **Groups** menu to migrate static groups, nesting, and direct user memberships between PingOne and CSV or LDAP. Scheduled synchronization and the other roadmap items below are out of scope.
+- Treat PingOne groups and memberships as a separate workflow from user attribute mapping.
+- Stage three record types before making API changes:
+  - Group records, identified by a stable source key and carrying name, description, and scope/population.
+  - Nested-group edges, represented as child-group to parent-group references.
+  - Direct user memberships, represented as user to group references.
+- Resolve source users and groups to PingOne IDs before applying relationships. Resolve groups by a stable external identifier where available; use name plus scope only when it produces one unambiguous match. When a group record does not specify a scope, require an explicit choice of environment-wide or a target population. Fail preflight on ambiguous or unresolved references.
+- Match users by exact PingOne username by default, or by explicit PingOne user ID in the target environment. If an explicit ID does not resolve, block the import rather than falling back to username. Do not create users as part of the group workflow.
+- For LDAP, configure the group search base/filter, group object class, and membership attribute together. Offer schema-appropriate membership choices:
+  - `member`: group-side member DNs.
+  - `uniqueMember`: group-side distinguished names with optional unique-ID semantics.
+  - `memberUid`: group-side POSIX user names that must be resolved to users.
+  - `memberOf`: reverse/back-link data; import only on servers where the attribute reports direct membership. Do not select this mode for a transitive or computed effective-membership attribute.
+- Parse DNs with LDAP-aware parsing; never split DN values on commas. Preserve multi-valued attributes as lists until serialization. Do not flatten relationship values into ordinary user attributes.
+- Use one CSV with a `record_type` column for the standard import/export format. Write one row per group, nested-group edge, or direct user membership. When mapping a multi-value cell from an existing CSV, use a JSON array by default. If delimiter-based parsing is selected, the value delimiter must differ from the CSV delimiter and support escaping. Reject malformed or ambiguous values during preflight.
+- LDAP export writes the configured group-side membership attribute (`member`, `uniqueMember`, or `memberUid`), never `memberOf`. If the selected target schema cannot represent nesting present in the export, block the export during preflight rather than dropping edges or flattening inherited access. An explicit direct-membership-only export can be considered separately.
+- LDAP requires certificate-validated LDAPS or StartTLS. Search scopes must include all referenced entries. LDAP export is additive; it does not recreate PingOne population boundaries in LDAP. New AD groups are global distribution groups, not security groups. Creating POSIX groups requires a starting `gidNumber`; creating `groupOfNames` or `groupOfUniqueNames` requires at least one member. LDAP primary-group associations and dynamic membership rules are not transferred.
+- Import execution order:
+  1. Parse and validate the input, resolve all user and existing-group references, and preview planned group creation and relationship changes without writing. Users must already exist, including any created by a preceding user import.
+  2. After confirmation, create missing groups and retain their PingOne IDs.
+  3. Apply nested-group relationships after all referenced groups exist.
+  4. Apply direct user memberships to resolved users after their required nesting is in place.
+  5. Verify results and report per-item successes and failures.
+- A combined import may create groups and their hierarchy before applying user memberships. A membership-only import must preflight that all referenced groups—and any required hierarchy—already exist. Missing prerequisites must not result in partial writes.
+- Distinguish direct memberships from inherited membership through nesting. Validate self-links and cycles; default to an acyclic hierarchy unless support for general group graphs is explicitly designed.
+- PingOne operations use the Groups API: `POST /environments/{envId}/groups` to create groups, `POST /environments/{envId}/groups/{groupId}/memberOfGroups` for nesting, and `POST /environments/{envId}/users/{userId}/memberOfGroups` for direct membership. For nesting, the group in the URL is the source whose members are added to the group ID in the request body; preserve this direction when translating parent/child edges.
+- Set population scope when creating a group; `population.id` cannot be changed after creation. Account for population changes removing users from population-scoped groups.
+- Imports are additive by default. To replace direct PingOne memberships, explicitly check each existing group and confirm the removal preview. In this mode an explicitly selected group with no source members loses all direct memberships. Nesting and inherited memberships are never replaced. Reverse LDAP `memberOf` imports are additive only, since a filtered user search cannot establish a complete membership list.
+- Stop after the first failed write, report completed changes and the failed item, and do not roll back. After fixing the input, rerun against the same target to re-read current state and skip writes that already succeeded. An additive rerun does not undo a successful but incorrect write.
+- CSV/LDAP round-trip tests must cover escaped DNs, all supported membership attribute forms, duplicate/ambiguous group resolution, missing groups, nested-group direction and cycles, malformed multi-value data, and partial API failures.
+- The group workflow uses a separate LDAP adapter; existing user entry import/export and mapping are unchanged.
+
+**Standard CSV columns:** `record_type`, `group_key`, `name`, `scope`, `description`, `external_id`, `child_key`, `parent_key`, `username`, `user_id`, `members`. Use `group` rows to declare groups, `nesting` rows for child/parent keys, and `membership` rows for direct user assignments. Scope is `environment`, a target population ID, or blank to choose a scope during import. A membership-only file can use existing PingOne group IDs as keys.
 
 **Short-term (Next Release):**
 - [ ] Automated testing suite
@@ -1053,11 +1122,23 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
 
 1. Update version in `ui/main_window.py` (`APP_VERSION`)
 2. Update version in `README.md`
-3. Add entry to `CHANGELOG.md`
-4. Update `DEVELOPMENT_RULES.md` if needed
-5. Tag release: `git tag v0.X.Y`
-6. Build distributables (if applicable)
-7. Create GitHub release with notes
+3. Add entry to `CHANGELOG.md` (**mandatory**)
+4. Update this document's `Version:` / `Last Updated:` header and any affected sections, including Version History (**mandatory**)
+5. Update `DEVELOPMENT_RULES.md` if needed
+6. Tag release: `git tag v0.X.Y`
+7. Build distributables (if applicable)
+8. Create GitHub release with notes
+
+### 16.4 Documentation Rule (Mandatory)
+
+`CHANGELOG.md` and `DEVELOPMENT_SPEC.md` must both be updated on:
+
+- **Every version-number change**, and
+- **Every push to git**
+
+When updating, verify claims against the actual code (`grep`, `wc`) rather than
+from memory — component tables and version numbers drift silently. Avoid
+recording brittle facts such as per-file line counts, which go stale immediately.
 
 ---
 
