@@ -2142,6 +2142,119 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         return None
 
+    def _save_last_db_connection(self, role: str, connection_data: dict):
+        """Save last used database connection with full parameters.
+        
+        Args:
+            role: 'default', 'source', or 'destination'
+            connection_data: Dict with connection params (host, port, type, user, database, driver, encrypt_mode, certificate)
+        """
+        try:
+            cfg = self._read_config()
+            if '__meta__' not in cfg:
+                cfg['__meta__'] = {}
+            
+            last_conns = cfg['__meta__'].get('last_db_connections', {})
+            
+            # Store all params EXCEPT password (password goes in keyring)
+            saved_data = {
+                'type': connection_data.get('type', 'MySQL'),
+                'host': connection_data.get('host'),
+                'port': connection_data.get('port'),
+                'database': connection_data.get('database'),
+                'user': connection_data.get('user'),
+                'driver': connection_data.get('driver'),
+                'encrypt_mode': connection_data.get('encrypt_mode', 'Auto'),
+                'certificate': connection_data.get('certificate')
+            }
+            
+            # Remove None/empty values
+            saved_data = {k: v for k, v in saved_data.items() if v}
+            
+            last_conns[role] = saved_data
+            cfg['__meta__']['last_db_connections'] = last_conns
+            self._write_config(cfg)
+        except Exception:
+            pass
+
+    def _get_last_db_connection(self, role: str = 'default'):
+        """Get last used database connection with validation.
+        
+        Args:
+            role: 'default', 'source', or 'destination'
+            
+        Returns:
+            Dict with connection parameters or None if not found/invalid
+        """
+        try:
+            cfg = self._read_config()
+            last_conns = cfg.get('__meta__', {}).get('last_db_connections', {})
+            
+            # Try specific role first, fall back to 'default'
+            conn = last_conns.get(role)
+            if not conn:
+                conn = last_conns.get('default')
+            
+            if not conn:
+                return None
+            
+            # Validate certificate exists if specified
+            if 'certificate' in conn and conn['certificate']:
+                cert_path = Path(conn['certificate'])
+                if not cert_path.exists():
+                    return None
+            
+            # Validate required fields
+            if not all([conn.get('host'), conn.get('port'), conn.get('type')]):
+                return None
+            
+            return conn
+        except Exception:
+            pass
+        return None
+
+    def _save_db_connection_dirs(self, role: str, driver_dir: str = None, cert_dir: str = None):
+        """Save file picker directory defaults for next time.
+        
+        Args:
+            role: 'default', 'source', or 'destination'
+            driver_dir: Directory where JDBC drivers are stored
+            cert_dir: Directory where certificates are stored
+        """
+        try:
+            cfg = self._read_config()
+            if '__meta__' not in cfg:
+                cfg['__meta__'] = {}
+            
+            dirs = cfg['__meta__'].get('last_db_connection_dirs', {})
+            if driver_dir:
+                dirs['driver'] = driver_dir
+            if cert_dir:
+                dirs['certificate'] = cert_dir
+            
+            if dirs:
+                cfg['__meta__']['last_db_connection_dirs'] = dirs
+                self._write_config(cfg)
+        except Exception:
+            pass
+
+    def _get_db_connection_dir(self, dir_type: str):
+        """Get saved file picker directory (driver or certificate).
+        
+        Args:
+            dir_type: 'driver' or 'certificate'
+            
+        Returns:
+            Directory path string or None
+        """
+        try:
+            cfg = self._read_config()
+            dirs = cfg.get('__meta__', {}).get('last_db_connection_dirs', {})
+            return dirs.get(dir_type)
+        except Exception:
+            pass
+        return None
+
     def restore_window_geometry(self):
         """Restore saved window geometry from profiles.json __meta__ section."""
         try:

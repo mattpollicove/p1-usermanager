@@ -1282,6 +1282,26 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         btn_layout.addWidget(btns)
         layout.addLayout(btn_layout)
 
+        # Pre-populate with last used connection if creating new (not editing existing)
+        if not initial:
+            last_conn = None
+            # Try to get last DB connection from parent window (MainWindow)
+            if hasattr(self.parent(), '_get_last_db_connection'):
+                last_conn = self.parent()._get_last_db_connection('default')
+            
+            if last_conn:
+                # Pre-populate all fields with last connection
+                self.type_combo.setCurrentText(last_conn.get('type', 'MySQL'))
+                self.host_edit.setText(last_conn.get('host', ''))
+                self.port_edit.setText(str(last_conn.get('port', '')))
+                self.db_combo.setCurrentText(last_conn.get('database', ''))
+                self.user_edit.setText(last_conn.get('user', ''))
+                self.driver_combo.setCurrentText(last_conn.get('driver', ''))
+                self.encrypt_combo.setCurrentText(str(last_conn.get('encrypt_mode', 'Auto')).title())
+                # Rebuild JDBC string from loaded values
+                self._update_encrypt_mode_state()
+                self._update_jdbc_string()
+
         if initial:
             self.name_edit.setText(initial.get('name', ''))
             initial_type = initial.get('type', 'MySQL')
@@ -1498,6 +1518,9 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         QtWidgets.QApplication.restoreOverrideCursor()
         if ok:
             self.status_label.setText("Connection successful.")
+            # Save this connection as last used (successful test)
+            if hasattr(self.parent(), '_save_last_db_connection'):
+                self.parent()._save_last_db_connection('default', self.get_connection_data())
             self._populate_tables()
             # If a table is selected, fetch and display the first record
             self._show_sample_data(db_utils)
@@ -1651,6 +1674,9 @@ class DatabaseConnectionDialog(QtWidgets.QDialog):
         if not self.host_edit.text().strip() or not self.db_combo.currentText().strip():
             QtWidgets.QMessageBox.warning(self, "Missing Details", "Host and database name are required.")
             return
+        # Save this connection as last used
+        if hasattr(self.parent(), '_save_last_db_connection'):
+            self.parent()._save_last_db_connection('default', self.get_connection_data())
         # Mark that we should use this connection
         self.use_connection = True
         self.accept()
