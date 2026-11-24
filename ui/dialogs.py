@@ -4585,7 +4585,8 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         viewer_dialog.setWindowTitle("Certificate Details")
         viewer_dialog.setModal(True)
         dpi = get_dpi_scale()
-        viewer_dialog.setMinimumSize(scale_size_2d(700, 600, dpi))
+        # Increased dialog size: 700x600 → 900x700
+        viewer_dialog.setMinimumSize(scale_size_2d(900, 700, dpi))
         
         layout = QtWidgets.QVBoxLayout(viewer_dialog)
         
@@ -4615,9 +4616,10 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
             # Field name
             field_item = QtWidgets.QTableWidgetItem(field)
             field_item.setFlags(field_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-            # Style field name: bold and light background
+            # Style field name: bold and light background with larger font
             field_font = field_item.font()
             field_font.setBold(True)
+            field_font.setPointSize(12)
             field_item.setFont(field_font)
             field_item.setBackground(QtGui.QColor("#f5f5f5"))
             table.setItem(row, 0, field_item)
@@ -4625,6 +4627,10 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
             # Value
             value_item = QtWidgets.QTableWidgetItem(value)
             value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            # Set larger font for value
+            value_font = value_item.font()
+            value_font.setPointSize(12)
+            value_item.setFont(value_font)
             # Make fingerprint monospace
             if field == "Fingerprint (SHA-256)":
                 font = value_item.font()
@@ -4632,8 +4638,12 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
                 value_item.setFont(font)
             table.setItem(row, 1, value_item)
         
-        # Adjust row heights
+        # Adjust row heights for larger font
         table.resizeRowsToContents()
+        # Set minimum row height for better spacing
+        for row in range(table.rowCount()):
+            current_height = table.rowHeight(row)
+            table.setRowHeight(row, max(current_height, 30))
         
         layout.addWidget(table)
         
