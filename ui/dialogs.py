@@ -4615,7 +4615,11 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
             # Field name
             field_item = QtWidgets.QTableWidgetItem(field)
             field_item.setFlags(field_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-            field_item.setStyleSheet("font-weight: bold; background-color: #f5f5f5;")
+            # Style field name: bold and light background
+            field_font = field_item.font()
+            field_font.setBold(True)
+            field_item.setFont(field_font)
+            field_item.setBackground(QtGui.QColor("#f5f5f5"))
             table.setItem(row, 0, field_item)
             
             # Value
