@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import logging
+import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -64,6 +65,11 @@ def _connect(
 ):
     """
     Connect to LDAP server with optional certificate validation.
+    
+    Raises:
+        ssl.SSLError: When certificate validation fails (can be caught and handled)
+        ValueError: When validation configuration is invalid
+        ldap3.core.LDAPException: When LDAP bind fails
     
     Args:
         host: LDAP server hostname or URI
@@ -125,6 +131,40 @@ def _connect(
     return conn
 
 
+def _get_connection_type_string(use_ssl: bool, start_tls: bool) -> str:
+    """Format connection type for display."""
+    if use_ssl:
+        return "LDAPS (SSL)"
+    elif start_tls:
+        return "LDAP with StartTLS"
+    else:
+        return "Plain LDAP"
+
+
+def _get_cert_status_string(certificate: Optional[str], skip_cert_validation: bool) -> str:
+    """Format certificate status for display."""
+    if skip_cert_validation:
+        return "⚠️ Validation Skipped"
+    
+    if not certificate:
+        return "No certificate"
+    
+    if CertificateManager is None:
+        return "Certificate (unknown status)"
+    
+    try:
+        cert_mgr = CertificateManager()
+        is_valid, _, cert_info = cert_mgr.validate_certificate_for_ldap(certificate)
+        
+        if not is_valid:
+            return "✗ Invalid"
+        
+        is_self_signed = cert_info.get('is_self_signed', False)
+        return "⚠️ Self-Signed" if is_self_signed else "✓ Signed (CA)"
+    except Exception:
+        return "Certificate (error reading)"
+
+
 def test_connection(
     host: str,
     port: int,
@@ -136,20 +176,40 @@ def test_connection(
     timeout: int = 15,
     certificate: Optional[str] = None,
     skip_cert_validation: bool = False,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Dict]:
     """
-    Attempt bind and a base DN read; return ``(success, error)``.
+    Attempt bind and a base DN read; return ``(success, error, connection_info)``.
     
     Args:
         certificate: Path to CA certificate file (optional)
         skip_cert_validation: Skip certificate validation if True (optional)
+    
+    Returns:
+        Tuple with:
+        - success: bool indicating if connection test succeeded
+        - error: error message if failed, None if successful
+        - connection_info: dict with connection details (host, port, type, cert_status, etc)
     """
+    # Initialize connection_info dict with basic details
+    connection_info = {
+        'host': host,
+        'port': port,
+        'connection_type': _get_connection_type_string(use_ssl, start_tls),
+        'bind_dn': bind_dn,
+        'cert_status': _get_cert_status_string(certificate, skip_cert_validation),
+        'response_time_ms': 0,
+        'entries_found': 0,
+        'status': '✗ Failed',
+    }
+    
     if not host or not host.strip():
-        return False, "Host cannot be empty"
+        return False, "Host cannot be empty", connection_info
     if not bind_dn or not bind_dn.strip():
-        return False, "Bind DN cannot be empty"
+        return False, "Bind DN cannot be empty", connection_info
     if not base_dn or not base_dn.strip():
-        return False, "Base DN cannot be empty"
+        return False, "Base DN cannot be empty", connection_info
+    
+    start_time = time.time()
     try:
         conn = _connect(
             host, int(port), bool(use_ssl), bind_dn, password, 
@@ -198,10 +258,19 @@ def test_connection(
             msg = result.get("message") or "Base DN search failed"
             hint = _suffix_hint() if str(desc).lower() == "nosuchobject" else ""
             conn.unbind()
-            return False, f"Base DN validation failed ({desc}): {msg}{hint}"
+            return False, f"Base DN validation failed ({desc}): {msg}{hint}", connection_info
+        
+        # Success - calculate response time and update status
+        response_time_ms = int((time.time() - start_time) * 1000)
+        connection_info['response_time_ms'] = response_time_ms
+        connection_info['status'] = '✓ Connected'
+        
         conn.unbind()
-        return True, None
+        return True, None, connection_info
     except Exception as exc:
+        response_time_ms = int((time.time() - start_time) * 1000)
+        connection_info['response_time_ms'] = response_time_ms
+        
         msg = str(exc)
         low = msg.lower()
         if "timed out" in low or "timeout" in low:
@@ -209,8 +278,8 @@ def test_connection(
                 "Connection timed out. Verify host/port reachability, firewall rules, VPN access, "
                 "and whether SSL/StartTLS settings match the LDAP server."
             )
-            return False, f"{msg}\n\n{hint}"
-        return False, msg
+            return False, f"{msg}\n\n{hint}", connection_info
+        return False, msg, connection_info
 
 
 def _normalize_attr_value(value):
@@ -375,7 +444,12 @@ def get_entries(
     certificate: Optional[str] = None,
     skip_cert_validation: bool = False,
 ) -> List[Dict[str, str]]:
-    """Read LDAP entries under base DN and return flat row dicts."""
+    """Read LDAP entries under base DN and return flat row dicts.
+    
+    Raises:
+        ssl.SSLError: When SSL certificate verification fails
+        ldap3.core.LDAPException: When LDAP operations fail
+    """
     conn = _connect(
         host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), 
         timeout=timeout, certificate=certificate, skip_cert_validation=skip_cert_validation
@@ -421,6 +495,10 @@ def upsert_entries(
     - ``dn``: target distinguished name
     - ``attributes``: dict of LDAP attributes to values
     - ``object_classes``: optional list used for create path
+    
+    Raises:
+        ssl.SSLError: When SSL certificate verification fails
+        ldap3.core.LDAPException: When LDAP operations fail
     """
     conn = _connect(
         host, int(port), bool(use_ssl), bind_dn, password, bool(start_tls), 
@@ -507,3 +585,57 @@ def upsert_entries(
         "total": len(entries),
         "errors": errors,
     }
+
+def handle_certificate_error(host: str, port: int) -> Tuple[bool, Optional[str]]:
+    """Attempt to discover and retrieve self-signed certificate from LDAP server.
+    
+    Args:
+        host: LDAP server hostname
+        port: LDAP server port
+        
+    Returns:
+        Tuple of (success: bool, cert_path: Optional[str])
+        Returns (True, cert_path) if certificate was retrieved and saved
+        Returns (False, None) if retrieval failed
+    """
+    try:
+        from api.certificate_discovery import retrieve_server_certificate, save_certificate, parse_certificate_info
+        
+        # Attempt to retrieve certificate from server
+        cert_pem = retrieve_server_certificate(host, port)
+        if not cert_pem:
+            return False, None
+        
+        # Return cert PEM for UI to display
+        return True, cert_pem
+    except Exception as e:
+        logger.error(f"Certificate discovery failed: {e}")
+        return False, None
+
+
+def extract_ssl_error_details(error: Exception, host: str, port: int) -> Tuple[bool, str]:
+    """Extract SSL certificate error details from an exception.
+    
+    Returns:
+        (is_ssl_cert_error: bool, error_message: str)
+    """
+    error_msg = str(error).lower()
+    
+    # Detect certificate verification errors
+    cert_error_keywords = [
+        "certificate verify failed",
+        "certificate_verify_failed",
+        "ssl certificate",
+        "self-signed certificate",
+        "verify failed",
+        "ca cert",
+        "unable to verify",
+    ]
+    
+    is_cert_error = any(keyword in error_msg for keyword in cert_error_keywords)
+    
+    if is_cert_error:
+        return True, f"SSL certificate verification failed for {host}:{port}\n\nDetails: {str(error)}"
+    
+    return False, str(error)
+

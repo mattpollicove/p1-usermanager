@@ -1956,6 +1956,39 @@ class DBConnectionsManager(QtWidgets.QDialog):
         return self.result
 
 
+def format_ldap_connection_success_message(connection: dict) -> str:
+    """Format a detailed success message for LDAP connection test.
+    
+    Args:
+        connection: Dictionary with LDAP connection details (host, port, use_ssl, start_tls, base_dn)
+    
+    Returns:
+        Formatted multi-line success message
+    """
+    host = connection.get('host', 'Unknown')
+    port = connection.get('port', 389)
+    use_ssl = bool(connection.get('use_ssl', False))
+    start_tls = bool(connection.get('start_tls', False))
+    base_dn = connection.get('base_dn', '')
+    
+    # Determine connection type
+    if use_ssl:
+        conn_type = "LDAPS (SSL)"
+    elif start_tls:
+        conn_type = "LDAP with StartTLS"
+    else:
+        conn_type = "LDAP (plain)"
+    
+    # Build multi-line message
+    msg = "Successfully connected to LDAP server\n"
+    msg += f"Host: {host}:{port}\n"
+    msg += f"Type: {conn_type}\n"
+    if base_dn:
+        msg += f"Base DN: {base_dn}"
+    
+    return msg
+
+
 def test_ldap_connection_with_status(parent, connection):
     from api import ldap_utils
     from ui.background import background
@@ -1986,7 +2019,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.setWindowTitle("LDAP Connection")
         self.setModal(True)
         dpi = get_dpi_scale()
-        self.setMinimumSize(scale_size(520, dpi), scale_size(430, dpi))
+        self.setMinimumSize(scale_size(900, dpi), scale_size(550, dpi))
 
         layout = QtWidgets.QVBoxLayout(self)
         form = QtWidgets.QFormLayout()
@@ -2007,8 +2040,10 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self.base_dn_edit = QtWidgets.QLineEdit()
         self.base_dn_edit.setPlaceholderText("ou=People,dc=example,dc=com")
+        self.base_dn_edit.setMinimumWidth(500)
         self.bind_dn_edit = QtWidgets.QLineEdit()
         self.bind_dn_edit.setPlaceholderText("cn=admin,dc=example,dc=com")
+        self.bind_dn_edit.setMinimumWidth(500)
 
         self.pw_edit = QtWidgets.QLineEdit()
         self.pw_edit.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -2021,6 +2056,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self.filter_edit = QtWidgets.QLineEdit()
         self.filter_edit.setPlaceholderText("(objectClass=person)")
+        self.filter_edit.setMinimumWidth(500)
         self.rdn_attr_edit = QtWidgets.QLineEdit()
         self.rdn_attr_edit.setPlaceholderText("uid")
         self.timeout_edit = QtWidgets.QLineEdit()
@@ -2078,6 +2114,53 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self.status_label = QtWidgets.QLabel("")
         layout.addWidget(self.status_label)
+
+        # NEW: Connection Details Panel
+        self.connection_info_panel = QtWidgets.QGroupBox("CONNECTION DETAILS")
+        self.connection_info_panel.setStyleSheet(
+            "QGroupBox { background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }"
+        )
+        info_layout = QtWidgets.QGridLayout()
+        info_layout.setSpacing(8)
+        
+        # Row 0: Host & Port
+        self.info_host_port = QtWidgets.QLabel("")
+        info_layout.addWidget(QtWidgets.QLabel("Host & Port:"), 0, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.info_host_port, 0, 1)
+        
+        # Row 1: Connection Type
+        self.info_type = QtWidgets.QLabel("")
+        info_layout.addWidget(QtWidgets.QLabel("Type:"), 1, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.info_type, 1, 1)
+        
+        # Row 2: Bind DN
+        self.info_bind_dn = QtWidgets.QLabel("")
+        self.info_bind_dn.setStyleSheet("font-family: monospace; font-size: 9px;")
+        self.info_bind_dn.setWordWrap(True)
+        self.info_bind_dn.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        info_layout.addWidget(QtWidgets.QLabel("Bind DN:"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignTop)
+        info_layout.addWidget(self.info_bind_dn, 2, 1)
+        
+        # Row 3: Certificate
+        self.info_cert = QtWidgets.QLabel("")
+        info_layout.addWidget(QtWidgets.QLabel("Certificate:"), 3, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.info_cert, 3, 1)
+        
+        # Row 4: Status
+        self.info_status = QtWidgets.QLabel("")
+        info_layout.addWidget(QtWidgets.QLabel("Status:"), 4, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.info_status, 4, 1)
+        
+        # Row 5: Response Time
+        self.info_response = QtWidgets.QLabel("")
+        info_layout.addWidget(QtWidgets.QLabel("Response:"), 5, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.info_response, 5, 1)
+        
+        info_layout.setColumnStretch(1, 1)
+        self.connection_info_panel.setLayout(info_layout)
+        self.connection_info_panel.setVisible(False)
+        layout.addWidget(self.connection_info_panel)
 
         action_row = QtWidgets.QHBoxLayout()
         test_btn = QtWidgets.QPushButton("Test Connection")
@@ -2197,9 +2280,10 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self.status_label.setText("Testing connection...")
         self.sample_label.hide()
+        self.connection_info_panel.setVisible(False)
         try:
             data = self.get_connection_data()
-            ok, err = test_ldap_connection_with_status(self, data)
+            result = test_ldap_connection_with_status(self, data)
             from api import ldap_utils
         except ModuleNotFoundError:
             QtWidgets.QMessageBox.critical(
@@ -2210,7 +2294,15 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             self.status_label.setText("Dependency missing.")
             return
         except ValueError as exc:
-            ok, err = False, str(exc)
+            result = (False, str(exc), {})
+
+        # Handle new 3-tuple return format (success, error, connection_info)
+        if isinstance(result, tuple) and len(result) == 3:
+            ok, err, conn_info = result
+        else:
+            # Fallback for old 2-tuple format (shouldn't happen with new code)
+            ok, err = result if isinstance(result, tuple) else (False, str(result))
+            conn_info = {}
 
         if not ok:
             self.status_label.setText("Connection failed.")
@@ -2219,9 +2311,17 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                 msg += f"\n\nError details:\n{err}"
             QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
             self.sample_label.setVisible(False)
+            self.connection_info_panel.setVisible(False)
             return
-
+        
+        # Success - add instance name to connection info
+        conn_info['instance_name'] = data.get('name', '')
+        
+        # Update connection info panel and display it
         self.status_label.setText("Connection successful.")
+        self._update_connection_info_panel(conn_info)
+        self.connection_info_panel.setVisible(True)
+
         from ldap3.core.exceptions import LDAPException
 
         def read_sample(_progress):
@@ -2251,6 +2351,45 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             self.sample_label.setText(f"Connected, but sample read failed: {exc}")
             self.sample_label.setVisible(True)
         QtWidgets.QMessageBox.information(self, "Test Connection", "LDAP connection successful.")
+
+    def _update_connection_info_panel(self, conn_info: dict):
+        """Update the connection info panel with connection details."""
+        if not conn_info:
+            self.connection_info_panel.setVisible(False)
+            return
+        
+        host = conn_info.get('host', 'Unknown')
+        port = conn_info.get('port', 'Unknown')
+        conn_type = conn_info.get('connection_type', 'Unknown')
+        instance_name = conn_info.get('instance_name', '')
+        bind_dn = conn_info.get('bind_dn', 'Anonymous')
+        cert_info = conn_info.get('certificate_info', '')
+        response_time = conn_info.get('response_time_ms', '')
+        
+        # Update host & port
+        self.info_host_port.setText(f"{host}:{port}")
+        
+        # Update connection type with instance name if available
+        type_text = conn_type
+        if instance_name:
+            type_text += f" ({instance_name})"
+        self.info_type.setText(type_text)
+        
+        # Update bind DN
+        self.info_bind_dn.setText(bind_dn)
+        
+        # Update certificate info
+        self.info_cert.setText(cert_info if cert_info else "None")
+        
+        # Update status
+        self.info_status.setText("Connected ✓")
+        self.info_status.setStyleSheet("color: green; font-weight: bold;")
+        
+        # Update response time
+        if response_time:
+            self.info_response.setText(f"{response_time}ms")
+        else:
+            self.info_response.setText("-")
 
     def _on_use(self):
         self._validate_and_accept()
@@ -4140,3 +4279,82 @@ class ImportWizardDialog(QtWidgets.QDialog):
     def get_result(self) -> dict:
         """Return the import source selection result."""
         return self.result
+
+
+class CertificateAcceptanceDialog(QtWidgets.QDialog):
+    """Dialog for displaying and accepting LDAP server self-signed certificates."""
+
+    def __init__(self, host: str, port: int, cert_info: Dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Accept SSL Certificate")
+        self.setModal(True)
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size(700, dpi), scale_size(500, dpi))
+        
+        self.host = host
+        self.port = port
+        self.cert_info = cert_info
+        self.accepted_cert = False
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Header
+        header = QtWidgets.QLabel("Accept LDAP Server Certificate")
+        header.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(header)
+        
+        info_text = f"The LDAP server at {host}:{port} presented an SSL certificate.\n"
+        if cert_info.get('self_signed'):
+            info_text += "This is a self-signed certificate.\n"
+        layout.addWidget(QtWidgets.QLabel(info_text))
+        
+        # Certificate details in a text area
+        details_group = QtWidgets.QGroupBox("Certificate Details")
+        details_layout = QtWidgets.QVBoxLayout()
+        
+        self.details_text = QtWidgets.QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setStyleSheet("font-family: monospace; font-size: 9px;")
+        
+        # Build details text
+        details = []
+        details.append(f"Subject: {cert_info.get('subject', 'Unknown')}")
+        details.append(f"Issuer: {cert_info.get('issuer', 'Unknown')}")
+        details.append(f"Valid From: {cert_info.get('not_before', 'Unknown')}")
+        details.append(f"Valid Until: {cert_info.get('not_after', 'Unknown')}")
+        details.append(f"Self-Signed: {cert_info.get('self_signed', False)}")
+        details.append(f"Expired: {cert_info.get('is_expired', False)}")
+        details.append(f"Fingerprint (SHA-256):\n{cert_info.get('fingerprint', 'Unknown')}")
+        
+        self.details_text.setText("\n".join(details))
+        details_layout.addWidget(self.details_text)
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Warnings
+        if cert_info.get('is_expired'):
+            warn_label = QtWidgets.QLabel("⚠ WARNING: Certificate has expired!")
+            warn_label.setStyleSheet("color: #cc0000; font-weight: bold;")
+            layout.addWidget(warn_label)
+        
+        # Action buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        
+        accept_btn = QtWidgets.QPushButton("Accept & Save")
+        accept_btn.clicked.connect(self._accept)
+        button_layout.addWidget(accept_btn)
+        
+        reject_btn = QtWidgets.QPushButton("Reject")
+        reject_btn.clicked.connect(self.reject)
+        button_layout.addWidget(reject_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def _accept(self):
+        """Mark certificate as accepted and close."""
+        self.accepted_cert = True
+        self.accept()
+    
+    def is_accepted(self) -> bool:
+        """Check if user accepted the certificate."""
+        return self.accepted_cert

@@ -2,6 +2,7 @@ import json
 import copy
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, Tuple
 import asyncio
 import functools
 import logging
@@ -111,6 +112,7 @@ from ui.dialogs import (
     DatabaseMappingDialog,
     LDAPMappingDialog,
     test_ldap_connection_with_status,
+    format_ldap_connection_success_message,
 )
 from ui.themes import ThemeManager
 
@@ -136,8 +138,10 @@ methods used by dialogs to perform updates and to surface connection
 logs/errors to the user.
 """
 
+from ui.version_manager import read_version, bump_version, get_version_string
+
 APP_NAME = "PingOne UserManager"
-APP_VERSION = "0.84"
+APP_VERSION = read_version()  # Read from version.txt
 DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 KEYRING_SERVICE = "pingone_usermanager"
 KEYCHAIN_ALLOW_ALL_APPS = True
@@ -1293,6 +1297,13 @@ class MainWindow(QtWidgets.QMainWindow):
         app_help_action = help_menu.addAction("Application Help")
         app_help_action.triggered.connect(self.show_app_help)
         help_menu.addSeparator()
+        
+        # Version bump action (for development/build tracking)
+        bump_version_action = help_menu.addAction("Bump Version")
+        bump_version_action.triggered.connect(self.bump_app_version)
+        bump_version_action.setToolTip("Increment application version by 0.001")
+        help_menu.addSeparator()
+        
         self.about_action = help_menu.addAction("About PingOne UserManager")
         self.about_action.triggered.connect(self.show_about_dialog)
         if IS_MACOS:
@@ -1518,6 +1529,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.api_calls_label = QtWidgets.QLabel("")
         self.api_calls_label.setToolTip("Live API activity: Shows real-time API calls as they are made to PingOne")
         
+        # Version label for status bar
+        self.version_label = QtWidgets.QLabel(get_version_string())
+        self.version_label.setToolTip("Application Version: Track build/release versions")
+        
         self.profile_name_label = QtWidgets.QLabel("")
         self.profile_name_label.setToolTip("Current Profile: The active configuration profile with environment and credentials")
         
@@ -1548,6 +1563,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Mirror initial status and add permanent widgets to status bar
         try:
             # Don't use showMessage() - it appears at the start. Use processing_label instead.
+            
+            # Add version label first (rightmost)
+            self.statusBar().addPermanentWidget(self.version_label)
+            
+            # Divider 0
+            divider0 = QtWidgets.QFrame()
+            divider0.setFrameShape(QtWidgets.QFrame.VLine)
+            divider0.setFrameShadow(QtWidgets.QFrame.Sunken)
+            self.statusBar().addPermanentWidget(divider0)
             
             # Add permanent widgets with dividers
             self.statusBar().addPermanentWidget(self.profile_name_label)
@@ -3265,13 +3289,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 
                 conn = conns[selected]
                 try:
-                    ok, err = test_ldap_connection_with_status(dlg, conn)
+                    result = test_ldap_connection_with_status(dlg, conn)
+                    # Handle both 2-tuple (old) and 3-tuple (new) return formats
+                    if isinstance(result, tuple) and len(result) == 3:
+                        ok, err, conn_info = result
+                    else:
+                        ok, err = result if isinstance(result, tuple) else (False, str(result))
+                        conn_info = {}
+                    
                     if ok:
                         self._save_last_ldap_connection(selected)
-                        QtWidgets.QMessageBox.information(
-                            dlg,
+                        success_msg = format_ldap_connection_success_message(conn)
+                        self.show_wide_message(
                             "Test Connection",
-                            f"Successfully connected to LDAP server '{conn.get('host', '')}' \nBase DN: {conn.get('base_dn', '')}"
+                            success_msg,
+                            min_width=600
                         )
                     else:
                         # Show error and offer to edit connection
@@ -3393,12 +3425,20 @@ class MainWindow(QtWidgets.QMainWindow):
             elif test_choice == QtWidgets.QMessageBox.Yes:
                 # Test the connection
                 try:
-                    ok, err = test_ldap_connection_with_status(self, conn)
+                    result = test_ldap_connection_with_status(self, conn)
+                    # Handle both 2-tuple (old) and 3-tuple (new) return formats
+                    if isinstance(result, tuple) and len(result) == 3:
+                        ok, err, conn_info = result
+                    else:
+                        ok, err = result if isinstance(result, tuple) else (False, str(result))
+                        conn_info = {}
+                    
                     if ok:
-                        QtWidgets.QMessageBox.information(
-                            self,
+                        success_msg = format_ldap_connection_success_message(conn)
+                        self.show_wide_message(
                             "Test Connection",
-                            f"Successfully connected to LDAP server '{conn.get('host', '')}'\nBase DN: {conn.get('base_dn', '')}"
+                            success_msg,
+                            min_width=600
                         )
                     else:
                         # Show error and offer to edit connection
@@ -3526,9 +3566,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         ok, err = test_ldap_connection_with_status(self, conn)
+        # Handle both 2-tuple (old) and 3-tuple (new) return formats
+        if isinstance(ok, tuple):
+            if len(ok) == 3:
+                ok, err, conn_info = ok
+            else:
+                ok, err = ok
+        
         if not ok:
             QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
             return
+        
+        # Show success message with connection details
+        success_msg = format_ldap_connection_success_message(conn)
+        self.show_wide_message("Test Connection", success_msg, min_width=600)
 
         # Use custom filter if provided, otherwise use default filter from connection
         if custom_filter:
@@ -3536,39 +3587,71 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             search_filter = conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)'
         
-        try:
-            # Show progress dialog while reading LDAP
-            progress = QtWidgets.QProgressDialog(
-                "Reading entries from LDAP directory...",
-                "Cancel",
-                0, 0,
-                self
-            )
-            progress.setWindowTitle("Import from LDAP")
-            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-            progress.setMinimumDuration(500)  # Show after 500ms
-            progress.setValue(0)
-            QtWidgets.QApplication.processEvents()
-            
-            rows = ldap_utils.get_entries(
-                conn.get('host', ''),
-                int(conn.get('port', 0) or 0),
-                bool(conn.get('use_ssl', False)),
-                conn.get('bind_dn', ''),
-                conn.get('password', ''),
-                conn.get('base_dn', ''),
-                search_filter=search_filter,
-                attributes=None,
-                limit=None,
-                start_tls=bool(conn.get('start_tls', False)),
-                timeout=int(conn.get('timeout', 30) or 30),
-            )
-            
-            progress.close()
-        except Exception as e:
-            progress.close()
-            QtWidgets.QMessageBox.critical(self, "Import LDAP", f"Failed to read LDAP entries: {e}")
-            return
+        # Show progress dialog while reading LDAP
+        progress = QtWidgets.QProgressDialog(
+            "Reading entries from LDAP directory...",
+            "Cancel",
+            0, 0,
+            self
+        )
+        progress.setWindowTitle("Import from LDAP")
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(500)  # Show after 500ms
+        progress.setValue(0)
+        QtWidgets.QApplication.processEvents()
+        
+        # Attempt import with certificate error handling and auto-retry
+        rows = None
+        retry_attempted = False
+        
+        while True:
+            try:
+                rows = ldap_utils.get_entries(
+                    conn.get('host', ''),
+                    int(conn.get('port', 0) or 0),
+                    bool(conn.get('use_ssl', False)),
+                    conn.get('bind_dn', ''),
+                    conn.get('password', ''),
+                    conn.get('base_dn', ''),
+                    search_filter=search_filter,
+                    attributes=None,
+                    limit=None,
+                    start_tls=bool(conn.get('start_tls', False)),
+                    timeout=int(conn.get('timeout', 30) or 30),
+                    certificate=conn.get('certificate'),
+                    skip_cert_validation=conn.get('skip_cert_validation', False),
+                )
+                break  # Success - exit retry loop
+                
+            except Exception as exc:
+                # Check if this is an SSL certificate error
+                from api.ldap_utils import extract_ssl_error_details
+                is_cert_error, error_details = extract_ssl_error_details(exc, conn.get('host', ''), conn.get('port', 0))
+                
+                if is_cert_error and not retry_attempted:
+                    # Attempt certificate discovery and handle
+                    retry_attempted = True
+                    should_retry, cert_path = self.handle_ldap_certificate_error(
+                        conn.get('host', ''),
+                        int(conn.get('port', 0) or 0),
+                        str(exc),
+                        connection_dict=conn,
+                    )
+                    
+                    if should_retry:
+                        # Continue to next iteration to retry with updated config
+                        continue
+                
+                # Certificate handling failed or not a certificate error - show error and abort
+                progress.close()
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Import LDAP",
+                    f"Failed to read LDAP entries:\n\n{error_details if is_cert_error else str(exc)}"
+                )
+                return
+        
+        progress.close()
 
         if not rows:
             QtWidgets.QMessageBox.information(self, "Import LDAP", "No matching LDAP entries were found.")
@@ -3759,9 +3842,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
             ok, err = test_ldap_connection_with_status(self, conn)
+            # Handle both 2-tuple (old) and 3-tuple (new) return formats
+            if isinstance(ok, tuple):
+                if len(ok) == 3:
+                    ok, err, conn_info = ok
+                else:
+                    ok, err = ok
+            
             if not ok:
                 QtWidgets.QMessageBox.critical(self, "Export LDAP", f"Unable to connect with provided settings.\n\n{err or ''}")
                 return
+            
+            # Show success message with connection details
+            success_msg = format_ldap_connection_success_message(conn)
+            self.show_wide_message("Test Connection", success_msg, min_width=600)
 
             profile_name = self.profile_list.currentText()
             prefer_selected = True
@@ -3858,11 +3952,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     search_filter=conn.get('search_filter', '(objectClass=person)') or '(objectClass=person)',
                     start_tls=bool(conn.get('start_tls', False)),
                     timeout=int(conn.get('timeout', 30) or 30),
+                    certificate=conn.get('certificate'),
+                    skip_cert_validation=conn.get('skip_cert_validation', False),
                 )
                 if sample_entry:
                     ldap_attrs = sorted(set(ldap_attrs).union({k for k in sample_entry.keys() if k and str(k).lower() != 'dn'}))
-            except Exception:
-                pass
+            except Exception as e:
+                # Non-critical error - just log it and continue with default attrs
+                logger.warning(f"Failed to fetch sample LDAP entry for schema detection: {e}")
 
             all_ping_attrs = self._get_pingone_attributes()
             required_ping_attrs = {'username', 'email', 'name.given', 'name.family'}
@@ -3970,17 +4067,53 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(self, "Export LDAP", "No exportable users found after mapping.")
                 return
 
-            result = ldap_utils.upsert_entries(
-                conn.get('host', ''),
-                int(conn.get('port', 0) or 0),
-                bool(conn.get('use_ssl', False)),
-                conn.get('bind_dn', ''),
-                conn.get('password', ''),
-                entries,
-                start_tls=bool(conn.get('start_tls', False)),
-                timeout=int(conn.get('timeout', 30) or 30),
-                auto_create_parents=bool(conn.get('auto_create_parents', True)),
-            )
+            # Attempt export with certificate error handling and auto-retry
+            result = None
+            retry_attempted = False
+            
+            while True:
+                try:
+                    result = ldap_utils.upsert_entries(
+                        conn.get('host', ''),
+                        int(conn.get('port', 0) or 0),
+                        bool(conn.get('use_ssl', False)),
+                        conn.get('bind_dn', ''),
+                        conn.get('password', ''),
+                        entries,
+                        start_tls=bool(conn.get('start_tls', False)),
+                        timeout=int(conn.get('timeout', 30) or 30),
+                        auto_create_parents=bool(conn.get('auto_create_parents', True)),
+                        certificate=conn.get('certificate'),
+                        skip_cert_validation=conn.get('skip_cert_validation', False),
+                    )
+                    break  # Success - exit retry loop
+                    
+                except Exception as exc:
+                    # Check if this is an SSL certificate error
+                    from api.ldap_utils import extract_ssl_error_details
+                    is_cert_error, error_details = extract_ssl_error_details(exc, conn.get('host', ''), conn.get('port', 0))
+                    
+                    if is_cert_error and not retry_attempted:
+                        # Attempt certificate discovery and handle
+                        retry_attempted = True
+                        should_retry, cert_path = self.handle_ldap_certificate_error(
+                            conn.get('host', ''),
+                            int(conn.get('port', 0) or 0),
+                            str(exc),
+                            connection_dict=conn,
+                        )
+                        
+                        if should_retry:
+                            # Continue to next iteration to retry with updated config
+                            continue
+                    
+                    # Certificate handling failed or not a certificate error - show error and abort
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Export LDAP",
+                        f"Failed to export to LDAP:\n\n{error_details if is_cert_error else str(exc)}"
+                    )
+                    return
             
             # Finish tracking and get statistics
             tracker.finish()
@@ -8976,6 +9109,24 @@ See Configuration Help and User Management Help from the Help menu for detailed 
         except Exception:
             pass
 
+    def bump_app_version(self):
+        """Increment application version by 0.001 and update UI."""
+        try:
+            new_version = bump_version()
+            self.version_label.setText(get_version_string())
+            # Update window title
+            self.setWindowTitle(f"{APP_NAME} - v{new_version}")
+            # Show notification
+            self.status_label.setText(f"Version bumped to {new_version}")
+            try:
+                self._set_processing_message(f"Version bumped to {new_version}", 3000)
+            except Exception:
+                pass
+            return new_version
+        except Exception as e:
+            self.status_label.setText(f"Version bump failed: {str(e)}")
+            return None
+
     def save_columns_to_config(self, show_notification=False):
         """Save the selected columns to the current profile's configuration."""
         name = self.profile_list.currentText()
@@ -8992,6 +9143,154 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                     self._set_processing_message(msg, 3000)
                 except Exception:
                     pass
+
+    def show_wide_message(self, title: str, message: str, min_width: int = 600, is_question: bool = False):
+        """Show a message box with custom minimum width.
+        
+        Args:
+            title: Dialog title
+            message: Message text
+            min_width: Minimum width in pixels (default 600)
+            is_question: If True, show Yes/No buttons; if False, show OK button
+            
+        Returns:
+            True if Yes/OK clicked, False otherwise
+        """
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        msg_box.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        if is_question:
+            msg_box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            msg_box.setDefaultButton(QtWidgets.QMessageBox.Yes)
+        else:
+            msg_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        
+        # Set minimum width to ensure content doesn't wrap
+        msg_box.setMinimumWidth(min_width)
+        
+        result = msg_box.exec()
+        return result in (QtWidgets.QMessageBox.Ok, QtWidgets.QMessageBox.Yes)
+
+    def handle_ldap_certificate_error(
+        self, 
+        host: str, 
+        port: int, 
+        error_msg: str,
+        connection_dict: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Handle LDAP certificate errors by attempting discovery and saving.
+        
+        This is a complete end-to-end handler that:
+        1. Retrieves the server's certificate
+        2. Displays it to the user for review
+        3. Saves it if accepted
+        4. Updates the connection config with the certificate path
+        5. Persists the updated config to disk
+        
+        Args:
+            host: LDAP server host
+            port: LDAP server port  
+            error_msg: Original error message
+            connection_dict: Optional connection dict to update with certificate path
+            
+        Returns:
+            Tuple of (should_retry: bool, cert_path: Optional[str])
+        """
+        try:
+            from api.certificate_discovery import retrieve_server_certificate, save_certificate, parse_certificate_info
+            from ui.dialogs import CertificateAcceptanceDialog
+            
+            # Check if error mentions certificate
+            if 'certificate' not in error_msg.lower() and 'ssl' not in error_msg.lower():
+                return False, None
+            
+            # Show "discovering certificate" status
+            self._set_processing_message(f"Discovering certificate from {host}:{port}...", 10000)
+            QtWidgets.QApplication.processEvents()
+            
+            # Try to retrieve certificate
+            cert_pem = retrieve_server_certificate(host, int(port))
+            if not cert_pem:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Certificate Discovery Failed",
+                    f"Could not retrieve certificate from {host}:{port}\n\nError: {error_msg}"
+                )
+                return False, None
+            
+            # Parse certificate info for display
+            cert_info = parse_certificate_info(cert_pem)
+            if not cert_info:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Certificate Parsing Failed",
+                    "Could not parse certificate information"
+                )
+                return False, None
+            
+            # Show certificate acceptance dialog
+            dlg = CertificateAcceptanceDialog(host, port, cert_info, self)
+            dlg.exec()
+            
+            if not dlg.is_accepted():
+                # User rejected - offer to skip validation as fallback
+                reply = QtWidgets.QMessageBox.question(
+                    self,
+                    "Skip Certificate Validation?",
+                    "Do you want to skip certificate validation for this connection?\n\n"
+                    "⚠️ This is insecure and should only be used for testing with self-signed certificates.",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No
+                )
+                if reply == QtWidgets.QMessageBox.Yes:
+                    # Update connection config to skip validation
+                    if connection_dict:
+                        connection_dict['skip_cert_validation'] = True
+                        self._save_ldap_connection_settings(
+                            connection_dict.get('name', 'Unknown'),
+                            {'skip_cert_validation': True}
+                        )
+                    return True, None
+                return False, None
+            
+            # Save certificate
+            success, cert_path = save_certificate(cert_pem, host, int(port))
+            if not success:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Save Failed",
+                    f"Could not save certificate: {cert_path}"
+                )
+                return False, None
+            
+            # Update connection config with certificate path
+            if connection_dict:
+                connection_name = connection_dict.get('name')
+                if connection_name:
+                    # Save certificate path to connection config
+                    self._save_ldap_connection_settings(
+                        connection_name,
+                        {'certificate': cert_path}
+                    )
+                    # Also update the in-memory connection dict
+                    connection_dict['certificate'] = cert_path
+                    logger.info(f"Certificate path saved to connection '{connection_name}': {cert_path}")
+            
+            self._set_processing_message(f"Certificate saved and configuration updated", 3000)
+            return True, cert_path
+                
+        except Exception as e:
+            logger.error(f"Certificate error handling failed: {e}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Certificate Handler Error",
+                f"An unexpected error occurred: {e}"
+            )
+            return False, None
+
 
     # --- Connection logging helpers ---
     @property
