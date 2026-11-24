@@ -70,6 +70,35 @@ def replacement_selection(window, data):
                      if groups.item(i).checkState() == QtCore.Qt.CheckState.Checked)
 
 
+def _get_domain_partition(contexts):
+    """Extract the domain partition (root domain DN) from list of naming contexts.
+    
+    Domain partition is typically the first context starting with 'dc=' that is not
+    a configuration or schema partition.
+    
+    Args:
+        contexts: List of DN strings from LDAP root DSE
+        
+    Returns:
+        Domain partition DN, or None if not found
+    """
+    for context in contexts:
+        context_lower = context.lower()
+        # Skip configuration and schema partitions
+        if 'cn=configuration' in context_lower or 'cn=schema' in context_lower:
+            continue
+        # Domain partition starts with dc=
+        if context_lower.startswith('dc='):
+            return context
+    
+    # Fallback: return first dc= context even if config/schema
+    for context in contexts:
+        if context.lower().startswith('dc='):
+            return context
+    
+    return None
+
+
 def _browse_ldap_dn(parent, config, title="Select DN"):
     """Browse and select an LDAP DN from the directory tree with optional OU filtering."""
     from api import ldap_utils
@@ -98,6 +127,8 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
     info_label = QtWidgets.QLabel("Loading directory structure...")
     info_label.setStyleSheet("color: gray; font-size: 11px;")
     layout.addWidget(info_label)
+    
+    domain_partition = None  # Will be set after fetching contexts
     
     try:
         with ldap_utils._connect(
@@ -134,15 +165,30 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
                 if config.get('base_dn'):
                     contexts = [config.get('base_dn')]
             
+            # Identify the domain partition for defaulting
+            domain_partition = _get_domain_partition(contexts)
+            
             # Create tree items for each naming context
+            domain_partition_item = None
             for context in contexts:
                 item = QtWidgets.QTreeWidgetItem(tree, [str(context)])
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(context))
+                # Mark domain partition item
+                if context == domain_partition:
+                    domain_partition_item = item
                 # Add a placeholder child so the item appears expandable
                 QtWidgets.QTreeWidgetItem(item, ["Loading..."])
             
             if contexts:
-                info_label.setText(f"Found {len(contexts)} directory suffix(es). Click to expand and browse.")
+                if domain_partition:
+                    info_label.setText(f"Domain partition: {domain_partition}. Expand to browse.")
+                else:
+                    info_label.setText(f"Found {len(contexts)} directory suffix(es). Click to expand and browse.")
+            
+            # Auto-expand domain partition on load and set as default selection
+            if domain_partition_item:
+                tree.expandItem(domain_partition_item)
+                tree.setCurrentItem(domain_partition_item)
         
         
         def expand_item(item):
@@ -213,6 +259,42 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
         
         ou_only_cb.stateChanged.connect(on_filter_changed)
         tree.itemExpanded.connect(expand_item)
+        
+        # Add enforcement: prevent selecting items outside domain partition
+        def on_selection_changed():
+            """Enforce domain partition scope - only allow selection within domain partition."""
+            if not domain_partition:
+                return
+            
+            selected = tree.currentItem()
+            if not selected:
+                return
+            
+            selected_dn = selected.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            # Check if selected DN is a top-level item that's not the domain partition
+            if selected.parent() is None:  # Top-level item
+                if selected_dn != domain_partition:
+                    # Prevent selection of non-domain partitions
+                    tree.setCurrentItem(None)
+                    QtWidgets.QMessageBox.warning(
+                        dialog,
+                        "Invalid Selection",
+                        f"Selection is restricted to the domain partition: {domain_partition}"
+                    )
+        
+        def on_item_expanded(item):
+            """Prevent expanding items outside domain partition."""
+            if not domain_partition:
+                return
+            
+            item_dn = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            # Only allow expanding the domain partition at top level
+            if item.parent() is None and item_dn != domain_partition:
+                tree.collapseItem(item)
+        
+        tree.itemSelectionChanged.connect(on_selection_changed)
+        tree.itemExpanded.connect(on_item_expanded)
+
     except Exception as e:
         error_str = str(e)
         # Check if this is an SSL certificate error
