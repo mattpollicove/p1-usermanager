@@ -4530,6 +4530,15 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         
         # Action buttons - only Accept or Reject (no skip/save options)
         button_layout = QtWidgets.QHBoxLayout()
+        
+        view_cert_btn = QtWidgets.QPushButton("View Certificate Details")
+        view_cert_btn.clicked.connect(self.show_certificate_details)
+        view_cert_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; padding: 8px 16px; "
+            "border: none; border-radius: 4px; }"
+        )
+        button_layout.addWidget(view_cert_btn)
+        
         button_layout.addStretch()
         
         reject_btn = QtWidgets.QPushButton("Reject & Cancel Connection")
@@ -4550,7 +4559,91 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         
         layout.addLayout(button_layout)
     
+    def show_certificate_details(self):
+        """Show a detailed certificate viewer dialog."""
+        viewer_dialog = QtWidgets.QDialog(self)
+        viewer_dialog.setWindowTitle("Certificate Details")
+        viewer_dialog.setModal(True)
+        dpi = get_dpi_scale()
+        viewer_dialog.setMinimumSize(scale_size(700, 600, dpi))
+        
+        layout = QtWidgets.QVBoxLayout(viewer_dialog)
+        
+        # Create a table for certificate details
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Field", "Value"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        table.setStyleSheet("border: 1px solid #ccc; border-radius: 4px;")
+        
+        # Parse certificate details
+        details_data = [
+            ("Subject", self.cert_info.get('subject', 'Unknown')),
+            ("Issuer", self.cert_info.get('issuer', 'Unknown')),
+            ("Valid From", self.cert_info.get('not_before', 'Unknown')),
+            ("Valid Until", self.cert_info.get('not_after', 'Unknown')),
+            ("Self-Signed", "Yes" if self.cert_info.get('is_self_signed', False) else "No"),
+            ("Expired", "Yes" if self.cert_info.get('is_expired', False) else "No"),
+            ("Fingerprint (SHA-256)", self.cert_info.get('fingerprint', 'Unknown')),
+        ]
+        
+        table.setRowCount(len(details_data))
+        for row, (field, value) in enumerate(details_data):
+            # Field name
+            field_item = QtWidgets.QTableWidgetItem(field)
+            field_item.setFlags(field_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            field_item.setStyleSheet("font-weight: bold; background-color: #f5f5f5;")
+            table.setItem(row, 0, field_item)
+            
+            # Value
+            value_item = QtWidgets.QTableWidgetItem(value)
+            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            # Make fingerprint monospace
+            if field == "Fingerprint (SHA-256)":
+                font = value_item.font()
+                font.setFamily("Courier New")
+                value_item.setFont(font)
+            table.setItem(row, 1, value_item)
+        
+        # Adjust row heights
+        table.resizeRowsToContents()
+        
+        layout.addWidget(table)
+        
+        # Copy fingerprint button
+        copy_layout = QtWidgets.QHBoxLayout()
+        copy_btn = QtWidgets.QPushButton("Copy Fingerprint")
+        copy_btn.clicked.connect(lambda: self._copy_to_clipboard(self.cert_info.get('fingerprint', '')))
+        copy_layout.addWidget(copy_btn)
+        copy_layout.addStretch()
+        layout.addLayout(copy_layout)
+        
+        # Close button
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(viewer_dialog.accept)
+        close_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; padding: 8px 16px; "
+            "border: none; border-radius: 4px; }"
+        )
+        layout.addWidget(close_btn)
+        
+        viewer_dialog.exec()
+    
+    def _copy_to_clipboard(self, text: str):
+        """Copy text to clipboard and show confirmation."""
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(text)
+        
+        # Show brief tooltip-like confirmation
+        sender = QtWidgets.QApplication.sender()
+        if sender:
+            pos = sender.mapToGlobal(QtCore.QPoint(sender.width() // 2, sender.height()))
+    
     def is_accepted(self) -> bool:
         """Check if dialog was accepted."""
         return self.result() == QtWidgets.QDialog.DialogCode.Accepted
+
 
