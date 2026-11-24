@@ -3579,7 +3579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Show success message with connection details
         success_msg = format_ldap_connection_success_message(conn)
-        self.show_wide_message("Test Connection", success_msg, min_width=750)
+        self.show_wide_message("Test Connection", success_msg)
 
         # Use custom filter if provided, otherwise use default filter from connection
 
@@ -3856,7 +3856,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Show success message with connection details
             success_msg = format_ldap_connection_success_message(conn)
-            self.show_wide_message("Test Connection", success_msg, min_width=750)
+            self.show_wide_message("Test Connection", success_msg)
 
             profile_name = self.profile_list.currentText()
             prefer_selected = True
@@ -9145,13 +9145,61 @@ See Configuration Help and User Management Help from the Help menu for detailed 
                 except Exception:
                     pass
 
-    def show_wide_message(self, title: str, message: str, min_width: int = 600, is_question: bool = False):
-        """Show a message box with custom minimum width.
+    def _calculate_dialog_width(self, percentage: int = 65) -> int:
+        """Calculate dialog width as percentage of screen width with DPI scaling.
+        
+        Args:
+            percentage: Percentage of screen width to use (default 65%)
+            
+        Returns:
+            Calculated width in pixels, with minimum of 600px and maximum of 1200px
+        """
+        try:
+            # Get current screen
+            screen = self.screen() if hasattr(self, 'screen') and callable(self.screen) else None
+            if screen:
+                screen_width = screen.availableGeometry().width()
+                # Calculate percentage of screen width
+                calculated_width = int(screen_width * percentage / 100)
+                # Constrain to reasonable bounds
+                return max(600, min(calculated_width, 1200))
+        except Exception:
+            pass
+        
+        # Fallback to default
+        return 750
+
+    def show_error(self, title: str, message: str):
+        """Show error message with screen-aware width."""
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setIcon(QtWidgets.QMessageBox.Critical)
+        msg_box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        msg_box.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        msg_box.setMinimumWidth(self._calculate_dialog_width(60))
+        msg_box.exec()
+
+    def show_warning(self, title: str, message: str):
+        """Show warning message with screen-aware width."""
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
+        msg_box.setIcon(QtWidgets.QMessageBox.Warning)
+        msg_box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        msg_box.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        msg_box.setMinimumWidth(self._calculate_dialog_width(60))
+        msg_box.exec()
+
+    def show_wide_message(self, title: str, message: str, min_width: int = None, is_question: bool = False):
+        """Show a message box with screen-aware minimum width.
         
         Args:
             title: Dialog title
             message: Message text
-            min_width: Minimum width in pixels (default 600)
+            min_width: Optional fixed minimum width in pixels; if None, scales to screen (65%)
             is_question: If True, show Yes/No buttons; if False, show OK button
             
         Returns:
@@ -9170,10 +9218,13 @@ See Configuration Help and User Management Help from the Help menu for detailed 
             msg_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
         
         # Set minimum width to ensure content doesn't wrap
-        msg_box.setMinimumWidth(min_width)
+        # Use screen-aware width if not explicitly specified
+        width = min_width if min_width is not None else self._calculate_dialog_width(65)
+        msg_box.setMinimumWidth(width)
         
         result = msg_box.exec()
         return result in (QtWidgets.QMessageBox.Ok, QtWidgets.QMessageBox.Yes)
+
 
     def handle_ldap_certificate_error(
         self, 

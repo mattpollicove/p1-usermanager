@@ -4289,7 +4289,21 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         self.setWindowTitle("Accept SSL Certificate")
         self.setModal(True)
         dpi = get_dpi_scale()
-        self.setMinimumSize(scale_size(700, dpi), scale_size(500, dpi))
+        
+        # Calculate screen-aware dialog size (use 70% of screen width for certificate dialog)
+        try:
+            if parent and hasattr(parent, 'screen') and callable(parent.screen):
+                screen = parent.screen()
+                screen_width = screen.availableGeometry().width()
+                calculated_width = int(screen_width * 0.70)
+                # Constrain to reasonable bounds
+                dialog_width = max(700, min(calculated_width, 1200))
+            else:
+                dialog_width = 900
+        except Exception:
+            dialog_width = 900
+        
+        self.setMinimumSize(dialog_width, scale_size(500, dpi))
         
         self.host = host
         self.port = port
