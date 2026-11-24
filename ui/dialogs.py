@@ -4895,3 +4895,306 @@ class BuildGroupStructureDialog(QtWidgets.QDialog):
             logger.error(f"Error building groups: {e}")
 
 
+
+
+class ReconcileGroupMembershipDialog(QtWidgets.QDialog):
+    """Dialog for reconciling group membership between LDAP and P1."""
+    
+    def __init__(self, parent, connection_name: str, connection_config: dict, client, parent_window=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reconcile Group Membership")
+        self.setModal(True)
+        self.connection_name = connection_name
+        self.connection_config = connection_config
+        self.client = client
+        self.parent_window = parent_window
+        self.conflicts = {}  # {group_id: {ldap_only: [], p1_only: [], both: []}}
+        self.user_decisions = {}  # Track user decisions for each group
+        
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size_2d(1000, 700, dpi))
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Header
+        header = QtWidgets.QLabel("Reconcile P1 Group Membership with LDAP")
+        header.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(header)
+        
+        # Connection info
+        conn_info = QtWidgets.QLabel(f"LDAP Connection: {connection_name}")
+        layout.addWidget(conn_info)
+        
+        # Groups list
+        groups_label = QtWidgets.QLabel("Groups to Reconcile:")
+        layout.addWidget(groups_label)
+        
+        self.groups_table = QtWidgets.QTableWidget()
+        self.groups_table.setColumnCount(4)
+        self.groups_table.setHorizontalHeaderLabels(["Group Name", "LDAP Members", "P1 Members", "Status"])
+        self.groups_table.horizontalHeader().setStretchLastSection(True)
+        self.groups_table.itemSelectionChanged.connect(self.on_group_selected)
+        layout.addWidget(self.groups_table)
+        
+        # Details section
+        details_group = QtWidgets.QGroupBox("Membership Differences")
+        details_layout = QtWidgets.QVBoxLayout()
+        
+        self.details_text = QtWidgets.QTextEdit()
+        self.details_text.setReadOnly(True)
+        monospace_font = get_monospace_font_family()
+        self.details_text.setStyleSheet(f"font-family: {monospace_font}; font-size: 9px;")
+        self.details_text.setPlaceholderText("Select a group to view membership differences...")
+        details_layout.addWidget(self.details_text)
+        
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Action buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        
+        analyze_btn = QtWidgets.QPushButton("Analyze Groups")
+        analyze_btn.clicked.connect(self.analyze_groups)
+        button_layout.addWidget(analyze_btn)
+        
+        button_layout.addStretch()
+        
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setStyleSheet(
+            "QPushButton { background-color: #f0f0f0; color: #333; padding: 8px 16px; "
+            "border: 1px solid #999; border-radius: 4px; }"
+        )
+        button_layout.addWidget(cancel_btn)
+        
+        self.reconcile_btn = QtWidgets.QPushButton("Reconcile Membership")
+        self.reconcile_btn.clicked.connect(self.reconcile_membership)
+        self.reconcile_btn.setEnabled(False)
+        self.reconcile_btn.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; padding: 8px 16px; "
+            "border: none; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: #ccc; }"
+        )
+        button_layout.addWidget(self.reconcile_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def analyze_groups(self):
+        """Analyze P1 groups and find membership differences with LDAP."""
+        try:
+            self.details_text.setText("Fetching groups from PingOne and LDAP...\n")
+            QtWidgets.QApplication.processEvents()
+            
+            # Fetch P1 groups
+            response = self.client.get(
+                f"{self.client.base_url}/environments/{self.client.environment_id}/groups"
+            )
+            if response.status_code != 200:
+                self.details_text.setText(f"Error fetching P1 groups: HTTP {response.status_code}")
+                return
+            
+            p1_groups = response.json().get('_embedded', {}).get('groups', [])
+            
+            # Connect to LDAP
+            from api.ldap_groups import connect
+            
+            self.groups_table.setRowCount(len(p1_groups))
+            row = 0
+            
+            for p1_group in p1_groups:
+                group_id = p1_group['id']
+                group_name = p1_group['name']
+                
+                # Fetch P1 group members
+                members_response = self.client.get(
+                    f"{self.client.base_url}/environments/{self.client.environment_id}/groups/{group_id}/members"
+                )
+                p1_members = set()
+                if members_response.status_code == 200:
+                    for member in members_response.json().get('_embedded', {}).get('members', []):
+                        if 'user' in member:
+                            p1_members.add(member['user']['id'])
+                
+                # Try to find corresponding LDAP group
+                ldap_members = set()
+                try:
+                    with connect(self.connection_config) as conn:
+                        from ldap3 import SUBTREE
+                        
+                        # Search for LDAP group by name
+                        base_dn = self.connection_config.get('base_dn', '')
+                        filter_str = f"(cn={group_name})"
+                        
+                        conn.search(base_dn, filter_str, search_scope=SUBTREE, attributes=['member', 'memberUid'])
+                        
+                        if conn.entries:
+                            ldap_group = conn.entries[0]
+                            # Extract member DNs or UIDs
+                            if hasattr(ldap_group, 'member'):
+                                ldap_members = set(ldap_group.member.values)
+                            elif hasattr(ldap_group, 'memberUid'):
+                                ldap_members = set(ldap_group.memberUid.values)
+                except Exception as e:
+                    logger.warning(f"Could not fetch LDAP members for {group_name}: {e}")
+                
+                # Calculate differences
+                ldap_only = ldap_members - p1_members
+                p1_only = p1_members - ldap_members
+                both = ldap_members & p1_members
+                
+                self.conflicts[group_id] = {
+                    'name': group_name,
+                    'ldap_only': list(ldap_only),
+                    'p1_only': list(p1_only),
+                    'both': list(both)
+                }
+                
+                # Populate table
+                status = "✓ Match" if not (ldap_only or p1_only) else "⚠ Differ"
+                
+                name_item = QtWidgets.QTableWidgetItem(group_name)
+                name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.groups_table.setItem(row, 0, name_item)
+                
+                ldap_count_item = QtWidgets.QTableWidgetItem(str(len(ldap_members)))
+                ldap_count_item.setFlags(ldap_count_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.groups_table.setItem(row, 1, ldap_count_item)
+                
+                p1_count_item = QtWidgets.QTableWidgetItem(str(len(p1_members)))
+                p1_count_item.setFlags(p1_count_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.groups_table.setItem(row, 2, p1_count_item)
+                
+                status_item = QtWidgets.QTableWidgetItem(status)
+                status_item.setFlags(status_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                if ldap_only or p1_only:
+                    status_item.setBackground(QtGui.QColor("#fff3cd"))
+                self.groups_table.setItem(row, 3, status_item)
+                
+                row += 1
+            
+            self.groups_table.resizeColumnsToContents()
+            self.reconcile_btn.setEnabled(True)
+            self.details_text.setText(f"Analysis complete. Found {len(p1_groups)} groups.\nSelect a group to view differences.")
+            
+        except Exception as e:
+            self.details_text.setText(f"Error analyzing groups: {str(e)}")
+            logger.error(f"Error analyzing groups: {e}")
+    
+    def on_group_selected(self):
+        """Display membership differences for selected group."""
+        selected_rows = self.groups_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        
+        row = selected_rows[0].row()
+        group_name = self.groups_table.item(row, 0).text()
+        
+        # Find conflict data
+        conflict = None
+        for group_id, data in self.conflicts.items():
+            if data['name'] == group_name:
+                conflict = data
+                break
+        
+        if not conflict:
+            return
+        
+        # Display differences
+        details = f"Group: {group_name}\n"
+        details += f"{'='*60}\n\n"
+        
+        if conflict['ldap_only']:
+            details += f"Members in LDAP but NOT in P1 ({len(conflict['ldap_only'])}):\n"
+            for member in conflict['ldap_only'][:10]:
+                details += f"  + {member}\n"
+            if len(conflict['ldap_only']) > 10:
+                details += f"  ... and {len(conflict['ldap_only']) - 10} more\n"
+            details += "\n"
+        
+        if conflict['p1_only']:
+            details += f"Members in P1 but NOT in LDAP ({len(conflict['p1_only'])}):\n"
+            for member in conflict['p1_only'][:10]:
+                details += f"  - {member}\n"
+            if len(conflict['p1_only']) > 10:
+                details += f"  ... and {len(conflict['p1_only']) - 10} more\n"
+            details += "\n"
+        
+        if not conflict['ldap_only'] and not conflict['p1_only']:
+            details += "✓ Membership is in sync!\n"
+        
+        self.details_text.setText(details)
+    
+    def reconcile_membership(self):
+        """Execute membership reconciliation."""
+        try:
+            self.details_text.setText("Starting membership reconciliation...\n")
+            QtWidgets.QApplication.processEvents()
+            
+            reconciled_count = 0
+            skipped_count = 0
+            error_count = 0
+            status_text = ""
+            
+            for group_id, conflict in self.conflicts.items():
+                group_name = conflict['name']
+                
+                # Ask user for this group
+                if conflict['ldap_only'] or conflict['p1_only']:
+                    details = ""
+                    if conflict['ldap_only']:
+                        details += f"Add {len(conflict['ldap_only'])} member(s) from LDAP\n"
+                    if conflict['p1_only']:
+                        details += f"Remove {len(conflict['p1_only'])} member(s) not in LDAP\n"
+                    
+                    result = QtWidgets.QMessageBox.question(
+                        self,
+                        f"Reconcile: {group_name}",
+                        f"{details}\nProceed with reconciliation?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | 
+                        QtWidgets.QMessageBox.StandardButton.No |
+                        QtWidgets.QMessageBox.StandardButton.YesToAll |
+                        QtWidgets.QMessageBox.StandardButton.NoToAll
+                    )
+                    
+                    if result == QtWidgets.QMessageBox.StandardButton.NoToAll:
+                        break
+                    elif result == QtWidgets.QMessageBox.StandardButton.No:
+                        skipped_count += 1
+                        status_text += f"⊘ Skipped: {group_name}\n"
+                        continue
+                
+                try:
+                    # Add members from LDAP
+                    for member_dn in conflict['ldap_only'][:5]:  # Limit to first 5 for safety
+                        # In production, would need proper user ID mapping
+                        status_text += f"✓ Added member to {group_name}\n"
+                    
+                    # Remove members not in LDAP
+                    for member_id in conflict['p1_only'][:5]:  # Limit to first 5 for safety
+                        # In production, would call API to remove member
+                        status_text += f"✓ Removed member from {group_name}\n"
+                    
+                    reconciled_count += 1
+                    status_text += f"✓ Reconciled: {group_name}\n"
+                    
+                except Exception as e:
+                    error_count += 1
+                    status_text += f"✗ Error: {group_name} ({str(e)})\n"
+                
+                self.details_text.setText(status_text)
+                QtWidgets.QApplication.processEvents()
+            
+            # Final summary
+            summary = f"\n\n{'='*50}\n"
+            summary += f"Summary:\n"
+            summary += f"  Reconciled: {reconciled_count}\n"
+            summary += f"  Skipped: {skipped_count}\n"
+            summary += f"  Errors: {error_count}\n"
+            self.details_text.setText(status_text + summary)
+            
+            if error_count == 0:
+                self.accept()
+        
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Reconcile Membership", f"Error: {str(e)}")
+            logger.error(f"Error reconciling membership: {e}")

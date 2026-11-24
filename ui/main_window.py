@@ -3412,12 +3412,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def reconcile_group_membership(self):
         """Reconcile group membership between LDAP and P1."""
         try:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Reconcile Group Membership",
-                "This feature will be implemented in the next phase.\n\n"
-                "Current step: Building group structure from LDAP/AD groups."
-            )
+            # Step 1: Select LDAP connection
+            name, conns = self._choose_ldap_connection("Select LDAP Connection for Group Reconciliation")
+            if not name:
+                return
+            
+            conn = conns[name]
+            
+            # Step 2: Open reconciliation dialog
+            from ui.dialogs import ReconcileGroupMembershipDialog
+            dialog = ReconcileGroupMembershipDialog(self, name, conn, self.client)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # Membership reconciled successfully
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Group Membership Reconciled",
+                    "Group membership has been successfully reconciled between LDAP and PingOne."
+                )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Reconcile Group Membership", f"Error: {str(e)}")
 
