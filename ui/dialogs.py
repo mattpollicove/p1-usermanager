@@ -2301,7 +2301,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         if not ok:
             # Check if this is an SSL certificate error
             error_lower = (err or '').lower()
-            if ('certificate' in error_lower or 'ssl' in error_lower) and 'self-signed' in error_lower:
+            if 'certificate' in error_lower or 'ssl' in error_lower:
                 # Trigger certificate discovery workflow
                 from api.certificate_discovery import retrieve_server_certificate, save_certificate, parse_certificate_info
                 
