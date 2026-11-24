@@ -107,12 +107,27 @@ def connect(config):
     
     # Determine TLS validation: use saved certificate if available, otherwise allow unverified
     tls_config = None
-    certs_dir = Path(__file__).parent.parent / "certs"
-    cert_file = certs_dir / f"{host.replace('.', '_')}_{port}.pem"
     
-    if cert_file.exists():
-        # Use saved certificate for verification
-        tls_config = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=str(cert_file))
+    # Try to load certificate from secure storage
+    from api.certificate_discovery import load_certificate
+    cert_pem = load_certificate(host, port)
+    
+    if cert_pem:
+        # Use certificate loaded from secure storage
+        import tempfile
+        import ssl
+        
+        # Create a temporary file with the certificate for ldap3
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+            f.write(cert_pem)
+            cert_file = f.name
+        
+        try:
+            tls_config = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=cert_file)
+        finally:
+            # Clean up temp file after TLS config is created
+            import atexit
+            atexit.register(lambda: Path(cert_file).unlink(missing_ok=True))
     else:
         # Allow unverified/self-signed certificates (user accepted the cert dialog)
         tls_config = Tls(validate=ssl.CERT_NONE)

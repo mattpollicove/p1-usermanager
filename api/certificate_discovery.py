@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 import logging
 
+from api.certificate_storage import get_certificate_storage
+
 logger = logging.getLogger(__name__)
 
 
 def get_certs_directory() -> Path:
-    """Get or create the certificates directory."""
+    """Get or create the certificates directory (legacy fallback)."""
     certs_dir = Path(__file__).parent.parent / "certs"
     certs_dir.mkdir(exist_ok=True)
     return certs_dir
@@ -55,7 +57,7 @@ def retrieve_server_certificate(host: str, port: int = 636) -> Optional[str]:
 
 
 def save_certificate(cert_pem: str, host: str, port: int = 636) -> Tuple[bool, str]:
-    """Save certificate to file in certs directory.
+    """Save certificate to secure OS-specific storage.
     
     Args:
         cert_pem: PEM-formatted certificate string
@@ -63,20 +65,67 @@ def save_certificate(cert_pem: str, host: str, port: int = 636) -> Tuple[bool, s
         port: LDAP server port
         
     Returns:
-        Tuple of (success: bool, file_path: str)
+        Tuple of (success: bool, message: str)
     """
     try:
-        certs_dir = get_certs_directory()
-        # Create filename from host and port
-        filename = f"{host.replace('.', '_')}_{port}.pem"
-        cert_path = certs_dir / filename
-        
-        cert_path.write_text(cert_pem)
-        logger.info(f"Certificate saved to {cert_path}")
-        return True, str(cert_path)
+        storage = get_certificate_storage()
+        return storage.save_certificate(cert_pem, host, port)
     except Exception as e:
         logger.error(f"Failed to save certificate: {e}")
-        return False, str(e)
+        return False, f"Error: {str(e)}"
+
+
+def load_certificate(host: str, port: int = 636) -> Optional[str]:
+    """Load certificate from secure OS-specific storage.
+    
+    Args:
+        host: LDAP server hostname
+        port: LDAP server port
+        
+    Returns:
+        PEM-formatted certificate string, or None if not found
+    """
+    try:
+        storage = get_certificate_storage()
+        return storage.load_certificate(host, port)
+    except Exception as e:
+        logger.error(f"Failed to load certificate: {e}")
+        return None
+
+
+def delete_certificate(host: str, port: int = 636) -> Tuple[bool, str]:
+    """Delete certificate from secure storage.
+    
+    Args:
+        host: LDAP server hostname
+        port: LDAP server port
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    try:
+        storage = get_certificate_storage()
+        return storage.delete_certificate(host, port)
+    except Exception as e:
+        logger.error(f"Failed to delete certificate: {e}")
+        return False, f"Error: {str(e)}"
+
+
+def certificate_exists(host: str, port: int = 636) -> bool:
+    """Check if certificate exists in secure storage.
+    
+    Args:
+        host: LDAP server hostname
+        port: LDAP server port
+        
+    Returns:
+        True if certificate exists
+    """
+    try:
+        storage = get_certificate_storage()
+        return storage.certificate_exists(host, port)
+    except Exception:
+        return False
 
 
 def get_certificate_fingerprint(cert_pem: str) -> Optional[str]:
