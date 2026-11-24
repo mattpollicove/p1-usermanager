@@ -2447,6 +2447,16 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                         self.status_label.setText("Certificate not accepted.")
                         return
                     
+                    # Certificate was accepted - save it to secure storage
+                    if cert_pem:
+                        from api.certificate_discovery import save_certificate
+                        success, msg = save_certificate(cert_pem, host, int(port))
+                        if success:
+                            logger.info(f"Certificate saved for {host}:{int(port)}")
+                        else:
+                            logger.warning(f"Failed to save certificate: {msg}")
+                            # Non-fatal - continue anyway
+                
                 except Exception as e:
                     logger.error(f"Certificate handling error: {e}")
                     self.status_label.setText("Certificate handling failed.")
@@ -4918,6 +4928,31 @@ class BuildGroupStructureDialog(QtWidgets.QDialog):
             return
         
         try:
+            # First check if certificate needs acceptance
+            host = self.connection_config.get('host', '').split(':')[0]
+            port = int(self.connection_config.get('port', 636))
+            use_ssl = bool(self.connection_config.get('use_ssl', False))
+            
+            if use_ssl and not self.connection_config.get('skip_cert_validation', False):
+                # Check if we need to show certificate acceptance
+                from api.certificate_discovery import retrieve_server_certificate, parse_certificate_info, certificate_exists, save_certificate
+                
+                if not certificate_exists(host, port):
+                    # Try to retrieve and show certificate for acceptance
+                    cert_pem = retrieve_server_certificate(host, port)
+                    if cert_pem:
+                        cert_info = parse_certificate_info(cert_pem)
+                        if cert_info:
+                            dlg = CertificateAcceptanceDialog(host, port, cert_info, self)
+                            if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                                self.preview_text.setText("Certificate not accepted. Cannot proceed.")
+                                return
+                            
+                            # Save accepted certificate
+                            success, msg = save_certificate(cert_pem, host, port)
+                            if not success:
+                                logger.warning(f"Failed to save certificate: {msg}")
+            
             self.preview_text.setText("Loading groups from LDAP...")
             QtWidgets.QApplication.processEvents()
             
@@ -5124,6 +5159,31 @@ class ReconcileGroupMembershipDialog(QtWidgets.QDialog):
     def analyze_groups(self):
         """Analyze P1 groups and find membership differences with LDAP."""
         try:
+            # First check if certificate needs acceptance
+            host = self.connection_config.get('host', '').split(':')[0]
+            port = int(self.connection_config.get('port', 636))
+            use_ssl = bool(self.connection_config.get('use_ssl', False))
+            
+            if use_ssl and not self.connection_config.get('skip_cert_validation', False):
+                # Check if we need to show certificate acceptance
+                from api.certificate_discovery import retrieve_server_certificate, parse_certificate_info, certificate_exists, save_certificate
+                
+                if not certificate_exists(host, port):
+                    # Try to retrieve and show certificate for acceptance
+                    cert_pem = retrieve_server_certificate(host, port)
+                    if cert_pem:
+                        cert_info = parse_certificate_info(cert_pem)
+                        if cert_info:
+                            dlg = CertificateAcceptanceDialog(host, port, cert_info, self)
+                            if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                                self.details_text.setText("Certificate not accepted. Cannot proceed.")
+                                return
+                            
+                            # Save accepted certificate
+                            success, msg = save_certificate(cert_pem, host, port)
+                            if not success:
+                                logger.warning(f"Failed to save certificate: {msg}")
+            
             self.details_text.setText("Fetching groups from PingOne and LDAP...\n")
             QtWidgets.QApplication.processEvents()
             
