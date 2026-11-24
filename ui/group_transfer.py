@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import logging
 
 import httpx
 from PySide6 import QtCore, QtWidgets
@@ -10,6 +11,8 @@ from api.client import PingOneClient
 from api.group_transfer import apply_import, export_pingone, preflight, read_csv, write_csv
 from api.pingone_groups import PingOneGroups
 from ui.background import background
+
+logger = logging.getLogger(__name__)
 
 
 def review(window, title, heading, lines, action=None):
@@ -103,7 +106,9 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
             bool(config.get('use_ssl', False)),
             config.get('bind_dn', ''),
             config.get('password', ''),
-            bool(config.get('start_tls', False))
+            bool(config.get('start_tls', False)),
+            certificate=config.get('certificate'),
+            skip_cert_validation=config.get('skip_cert_validation', False),
         ) as conn:
             # Get root DSE to find available naming contexts
             # Use None for attributes to get all available, then filter
@@ -156,7 +161,9 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
                     bool(config.get('use_ssl', False)),
                     config.get('bind_dn', ''),
                     config.get('password', ''),
-                    bool(config.get('start_tls', False))
+                    bool(config.get('start_tls', False)),
+                    certificate=config.get('certificate'),
+                    skip_cert_validation=config.get('skip_cert_validation', False),
                 ) as conn:
                     # Determine search filter based on checkbox
                     if ou_only_cb.isChecked():
@@ -176,8 +183,23 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
                         child_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(entry.entry_dn))
                         # Add placeholder if this might have children
                         QtWidgets.QTreeWidgetItem(child_item, ["Loading..."])
-            except Exception:
-                pass
+            except Exception as e:
+                # Check if this is an SSL certificate error
+                error_str = str(e)
+                if 'certificate' in error_str.lower() or 'ssl' in error_str.lower():
+                    # Try to handle certificate error
+                    host = config.get('host', '')
+                    port = int(config.get('port') or 389)
+                    if hasattr(parent, 'handle_ldap_certificate_error'):
+                        should_retry, cert_path = parent.handle_ldap_certificate_error(
+                            host, port, error_str, config
+                        )
+                        if should_retry:
+                            # Retry the expansion
+                            expand_item(item)
+                        return
+                # For other errors, silently fail (item remains empty)
+                logger.debug(f"Error expanding LDAP tree item: {e}")
         
         def on_filter_changed():
             """Refresh tree when filter checkbox is toggled."""
@@ -192,6 +214,23 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
         ou_only_cb.stateChanged.connect(on_filter_changed)
         tree.itemExpanded.connect(expand_item)
     except Exception as e:
+        error_str = str(e)
+        # Check if this is an SSL certificate error
+        if 'certificate' in error_str.lower() or 'ssl' in error_str.lower():
+            # Try to handle certificate error
+            host = config.get('host', '')
+            port = int(config.get('port') or 389)
+            if hasattr(parent, 'handle_ldap_certificate_error'):
+                should_retry, cert_path = parent.handle_ldap_certificate_error(
+                    host, port, error_str, config
+                )
+                if should_retry:
+                    # Close this dialog and re-open it with the new certificate
+                    dialog.close()
+                    # Re-invoke the browse dialog
+                    return _browse_ldap_dn(parent, config, title)
+        
+        # For other errors, show error message
         info_label.setText(f"Error loading directory: {e}")
     
     # Buttons
