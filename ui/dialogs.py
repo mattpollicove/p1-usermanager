@@ -2040,9 +2040,16 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.auto_create_parents_cb = QtWidgets.QCheckBox("Auto-create missing parent containers")
         self.auto_create_parents_cb.setToolTip("When enabled, export can create missing OU/DC parent containers before adding user entries.")
 
+        # BASE DN with browse button
+        base_dn_layout = QtWidgets.QHBoxLayout()
         self.base_dn_edit = QtWidgets.QLineEdit()
         self.base_dn_edit.setPlaceholderText("ou=People,dc=example,dc=com")
-        self.base_dn_edit.setMinimumWidth(500)
+        self.base_dn_edit.setMinimumWidth(400)
+        self.base_dn_browse_btn = QtWidgets.QPushButton("Browse...")
+        self.base_dn_browse_btn.setMaximumWidth(100)
+        self.base_dn_browse_btn.clicked.connect(self._browse_base_dn)
+        base_dn_layout.addWidget(self.base_dn_edit, 1)
+        base_dn_layout.addWidget(self.base_dn_browse_btn)
         self.bind_dn_edit = QtWidgets.QLineEdit()
         self.bind_dn_edit.setPlaceholderText("cn=admin,dc=example,dc=com")
         self.bind_dn_edit.setMinimumWidth(500)
@@ -2094,7 +2101,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         form.addRow("", self.use_ssl_cb)
         form.addRow("", self.start_tls_cb)
         form.addRow("", self.auto_create_parents_cb)
-        form.addRow("Base DN:", self.base_dn_edit)
+        form.addRow("Base DN:", base_dn_layout)
         form.addRow("Bind DN:", self.bind_dn_edit)
         form.addRow("Password:", pw_row)
         form.addRow("Search Filter:", self.filter_edit)
@@ -2417,7 +2424,11 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self._update_connection_info_panel(conn_info)
         self.connection_info_panel.setVisible(True)
 
-        QtWidgets.QMessageBox.information(self, "Test Connection", "LDAP connection successful.")
+        # Offer to discover and populate BASE DN if not already set
+        if not self.base_dn_edit.text().strip():
+            self._offer_discover_base_dn(data)
+        else:
+            QtWidgets.QMessageBox.information(self, "Test Connection", "LDAP connection successful.")
 
     def _update_connection_info_panel(self, conn_info: dict):
         """Update the connection info panel with connection details."""
@@ -2482,6 +2493,112 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         if file_path:
             self.cert_path_edit.setText(file_path)
             self._update_certificate_info_display(file_path)
+
+    def _browse_base_dn(self):
+        """Open LDAP DN browser to select a BASE DN."""
+        from ui.ldap_browser import browse_ldap_dn
+        
+        config = self.get_connection_data()
+        
+        # Validate minimal connection details
+        if not config['host'] or not config['bind_dn'] or not config['password']:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing Information",
+                "Please enter Host, Bind DN, and Password before browsing."
+            )
+            return
+        
+        try:
+            selected_dn = browse_ldap_dn(self, config, "Select Base DN")
+            if selected_dn:
+                self.base_dn_edit.setText(selected_dn)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Browse Error",
+                f"Could not browse LDAP directory:\n{e}"
+            )
+
+    def _offer_discover_base_dn(self, config: dict):
+        """After successful connection, offer to discover and populate BASE DN."""
+        from api import ldap_utils
+        from ldap3 import BASE
+        
+        try:
+            # Try to discover naming contexts
+            with ldap_utils._connect(
+                config.get('host', ''),
+                int(config.get('port') or 389),
+                bool(config.get('use_ssl', False)),
+                config.get('bind_dn', ''),
+                config.get('password', ''),
+                bool(config.get('start_tls', False)),
+                certificate=config.get('certificate'),
+                skip_cert_validation=config.get('skip_cert_validation', False),
+            ) as conn:
+                conn.search("", "(objectClass=*)", search_scope=BASE, attributes=['*', '+'])
+                if conn.entries:
+                    root_attrs = conn.entries[0].entry_attributes_as_dict
+                    contexts = (
+                        root_attrs.get('namingContexts') or 
+                        root_attrs.get('defaultNamingContext') or 
+                        []
+                    )
+                    if not isinstance(contexts, list):
+                        contexts = [contexts] if contexts else []
+                    contexts = [c for c in contexts if c]
+                    
+                    if contexts:
+                        # Show dialog offering discovered contexts
+                        reply = QtWidgets.QMessageBox.question(
+                            self,
+                            "Discover Base DN",
+                            f"Connection successful.\n\n"
+                            f"Found {len(contexts)} directory suffix(es):\n\n"
+                            f"{chr(10).join(contexts)}\n\n"
+                            f"Would you like to browse and select a Base DN?",
+                            QtWidgets.QMessageBox.StandardButton.Yes | 
+                            QtWidgets.QMessageBox.StandardButton.No
+                        )
+                        
+                        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                            # Open the browser
+                            from ui.ldap_browser import browse_ldap_dn
+                            selected_dn = browse_ldap_dn(self, config, "Select Base DN")
+                            if selected_dn:
+                                self.base_dn_edit.setText(selected_dn)
+                                QtWidgets.QMessageBox.information(
+                                    self,
+                                    "Base DN Selected",
+                                    f"Base DN set to:\n{selected_dn}"
+                                )
+                        else:
+                            QtWidgets.QMessageBox.information(
+                                self,
+                                "Test Connection",
+                                "LDAP connection successful."
+                            )
+                    else:
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Test Connection",
+                            "LDAP connection successful."
+                        )
+                else:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Test Connection",
+                        "LDAP connection successful."
+                    )
+        except Exception as e:
+            # If discovery fails, just show success message
+            logger.debug(f"BASE DN discovery failed: {e}")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Test Connection",
+                "LDAP connection successful."
+            )
 
     def _update_certificate_info_display(self, cert_path: str):
         """Display certificate information if file is valid."""
