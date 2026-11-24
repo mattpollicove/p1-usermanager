@@ -49,6 +49,23 @@ def scale_size(base_size, dpi_scale=None):
     return int(base_size * max(1.0, dpi_scale * 0.8))
 
 
+def scale_size_2d(width, height, dpi_scale=None):
+    """Scale width and height values and return as QSize.
+    
+    Args:
+        width: Base width in pixels
+        height: Base height in pixels
+        dpi_scale: Optional DPI scale factor (defaults to current screen DPI)
+        
+    Returns:
+        QSize with scaled dimensions
+    """
+    if dpi_scale is None:
+        dpi_scale = get_dpi_scale()
+    return QtCore.QSize(scale_size(width, dpi_scale), scale_size(height, dpi_scale))
+
+
+
 def apply_screen_relative_size(
     dialog: QtWidgets.QDialog,
     min_w: int,
@@ -4568,7 +4585,7 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         viewer_dialog.setWindowTitle("Certificate Details")
         viewer_dialog.setModal(True)
         dpi = get_dpi_scale()
-        viewer_dialog.setMinimumSize(scale_size(700, 600, dpi))
+        viewer_dialog.setMinimumSize(scale_size_2d(700, 600, dpi))
         
         layout = QtWidgets.QVBoxLayout(viewer_dialog)
         
