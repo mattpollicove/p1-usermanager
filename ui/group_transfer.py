@@ -457,7 +457,8 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
                 tree.setFocus()
                 event.accept()
             else:
-                super(QtWidgets.QLineEdit, search_input).keyPressEvent(event)
+                # For all other keys (including regular typing), use the base class implementation
+                QtWidgets.QLineEdit.keyPressEvent(search_input, event)
         
         # Connect search handlers
         search_input.textChanged.connect(on_search_changed)
