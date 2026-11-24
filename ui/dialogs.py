@@ -2113,6 +2113,12 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.skip_cert_validation_cb = QtWidgets.QCheckBox("Skip certificate validation (not recommended)")
         self.skip_cert_validation_cb.setStyleSheet("color: #cc0000;")
 
+        # NEW: Group and User Base DN fields (for remembering in group management)
+        self.group_base_dn_edit = QtWidgets.QLineEdit()
+        self.group_base_dn_edit.setPlaceholderText("ou=groups,dc=example,dc=com")
+        self.user_base_dn_edit = QtWidgets.QLineEdit()
+        self.user_base_dn_edit.setPlaceholderText("ou=users,dc=example,dc=com")
+
         form.addRow("Name:", self.name_edit)
         form.addRow("Host:", self.host_edit)
         form.addRow("Port:", self.port_edit)
@@ -2120,6 +2126,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         form.addRow("", self.start_tls_cb)
         form.addRow("", self.auto_create_parents_cb)
         form.addRow("Base DN:", base_dn_layout)
+        form.addRow("Group Base DN:", self.group_base_dn_edit)
+        form.addRow("User Base DN:", self.user_base_dn_edit)
         form.addRow("Bind DN:", self.bind_dn_edit)
         form.addRow("Password:", pw_row)
         form.addRow("Search Filter:", self.filter_edit)
@@ -2223,6 +2231,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             self.start_tls_cb.setChecked(bool(initial.get('start_tls', False)))
             self.auto_create_parents_cb.setChecked(bool(initial.get('auto_create_parents', True)))
             self.base_dn_edit.setText(initial.get('base_dn', ''))
+            self.group_base_dn_edit.setText(initial.get('group_base_dn', ''))
+            self.user_base_dn_edit.setText(initial.get('user_base_dn', ''))
             self.bind_dn_edit.setText(initial.get('bind_dn', ''))
             self.pw_edit.setText(initial.get('password', ''))
             self.filter_edit.setText(initial.get('search_filter', '(objectClass=person)'))
@@ -2259,6 +2269,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.start_tls_cb.setChecked(False)
         self.auto_create_parents_cb.setChecked(True)
         self.base_dn_edit.clear()
+        self.group_base_dn_edit.clear()
+        self.user_base_dn_edit.clear()
         self.bind_dn_edit.clear()
         self.pw_edit.clear()
         self.filter_edit.setText('(objectClass=person)')
@@ -2600,6 +2612,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             'start_tls': bool(self.start_tls_cb.isChecked()),
             'auto_create_parents': bool(self.auto_create_parents_cb.isChecked()),
             'base_dn': self.base_dn_edit.text().strip(),
+            'group_base_dn': self.group_base_dn_edit.text().strip(),
+            'user_base_dn': self.user_base_dn_edit.text().strip(),
             'bind_dn': self.bind_dn_edit.text().strip(),
             'password': self.pw_edit.text(),
             'search_filter': (self.filter_edit.text().strip() or '(objectClass=person)'),
@@ -4716,6 +4730,9 @@ class BuildGroupStructureDialog(QtWidgets.QDialog):
         base_dn_layout.addWidget(QtWidgets.QLabel("Group Base DN:"))
         self.base_dn_input = QtWidgets.QLineEdit()
         self.base_dn_input.setPlaceholderText("e.g., ou=groups,dc=example,dc=com")
+        # Populate from saved connection config if available
+        if connection_config.get('group_base_dn'):
+            self.base_dn_input.setText(connection_config['group_base_dn'])
         base_dn_layout.addWidget(self.base_dn_input)
         config_layout.addLayout(base_dn_layout)
         
@@ -5031,8 +5048,8 @@ class ReconcileGroupMembershipDialog(QtWidgets.QDialog):
                     with connect(self.connection_config) as conn:
                         from ldap3 import SUBTREE
                         
-                        # Search for LDAP group by name
-                        base_dn = self.connection_config.get('base_dn', '')
+                        # Use group_base_dn if available, otherwise fall back to base_dn
+                        base_dn = self.connection_config.get('group_base_dn') or self.connection_config.get('base_dn', '')
                         filter_str = f"(cn={group_name})"
                         
                         conn.search(base_dn, filter_str, search_scope=SUBTREE, attributes=['member', 'memberUid'])
