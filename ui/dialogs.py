@@ -4671,3 +4671,227 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         return self.result() == QtWidgets.QDialog.DialogCode.Accepted
 
 
+class BuildGroupStructureDialog(QtWidgets.QDialog):
+    """Dialog for building P1 group structure from LDAP groups."""
+    
+    def __init__(self, parent, connection_name: str, connection_config: dict, client, parent_window=None):
+        super().__init__(parent)
+        self.setWindowTitle("Build Group Structure from LDAP")
+        self.setModal(True)
+        self.connection_name = connection_name
+        self.connection_config = connection_config
+        self.client = client
+        self.parent_window = parent_window
+        
+        dpi = get_dpi_scale()
+        self.setMinimumSize(scale_size_2d(800, 600, dpi))
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Header
+        header = QtWidgets.QLabel("Build P1 Group Structure from LDAP")
+        header.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(header)
+        
+        # Connection info
+        conn_info = QtWidgets.QLabel(f"LDAP Connection: {connection_name}")
+        layout.addWidget(conn_info)
+        
+        # Group configuration section
+        config_group = QtWidgets.QGroupBox("Group Configuration")
+        config_layout = QtWidgets.QVBoxLayout()
+        
+        # Base DN selection
+        base_dn_layout = QtWidgets.QHBoxLayout()
+        base_dn_layout.addWidget(QtWidgets.QLabel("Group Base DN:"))
+        self.base_dn_input = QtWidgets.QLineEdit()
+        self.base_dn_input.setPlaceholderText("e.g., ou=groups,dc=example,dc=com")
+        base_dn_layout.addWidget(self.base_dn_input)
+        config_layout.addLayout(base_dn_layout)
+        
+        # Group object class
+        class_layout = QtWidgets.QHBoxLayout()
+        class_layout.addWidget(QtWidgets.QLabel("Group Object Class:"))
+        self.group_class_combo = QtWidgets.QComboBox()
+        self.group_class_combo.addItems(["groupOfNames", "groupOfUniqueNames", "posixGroup"])
+        class_layout.addWidget(self.group_class_combo)
+        config_layout.addLayout(class_layout)
+        
+        # Scope info
+        scope_info = QtWidgets.QLabel("⚠ All groups will be created in the default environment scope.")
+        scope_info.setStyleSheet("color: #666; font-size: 10px;")
+        config_layout.addWidget(scope_info)
+        
+        config_group.setLayout(config_layout)
+        layout.addWidget(config_group)
+        
+        # Preview section
+        preview_group = QtWidgets.QGroupBox("Preview")
+        preview_layout = QtWidgets.QVBoxLayout()
+        
+        self.preview_text = QtWidgets.QTextEdit()
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setPlaceholderText("Click 'Preview Groups' to see what will be created...")
+        monospace_font = get_monospace_font_family()
+        self.preview_text.setStyleSheet(f"font-family: {monospace_font}; font-size: 9px;")
+        preview_layout.addWidget(self.preview_text)
+        
+        # Preview button
+        preview_btn = QtWidgets.QPushButton("Preview Groups")
+        preview_btn.clicked.connect(self.preview_groups)
+        preview_layout.addWidget(preview_btn)
+        
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+        
+        # Action buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setStyleSheet(
+            "QPushButton { background-color: #f0f0f0; color: #333; padding: 8px 16px; "
+            "border: 1px solid #999; border-radius: 4px; }"
+        )
+        button_layout.addWidget(cancel_btn)
+        
+        self.build_btn = QtWidgets.QPushButton("Build Group Structure")
+        self.build_btn.clicked.connect(self.build_groups)
+        self.build_btn.setEnabled(False)
+        self.build_btn.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; padding: 8px 16px; "
+            "border: none; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:disabled { background-color: #ccc; }"
+        )
+        button_layout.addWidget(self.build_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def preview_groups(self):
+        """Preview groups from LDAP before building."""
+        base_dn = self.base_dn_input.text().strip()
+        if not base_dn:
+            QtWidgets.QMessageBox.warning(self, "Preview Groups", "Please enter a Group Base DN.")
+            return
+        
+        try:
+            self.preview_text.setText("Loading groups from LDAP...")
+            QtWidgets.QApplication.processEvents()
+            
+            from api.ldap_groups import connect
+            
+            with connect(self.connection_config) as conn:
+                from ldap3 import SUBTREE, ALL_ATTRIBUTES
+                
+                group_class = self.group_class_combo.currentText()
+                filter_str = f"(objectClass={group_class})"
+                
+                conn.search(base_dn, filter_str, search_scope=SUBTREE, attributes=['cn', 'description'])
+                
+                groups = []
+                for entry in conn.entries:
+                    cn = entry.cn.value if hasattr(entry, 'cn') else "Unknown"
+                    desc = entry.description.value if hasattr(entry, 'description') else ""
+                    groups.append({
+                        'name': cn,
+                        'description': desc,
+                        'dn': entry.entry_dn
+                    })
+                
+                # Display preview
+                preview = f"Found {len(groups)} groups to create:\n\n"
+                for group in groups[:20]:  # Show first 20
+                    preview += f"• {group['name']}\n"
+                    if group['description']:
+                        preview += f"  Description: {group['description']}\n"
+                
+                if len(groups) > 20:
+                    preview += f"\n... and {len(groups) - 20} more groups"
+                
+                self.preview_text.setText(preview)
+                self.build_btn.setEnabled(True)
+                self.groups_to_create = groups
+                
+        except Exception as e:
+            self.preview_text.setText(f"Error loading groups: {str(e)}")
+            self.build_btn.setEnabled(False)
+            logger.error(f"Error previewing groups: {e}")
+    
+    def build_groups(self):
+        """Build the group structure in P1."""
+        if not hasattr(self, 'groups_to_create') or not self.groups_to_create:
+            QtWidgets.QMessageBox.warning(self, "Build Groups", "Please preview groups first.")
+            return
+        
+        try:
+            self.build_btn.setEnabled(False)
+            self.preview_text.setText("Creating groups in PingOne...\n")
+            QtWidgets.QApplication.processEvents()
+            
+            created_count = 0
+            skipped_count = 0
+            error_count = 0
+            status_text = ""
+            
+            for group in self.groups_to_create:
+                try:
+                    # Attempt to create group via API
+                    group_data = {
+                        "name": group['name'],
+                        "description": group['description'] or f"Imported from {group['dn']}"
+                    }
+                    
+                    # Try to create the group
+                    response = self.client.post(
+                        f"{self.client.base_url}/environments/{self.client.environment_id}/groups",
+                        json=group_data
+                    )
+                    
+                    if response.status_code == 201:
+                        created_count += 1
+                        status_text += f"✓ Created: {group['name']}\n"
+                    elif response.status_code == 409:
+                        # Group already exists - ask user
+                        result = QtWidgets.QMessageBox.question(
+                            self,
+                            "Group Already Exists",
+                            f"Group '{group['name']}' already exists in PingOne.\n\nSkip this group?",
+                            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                        )
+                        if result == QtWidgets.QMessageBox.StandardButton.Yes:
+                            skipped_count += 1
+                            status_text += f"⊘ Skipped: {group['name']} (already exists)\n"
+                        else:
+                            error_count += 1
+                            status_text += f"✗ Error: {group['name']} (conflict)\n"
+                    else:
+                        error_count += 1
+                        status_text += f"✗ Error: {group['name']} (HTTP {response.status_code})\n"
+                    
+                    self.preview_text.setText(status_text)
+                    QtWidgets.QApplication.processEvents()
+                    
+                except Exception as e:
+                    error_count += 1
+                    status_text += f"✗ Error: {group['name']} ({str(e)})\n"
+                    self.preview_text.setText(status_text)
+                    QtWidgets.QApplication.processEvents()
+            
+            # Final summary
+            summary = f"\n\n{'='*50}\n"
+            summary += f"Summary:\n"
+            summary += f"  Created: {created_count}\n"
+            summary += f"  Skipped: {skipped_count}\n"
+            summary += f"  Errors: {error_count}\n"
+            self.preview_text.setText(status_text + summary)
+            
+            if error_count == 0:
+                self.accept()
+        
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Build Groups", f"Error: {str(e)}")
+            self.build_btn.setEnabled(True)
+            logger.error(f"Error building groups: {e}")
+
+

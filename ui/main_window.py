@@ -1240,6 +1240,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Separate Logs submenu for quick actions (reset, clear, archive)
         groups_menu = menubar.addMenu("Groups")
+        
+        # Build Group Structure option
+        build_structure_action = groups_menu.addAction("Build Group Structure...")
+        build_structure_action.triggered.connect(self.build_group_structure)
+        
+        groups_menu.addSeparator()
+        
+        # Import/Export Group options
         for importing in (True, False):
             for source in ("CSV", "LDAP"):
                 label = f"{'Import' if importing else 'Export'} Groups ({source})..."
@@ -1248,6 +1256,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     lambda checked=False, importing=importing, source=source:
                     self._open_group_transfer(importing, source)
                 )
+        
+        groups_menu.addSeparator()
+        
+        # Reconcile Group Membership option
+        reconcile_action = groups_menu.addAction("Reconcile Group Membership...")
+        reconcile_action.triggered.connect(self.reconcile_group_membership)
 
         logs_menu = menubar.addMenu("Logs")
         self.logs_show_action = logs_menu.addAction("Show Log Files...")
@@ -3371,6 +3385,41 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_group_transfer(self, importing, source):
         from ui.group_transfer import run_transfer
         run_transfer(self, importing, source)
+
+    def build_group_structure(self):
+        """Build P1 group structure from LDAP/AD groups."""
+        try:
+            # Step 1: Select LDAP connection
+            name, conns = self._choose_ldap_connection("Select LDAP Connection for Group Structure")
+            if not name:
+                return
+            
+            conn = conns[name]
+            
+            # Step 2: Open group structure builder dialog
+            from ui.dialogs import BuildGroupStructureDialog
+            dialog = BuildGroupStructureDialog(self, name, conn, self.client)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # Groups built successfully
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Group Structure Built",
+                    "Group structure has been successfully created in PingOne."
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Build Group Structure", f"Error: {str(e)}")
+
+    def reconcile_group_membership(self):
+        """Reconcile group membership between LDAP and P1."""
+        try:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Reconcile Group Membership",
+                "This feature will be implemented in the next phase.\n\n"
+                "Current step: Building group structure from LDAP/AD groups."
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Reconcile Group Membership", f"Error: {str(e)}")
 
     def import_from_ldap_directory(self):
         """Initiate import flow from an LDAP directory."""
