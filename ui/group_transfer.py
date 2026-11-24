@@ -5,7 +5,7 @@ import csv
 import logging
 
 import httpx
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from api.client import PingOneClient
 from api.group_transfer import apply_import, export_pingone, preflight, read_csv, write_csv
@@ -99,6 +99,90 @@ def _get_domain_partition(contexts):
     return None
 
 
+def _extract_rdn(dn):
+    """Extract the RDN (first component) from a DN string.
+    
+    For example, 'cn=Users,dc=example,dc=net' returns 'Users'.
+    
+    Args:
+        dn: Distinguished Name string
+        
+    Returns:
+        RDN value, or empty string if not found
+    """
+    if not dn:
+        return ''
+    
+    # Find first '=' to get the first component value
+    parts = dn.split(',')
+    if not parts:
+        return ''
+    
+    first_part = parts[0].strip()
+    if '=' not in first_part:
+        return ''
+    
+    # Return value after '='
+    return first_part.split('=', 1)[1].strip()
+
+
+def _extract_ou_names(dn):
+    """Extract all OU values from a DN.
+    
+    For example, 'cn=Users,ou=Groups,ou=Company,dc=example,dc=net' returns ['Groups', 'Company'].
+    
+    Args:
+        dn: Distinguished Name string
+        
+    Returns:
+        List of OU values
+    """
+    if not dn:
+        return []
+    
+    ous = []
+    for part in dn.split(','):
+        part = part.strip()
+        if part.lower().startswith('ou='):
+            value = part.split('=', 1)[1].strip()
+            ous.append(value)
+    
+    return ous
+
+
+def _match_search_term(dn, search_term):
+    """Check if DN matches search term with RDN prioritization.
+    
+    Returns priority score: 0 = no match, 1 = OU match, 2 = RDN match
+    
+    Args:
+        dn: Distinguished Name string
+        search_term: Search string (case-insensitive)
+        
+    Returns:
+        Tuple of (match_score, matched_text) or (0, '') if no match
+    """
+    if not search_term:
+        return 2, _extract_rdn(dn)  # Return RDN by default if no search
+    
+    search_lower = search_term.lower()
+    
+    # Check RDN (highest priority)
+    rdn = _extract_rdn(dn)
+    if search_lower in rdn.lower():
+        return 2, rdn
+    
+    # Check OUs (second priority)
+    ous = _extract_ou_names(dn)
+    for ou in ous:
+        if search_lower in ou.lower():
+            return 1, ou
+    
+    # No match
+    return 0, ''
+
+
+
 def _browse_ldap_dn(parent, config, title="Select DN"):
     """Browse and select an LDAP DN from the directory tree with optional OU filtering."""
     from api import ldap_utils
@@ -117,6 +201,17 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
     filter_layout.addWidget(ou_only_cb)
     filter_layout.addStretch()
     layout.addLayout(filter_layout)
+    
+    # Search field for progressive entry filtering
+    search_layout = QtWidgets.QHBoxLayout()
+    search_input = QtWidgets.QLineEdit()
+    search_input.setPlaceholderText("Type to search (RDN, then OUs)...")
+    search_input.setMaximumHeight(32)
+    search_clear_btn = QtWidgets.QPushButton("Clear")
+    search_clear_btn.setMaximumWidth(60)
+    search_layout.addWidget(search_input, 1)
+    search_layout.addWidget(search_clear_btn)
+    layout.addLayout(search_layout)
     
     # Try to fetch available DNs from the LDAP server
     tree = QtWidgets.QTreeWidget()
@@ -257,8 +352,121 @@ def _browse_ldap_dn(parent, config, title="Select DN"):
                 top_item.takeChildren()
                 QtWidgets.QTreeWidgetItem(top_item, ["Loading..."])
         
+        def _get_all_tree_items():
+            """Recursively get all items in the tree."""
+            items = []
+            for i in range(tree.topLevelItemCount()):
+                top_item = tree.topLevelItem(i)
+                items.append(top_item)
+                stack = [top_item]
+                while stack:
+                    current = stack.pop()
+                    for j in range(current.childCount()):
+                        child = current.child(j)
+                        items.append(child)
+                        stack.append(child)
+            return items
+        
+        def _reset_tree_visibility():
+            """Show all items and remove highlighting."""
+            for item in _get_all_tree_items():
+                item.setHidden(False)
+                # Reset highlighting
+                font = item.font(0)
+                font.setBold(False)
+                item.setFont(0, font)
+                item.setBackground(0, QtGui.QBrush())
+        
+        def on_search_changed(text):
+            """Handle progressive search input."""
+            search_term = text.strip()
+            
+            if not search_term:
+                # Clear search - show all items
+                _reset_tree_visibility()
+                search_input.setStyleSheet("")
+                return
+            
+            # Collect all items with their search scores
+            all_items = _get_all_tree_items()
+            matches = []
+            
+            for item in all_items:
+                dn = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if not dn:
+                    continue
+                
+                score, matched_text = _match_search_term(dn, search_term)
+                if score > 0:
+                    matches.append((score, matched_text, item, dn))
+            
+            # Hide non-matching items
+            matched_items = set()
+            for score, matched_text, item, dn in matches:
+                matched_items.add(item)
+                # Highlight matching item
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+                item.setBackground(0, QtGui.QBrush(QtGui.QColor("#ffffcc")))
+                
+                # Auto-expand parents of matching items
+                parent = item.parent()
+                while parent:
+                    matched_items.add(parent)
+                    tree.expandItem(parent)
+                    parent = parent.parent()
+            
+            # Hide non-matched items (but show parents of matches)
+            for item in all_items:
+                is_ancestor_of_match = any(
+                    _is_ancestor(item, m) for m in matched_items
+                )
+                item.setHidden(not (item in matched_items or is_ancestor_of_match))
+            
+            # Visual feedback: change search field color if matches found
+            if matches:
+                search_input.setStyleSheet("background-color: #e6f3ff;")
+            else:
+                search_input.setStyleSheet("background-color: #ffe6e6;")
+        
+        def _is_ancestor(ancestor, item):
+            """Check if ancestor is a parent of item."""
+            current = item.parent()
+            while current:
+                if current == ancestor:
+                    return True
+                current = current.parent()
+            return False
+        
+        def on_search_key_press(event):
+            """Handle Enter/Escape keys in search field."""
+            if event.key() == QtCore.Qt.Key.Key_Return or event.key() == QtCore.Qt.Key.Key_Enter:
+                # Find first visible match and select it
+                for item in _get_all_tree_items():
+                    if not item.isHidden():
+                        font = item.font(0)
+                        if font.bold():  # It's a match
+                            tree.setCurrentItem(item)
+                            return
+                event.accept()
+            elif event.key() == QtCore.Qt.Key.Key_Escape:
+                # Clear search
+                search_input.clear()
+                _reset_tree_visibility()
+                tree.setFocus()
+                event.accept()
+            else:
+                super(QtWidgets.QLineEdit, search_input).keyPressEvent(event)
+        
+        # Connect search handlers
+        search_input.textChanged.connect(on_search_changed)
+        search_input.keyPressEvent = on_search_key_press
+        search_clear_btn.clicked.connect(search_input.clear)
+        
         ou_only_cb.stateChanged.connect(on_filter_changed)
         tree.itemExpanded.connect(expand_item)
+
         
         # Add enforcement: prevent selecting items outside domain partition
         def on_selection_changed():
