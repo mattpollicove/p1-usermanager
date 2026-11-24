@@ -2,16 +2,16 @@ This README is generated based on the initial public release of the code except 
 I went for a basic UI with nothing too flashy just to establish the project. There are a lot of places I'd like to take this, but I'm also interrested to see what other 
 people would like to do with this application. The sky's the limit to be sure!
 
-PingOne UserManager (v0.84 - Alpha)
+PingOne UserManager (v0.859 - Alpha)
 
-⚠️ **Alpha Release**: Version 0.84 includes the latest CSV import reliability fixes alongside native macOS Keychain diagnostics, Touch ID-oriented credential flow improvements, and one-click ACL reapply for saved profile secrets. Please report issues or send requests—thank you!
+⚠️ **Alpha Release**: Version 0.859 includes robust LDAP certificate management with self-signed certificate support, certificate details viewer, and cross-platform font optimizations. Please report issues or send requests—thank you!
 
-**Version 0.84 Updates**:
-- More reliable CSV import dialog initialization
-- Native Keychain diagnostics in Configuration actions
-- One-click "Apply Keychain ACL To All Profiles" action for macOS
-- Improved Touch ID-capable keychain path guidance and secret caching docs
-- Updated in-app help and README for keychain and credential behavior
+**Version 0.859 Updates**:
+- ✅ Self-signed LDAP certificate support in group transfer operations
+- ✅ Certificate details viewer in acceptance dialogs
+- ✅ Fixed cryptography library deprecation warnings
+- ✅ Cross-platform monospace font optimization (eliminates ~105ms startup delay)
+- ✅ Improved table item styling for certificate viewer
 
 PingOne UserManager is a robust, cross-platform desktop application designed for IT administrators to manage PingOne identity environments. It simplifies complex administrative tasks like bulk user deletion, nested attribute editing, and environment synchronization through a clean, multi-threaded GUI.
 
@@ -162,6 +162,29 @@ Developer Note
 
 ## 🎯 Latest Updates (November 2026)
 
+### ✅ LDAP Certificate Management (v0.859)
+
+**New Features:**
+- **Certificate Acceptance Dialog**: When connecting to LDAPS servers (port 636), users are prompted to accept or reject the server's SSL certificate
+- **Certificate Details Viewer**: View full certificate information including:
+  - Subject and Issuer (DN format)
+  - Validity dates
+  - Self-signed indicator
+  - Expiration status
+  - SHA-256 fingerprint
+  - Copy fingerprint button for easy sharing
+- **Self-Signed Certificate Support**: Automatically saves accepted certificates for group transfer operations
+- **Certificate Verification**: Group transfer LDAP connections use saved certificates with proper TLS validation
+
+**Technical Improvements:**
+- Fixed cryptography library deprecation warnings (`not_valid_before_utc`, `not_valid_after_utc`)
+- Fixed certificate fingerprint calculation using `hashes.SHA256()` from cryptography
+- Cross-platform monospace font optimization:
+  - macOS: Monaco
+  - Windows: Consolas
+  - Linux: DejaVu Sans Mono
+  - Eliminates Qt font warning (~105ms startup delay)
+
 ### ✅ Critical Bug Fix: 'lazy_import' Error
 The "'lazy_import' object is not callable" error that prevented credential testing has been **completely resolved**.
 
@@ -220,11 +243,14 @@ python3 run.py
 
 ✅ **Connection Testing** - No more 'lazy_import' errors  
 ✅ **Instance Feedback** - Shows which PingOne environment you're connected to  
-✅ **Groups Management** - Import/Export from CSV and LDAP  
+✅ **Groups Management** - Import/Export from CSV and LDAP with certificate support
+✅ **Certificate Management** - Accept and view LDAPS certificates with self-signed support
 ✅ **Profile Management** - Multiple profiles with Keychain integration  
 ✅ **User Management** - View, search, and manage users  
 ✅ **Bulk Operations** - Delete multiple users simultaneously  
 ✅ **Dark Mode** - Theme toggle with persistence  
+✅ **LDAP Directory Browser** - Browse LDAP directory structure
+✅ **Group Transfer** - Migrate groups from LDAP with certificate verification
 
 ## 🧪 Testing
 

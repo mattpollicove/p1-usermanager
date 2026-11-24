@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.859] - 2026-11-23
+### Added
+- **Certificate Details Viewer**: New "View Certificate Details" button in LDAPS certificate acceptance dialog
+- **Certificate Fingerprint Display**: SHA-256 fingerprint with copy-to-clipboard functionality
+- **Self-Signed Certificate Support**: Group transfer LDAP connections now accept and validate self-signed certificates
+- **Certificate Information Display**: Shows subject, issuer, validity dates, serial number, and self-signed indicator
+
+### Changed
+- Bumped application version to `0.859`
+- LDAP group transfer now checks for saved certificates and uses proper TLS validation
+- Cross-platform monospace font optimization: Monaco (macOS), Consolas (Windows), DejaVu Sans Mono (Linux)
+- Improved TLS configuration for LDAP connections with certificate file support
+
+### Fixed
+- Resolved cryptography library deprecation warnings (`not_valid_before` → `not_valid_before_utc`)
+- Fixed certificate fingerprint calculation to use `hashes.SHA256()` instead of `hashlib`
+- Fixed table item styling in certificate viewer using proper Qt methods instead of stylesheets
+- Eliminated Qt font family warning (~105ms startup delay) by replacing generic "Monospace"
+- Added `scale_size_2d()` function for proper dialog dimension scaling
+
+### Documentation
+- Updated `README.md` with new certificate management features
+- Updated feature list to include LDAP certificate support and self-signed certificate handling
+
+## [Unreleased]
+
 ### Added
 - Separate Groups menu for CSV and LDAP group migration, with nesting and direct user memberships, read-only previews, and opt-in replacement of direct PingOne memberships.
 - Explicit `jsonschema` entry in `requirements.txt` for optional local user-record validation.
@@ -16,7 +42,6 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - LDAP connection tests show progress and report the result. In the import wizard, **Manage LDAP Connections** can return the selected connection and **Next** opens the LDAP import prompt directly.
-- Bumped application version to `0.84`.
 - Improved CSV import dialog initialization reliability.
 - Database connectivity is now JDBC-only for MSSQL, MySQL, and Oracle.
 - Removed non-JDBC fallback guidance from active docs and UI guidance.

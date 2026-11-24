@@ -1,17 +1,18 @@
 # PingOne UserManager - Development Specification
 
-**Version:** 0.84 (Alpha)
-**Last Updated:** November 20, 2026
+**Version:** 0.859 (Alpha)
+**Last Updated:** November 23, 2026
 **Status:** Active Development  
-**Focus Area:** Database Connectivity Features
+**Focus Area:** LDAP Certificate Management & Group Transfer
 
-⚠️ **Alpha Release Notice**: This version is under active development with emphasis on database import/export functionality. Core user management features are stable, but database connectivity is being refined based on user feedback.
+⚠️ **Alpha Release Notice**: This version is under active development with emphasis on LDAP certificate management and group transfer operations. Core user management features are stable, with robust certificate handling for self-signed certificates in LDAPS connections.
 
-### Database Connectivity Policy (Current)
-- Database import/export is JDBC-only.
-- Supported database backends: MSSQL, MySQL, Oracle.
-- Required Python packages: `jaydebeapi`, `JPype1`.
-- A vendor JDBC `.jar` file must be provided in the DB connection "Driver Path" field.
+### LDAP Certificate Management (v0.859)
+- LDAPS (port 636) certificate acceptance dialog with detailed certificate viewer
+- Self-signed certificate support with automatic caching
+- Certificate fingerprint display and copy functionality
+- TLS validation using saved certificates for group transfer operations
+- Proper handling of certificate validation failures and recovery
 
 ---
 

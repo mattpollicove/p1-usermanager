@@ -91,6 +91,21 @@ The required packages are:
 pip install jsonschema
 ```
 
+#### Optional: LDAP Group Migration Support
+
+LDAP group migration is fully supported with:
+- Self-signed certificate acceptance and validation
+- Certificate details viewer (view fingerprint, validity dates, issuer)
+- Automatic certificate caching for group transfer operations
+- Support for LDAPS (port 636) and StartTLS connections
+
+No additional dependencies required beyond the base installation.
+
+**Certificate Storage:**
+- Accepted certificates are automatically saved to `certs/` directory
+- Format: `{hostname}_{port}.pem` (e.g., `ldap_example_com_636.pem`)
+- Used for TLS validation during group transfer operations
+
 #### Optional: Database Import/Export (JDBC-only)
 
 Database support in this app is JDBC-only for:
