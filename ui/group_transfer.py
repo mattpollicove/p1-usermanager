@@ -568,6 +568,7 @@ def ldap_mapping(window, config, importing, profiles, mapping_class):
     # Group base DN with browse button
     group_base_layout = QtWidgets.QHBoxLayout()
     group_base = QtWidgets.QLineEdit(config.get("base_dn", ""))
+    group_base.setMinimumWidth(400)
     group_base_btn = QtWidgets.QPushButton("Browse...")
     group_base_btn.setMaximumWidth(100)
     group_base_layout.addWidget(group_base)
@@ -577,6 +578,7 @@ def ldap_mapping(window, config, importing, profiles, mapping_class):
     # User base DN with browse button
     user_base_layout = QtWidgets.QHBoxLayout()
     user_base = QtWidgets.QLineEdit(config.get("base_dn", ""))
+    user_base.setMinimumWidth(400)
     user_base_btn = QtWidgets.QPushButton("Browse...")
     user_base_btn.setMaximumWidth(100)
     user_base_layout.addWidget(user_base)
