@@ -95,15 +95,29 @@ def member_key(value):
 
 @contextmanager
 def connect(config):
+    from pathlib import Path
+    
     host, use_ssl, uri_port = _normalize_host_and_ssl(config.get("host", ""), config.get("use_ssl", False))
     start_tls = bool(config.get("start_tls")) and not use_ssl
     bind_dn, password = config.get("bind_dn", ""), config.get("password", "")
     if not host or not bind_dn or not password or not (use_ssl or start_tls):
         raise ValueError("Group migration requires a saved bind account and LDAPS or StartTLS.")
     timeout = int(config.get("timeout") or 30)
-    server = Server(host, port=uri_port or int(config.get("port") or (636 if use_ssl else 389)),
-                    use_ssl=use_ssl, get_info=ALL, connect_timeout=timeout,
-                    tls=Tls(validate=ssl.CERT_REQUIRED))
+    port = uri_port or int(config.get("port") or (636 if use_ssl else 389))
+    
+    # Determine TLS validation: use saved certificate if available, otherwise allow unverified
+    tls_config = None
+    certs_dir = Path(__file__).parent.parent / "certs"
+    cert_file = certs_dir / f"{host.replace('.', '_')}_{port}.pem"
+    
+    if cert_file.exists():
+        # Use saved certificate for verification
+        tls_config = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=str(cert_file))
+    else:
+        # Allow unverified/self-signed certificates (user accepted the cert dialog)
+        tls_config = Tls(validate=ssl.CERT_NONE)
+    
+    server = Server(host, port=port, use_ssl=use_ssl, get_info=ALL, connect_timeout=timeout, tls=tls_config)
     conn = Connection(server, user=bind_dn, password=password, auto_referrals=False,
                       raise_exceptions=True, receive_timeout=timeout)
     try:
