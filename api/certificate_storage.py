@@ -9,6 +9,7 @@ Provides abstraction layer for storing certificates in secure OS-specific storag
 import logging
 import platform
 import subprocess
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 import tempfile
@@ -121,25 +122,38 @@ class MacOSKeychainStorage(CertificateStorage):
             return False, f"Error: {str(e)}"
     
     @staticmethod
+    @staticmethod
     def load_certificate(host: str, port: int) -> Optional[str]:
         """Load certificate from macOS Keychain."""
         try:
             service = MacOSKeychainStorage._get_service_name(host, port)
             account = MacOSKeychainStorage._get_account_name()
             
-            # Retrieve password from Keychain
+            # Retrieve password from Keychain using -g flag
+            # Note: -w returns hex-encoded data, so we use -g and parse stderr
             cmd = [
                 'security', 'find-generic-password',
                 '-s', service,
                 '-a', account,
-                '-w'  # Return password only
+                '-g'  # Display password (goes to stderr in hex format)
             ]
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
-                cert_pem = result.stdout.strip()
-                logger.debug(f"Certificate loaded from Keychain for {host}:{port}")
-                return cert_pem if cert_pem else None
+                # Extract hex password from stderr: "password: 0x..."
+                match = re.search(r'password: 0x([A-Fa-f0-9]+)', result.stderr)
+                if match:
+                    hex_password = match.group(1)
+                    try:
+                        cert_pem = bytes.fromhex(hex_password).decode('ascii')
+                        logger.debug(f"Certificate loaded from Keychain for {host}:{port}")
+                        return cert_pem if cert_pem else None
+                    except (ValueError, UnicodeDecodeError) as e:
+                        logger.error(f"Failed to decode certificate from hex: {e}")
+                        return None
+                else:
+                    logger.debug(f"Could not parse password from Keychain response for {host}:{port}")
+                    return None
             else:
                 logger.debug(f"Certificate not found in Keychain for {host}:{port}")
                 return None
