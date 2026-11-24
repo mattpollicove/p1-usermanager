@@ -3579,9 +3579,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Show success message with connection details
         success_msg = format_ldap_connection_success_message(conn)
-        self.show_wide_message("Test Connection", success_msg, min_width=600)
+        self.show_wide_message("Test Connection", success_msg, min_width=750)
 
         # Use custom filter if provided, otherwise use default filter from connection
+
         if custom_filter:
             search_filter = custom_filter
         else:
@@ -3855,7 +3856,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Show success message with connection details
             success_msg = format_ldap_connection_success_message(conn)
-            self.show_wide_message("Test Connection", success_msg, min_width=600)
+            self.show_wide_message("Test Connection", success_msg, min_width=750)
 
             profile_name = self.profile_list.currentText()
             prefer_selected = True
