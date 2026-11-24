@@ -2282,8 +2282,60 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self.status_label.setText("Testing connection...")
         self.connection_info_panel.setVisible(False)
+        
         try:
             data = self.get_connection_data()
+            
+            # For SSL/LDAPs connections, always retrieve and show certificate first
+            if data.get('use_ssl'):
+                from api.certificate_discovery import retrieve_server_certificate, parse_certificate_info
+                
+                try:
+                    host = data.get('host', '')
+                    port = int(data.get('port') or 636)
+                    
+                    self.status_label.setText("Retrieving server certificate...")
+                    QtWidgets.QApplication.processEvents()
+                    
+                    # Retrieve certificate from server
+                    cert_pem = retrieve_server_certificate(host, port)
+                    if not cert_pem:
+                        self.status_label.setText("Certificate retrieval failed.")
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Certificate Retrieval Failed",
+                            f"Could not retrieve certificate from {host}:{port}"
+                        )
+                        return
+                    
+                    # Parse certificate info
+                    cert_info = parse_certificate_info(cert_pem)
+                    if not cert_info:
+                        self.status_label.setText("Certificate parsing failed.")
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Certificate Parsing Failed",
+                            "Could not parse certificate information"
+                        )
+                        return
+                    
+                    # Always show certificate acceptance dialog for SSL connections
+                    dlg = CertificateAcceptanceDialog(host, port, cert_info, self)
+                    if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                        self.status_label.setText("Certificate not accepted.")
+                        return
+                    
+                except Exception as e:
+                    logger.error(f"Certificate handling error: {e}")
+                    self.status_label.setText("Certificate handling failed.")
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Certificate Error",
+                        f"An error occurred during certificate verification:\n{e}"
+                    )
+                    return
+            
+            # Proceed with connection test
             result = test_ldap_connection_with_status(self, data)
             from api import ldap_utils
         except ModuleNotFoundError:
@@ -2306,108 +2358,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             conn_info = {}
 
         if not ok:
-            # Check if this is an SSL certificate error
-            error_lower = (err or '').lower()
-            if 'certificate' in error_lower or 'ssl' in error_lower:
-                # Trigger certificate discovery workflow
-                from api.certificate_discovery import retrieve_server_certificate, save_certificate, parse_certificate_info
-                
-                self.status_label.setText("Discovering certificate...")
-                QtWidgets.QApplication.processEvents()
-                
-                try:
-                    host = data.get('host', '')
-                    port = int(data.get('port') or 389)
-                    
-                    # Retrieve certificate
-                    cert_pem = retrieve_server_certificate(host, port)
-                    if not cert_pem:
-                        self.status_label.setText("Certificate discovery failed.")
-                        QtWidgets.QMessageBox.warning(
-                            self,
-                            "Certificate Discovery Failed",
-                            f"Could not retrieve certificate from {host}:{port}\n\nError: {err}"
-                        )
-                        return
-                    
-                    # Parse certificate info
-                    cert_info = parse_certificate_info(cert_pem)
-                    if not cert_info:
-                        self.status_label.setText("Certificate parsing failed.")
-                        QtWidgets.QMessageBox.warning(
-                            self,
-                            "Certificate Parsing Failed",
-                            "Could not parse certificate information"
-                        )
-                        return
-                    
-                    # Show certificate acceptance dialog with action options
-                    dlg = CertificateAcceptanceDialog(host, port, cert_info, self)
-                    dlg.exec()
-                    
-                    action = dlg.get_action()
-                    
-                    if action == 'cancel':
-                        self.status_label.setText("Connection cancelled.")
-                        return
-                    
-                    # Handle the selected action
-                    if action == 'save':
-                        # Save certificate to file
-                        success, cert_path = save_certificate(cert_pem, host, port)
-                        if not success:
-                            self.status_label.setText("Certificate save failed.")
-                            QtWidgets.QMessageBox.warning(
-                                self,
-                                "Save Failed",
-                                f"Could not save certificate: {cert_path}"
-                            )
-                            return
-                        
-                        # Update the connection data with certificate path
-                        data['certificate'] = cert_path
-                        self.cert_path_edit.setText(cert_path)
-                        self._update_cert_info()
-                    
-                    # Retry the connection test with the certificate
-                    self.status_label.setText("Retesting connection with certificate...")
-                    QtWidgets.QApplication.processEvents()
-                    
-                    result = test_ldap_connection_with_status(self, data)
-                    
-                    # Process result again
-                    if isinstance(result, tuple) and len(result) == 3:
-                        ok, err, conn_info = result
-                    else:
-                        ok, err = result if isinstance(result, tuple) else (False, str(result))
-                        conn_info = {}
-                    
-                    if not ok:
-                        self.status_label.setText("Connection failed after certificate update.")
-                        msg = "Failed to connect even with certificate."
-                        if err:
-                            msg += f"\n\nError details:\n{err}"
-                        QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
-                        return
-                    
-                    # Success after certificate handling
-                    conn_info['instance_name'] = data.get('name', '')
-                    self.status_label.setText("Connection successful.")
-                    self._update_connection_info_panel(conn_info)
-                    self.connection_info_panel.setVisible(True)
-                    return
-                
-                except Exception as cert_error:
-                    logger.error(f"Certificate handling error: {cert_error}")
-                    self.status_label.setText("Certificate handling failed.")
-                    QtWidgets.QMessageBox.critical(
-                        self,
-                        "Certificate Error",
-                        f"An error occurred during certificate handling: {cert_error}"
-                    )
-                    return
-            
-            # Non-certificate error
+            # Connection failed - show error
             self.status_label.setText("Connection failed.")
             msg = "Failed to connect to LDAP directory."
             if err:
@@ -4466,7 +4417,11 @@ class ImportWizardDialog(QtWidgets.QDialog):
 
 
 class CertificateAcceptanceDialog(QtWidgets.QDialog):
-    """Dialog for displaying and accepting LDAP server self-signed certificates."""
+    """Dialog for displaying and accepting LDAP server certificates.
+    
+    Shows different warning styles for self-signed vs CA-signed certificates.
+    User must explicitly accept to proceed.
+    """
 
     def __init__(self, host: str, port: int, cert_info: Dict, parent=None):
         super().__init__(parent)
@@ -4492,19 +4447,63 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         self.host = host
         self.port = port
         self.cert_info = cert_info
-        self.accepted_cert = False
         
         layout = QtWidgets.QVBoxLayout(self)
         
+        # Determine warning type
+        is_self_signed = cert_info.get('is_self_signed', False)
+        is_expired = cert_info.get('is_expired', False)
+        
         # Header
-        header = QtWidgets.QLabel("Accept LDAP Server Certificate")
+        header = QtWidgets.QLabel("SSL Certificate Verification Required")
         header.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(header)
         
-        info_text = f"The LDAP server at {host}:{port} presented an SSL certificate.\n"
-        if cert_info.get('self_signed'):
-            info_text += "This is a self-signed certificate.\n"
-        layout.addWidget(QtWidgets.QLabel(info_text))
+        # Warning box with appropriate styling
+        warning_box = QtWidgets.QGroupBox("Certificate Status")
+        warning_layout = QtWidgets.QVBoxLayout()
+        
+        if is_expired:
+            # Red warning for expired
+            warning_msg = QtWidgets.QLabel("⚠ CRITICAL: Certificate has EXPIRED!")
+            warning_msg.setStyleSheet(
+                "background-color: #ffcccc; color: #990000; padding: 12px; "
+                "border-left: 4px solid #990000; font-weight: bold; border-radius: 4px;"
+            )
+            warning_layout.addWidget(warning_msg)
+        elif is_self_signed:
+            # Red warning for self-signed
+            warning_msg = QtWidgets.QLabel(
+                "⚠ WARNING: Self-Signed Certificate\n\n"
+                "This certificate is not issued by a trusted Certificate Authority.\n"
+                "Only trust this certificate if you have verified it through an\n"
+                "alternative secure channel (phone call, secure email, etc.)."
+            )
+            warning_msg.setStyleSheet(
+                "background-color: #ffe6e6; color: #cc0000; padding: 12px; "
+                "border-left: 4px solid #cc0000; border-radius: 4px;"
+            )
+            warning_layout.addWidget(warning_msg)
+        else:
+            # Blue info for CA-signed
+            warning_msg = QtWidgets.QLabel(
+                "ℹ Certificate Information\n\n"
+                "This certificate is issued by a Certificate Authority.\n"
+                "Please verify that you trust the connection details below."
+            )
+            warning_msg.setStyleSheet(
+                "background-color: #e6f2ff; color: #0033cc; padding: 12px; "
+                "border-left: 4px solid #0033cc; border-radius: 4px;"
+            )
+            warning_layout.addWidget(warning_msg)
+        
+        warning_box.setLayout(warning_layout)
+        layout.addWidget(warning_box)
+        
+        # Connection info
+        conn_info = QtWidgets.QLabel(f"Server: {host}:{port}")
+        conn_info.setStyleSheet("font-weight: bold;")
+        layout.addWidget(conn_info)
         
         # Certificate details in a text area
         details_group = QtWidgets.QGroupBox("Certificate Details")
@@ -4520,7 +4519,7 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         details.append(f"Issuer: {cert_info.get('issuer', 'Unknown')}")
         details.append(f"Valid From: {cert_info.get('not_before', 'Unknown')}")
         details.append(f"Valid Until: {cert_info.get('not_after', 'Unknown')}")
-        details.append(f"Self-Signed: {cert_info.get('self_signed', False)}")
+        details.append(f"Self-Signed: {cert_info.get('is_self_signed', False)}")
         details.append(f"Expired: {cert_info.get('is_expired', False)}")
         details.append(f"Fingerprint (SHA-256):\n{cert_info.get('fingerprint', 'Unknown')}")
         
@@ -4529,64 +4528,29 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         details_group.setLayout(details_layout)
         layout.addWidget(details_group)
         
-        # Warnings
-        if cert_info.get('is_expired'):
-            warn_label = QtWidgets.QLabel("⚠ WARNING: Certificate has expired!")
-            warn_label.setStyleSheet("color: #cc0000; font-weight: bold;")
-            layout.addWidget(warn_label)
-        
-        # Action options as radio buttons
-        options_group = QtWidgets.QGroupBox("What would you like to do?")
-        options_layout = QtWidgets.QVBoxLayout()
-        
-        self.rb_save = QtWidgets.QRadioButton("Save to connection config")
-        self.rb_save.setChecked(True)
-        self.rb_use_once = QtWidgets.QRadioButton("Use this time only (don't save)")
-        self.rb_cancel = QtWidgets.QRadioButton("Cancel")
-        
-        options_layout.addWidget(self.rb_save)
-        options_layout.addWidget(self.rb_use_once)
-        options_layout.addWidget(self.rb_cancel)
-        options_group.setLayout(options_layout)
-        layout.addWidget(options_group)
-        
-        # Action buttons
+        # Action buttons - only Accept or Reject (no skip/save options)
         button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
         
-        accept_btn = QtWidgets.QPushButton("Accept")
-        accept_btn.clicked.connect(self._accept)
-        button_layout.addWidget(accept_btn)
-        
-        reject_btn = QtWidgets.QPushButton("Reject")
+        reject_btn = QtWidgets.QPushButton("Reject & Cancel Connection")
         reject_btn.clicked.connect(self.reject)
+        reject_btn.setStyleSheet(
+            "QPushButton { background-color: #f0f0f0; color: #333; padding: 8px 16px; "
+            "border: 1px solid #999; border-radius: 4px; }"
+        )
         button_layout.addWidget(reject_btn)
+        
+        accept_btn = QtWidgets.QPushButton("Accept & Continue")
+        accept_btn.clicked.connect(self.accept)
+        accept_btn.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; padding: 8px 16px; "
+            "border: none; border-radius: 4px; font-weight: bold; }"
+        )
+        button_layout.addWidget(accept_btn)
         
         layout.addLayout(button_layout)
     
-    def _accept(self):
-        """Mark certificate action and close."""
-        if self.rb_cancel.isChecked():
-            self.reject()
-        else:
-            self.accepted_cert = True
-            self.accept()
-    
     def is_accepted(self) -> bool:
-        """Check if user accepted the certificate."""
-        return self.accepted_cert
-    
-    def get_action(self) -> str:
-        """Get the selected action after acceptance.
-        
-        Returns:
-            'save': Save certificate to connection config
-            'use_once': Use certificate for this test only
-            'cancel': User cancelled
-        """
-        if self.rb_save.isChecked():
-            return 'save'
-        elif self.rb_use_once.isChecked():
-            return 'use_once'
-        else:
-            return 'cancel'
+        """Check if dialog was accepted."""
+        return self.result() == QtWidgets.QDialog.DialogCode.Accepted
 
