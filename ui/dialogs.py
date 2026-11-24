@@ -2108,12 +2108,6 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
 
         self._on_cert_toggle(False)  # NEW: Initial state
 
-        self.sample_label = QtWidgets.QLabel("")
-        self.sample_label.setWordWrap(True)
-        self.sample_label.setStyleSheet("background-color: #f0f0f0; padding: 8px; border-radius: 4px;")
-        self.sample_label.setVisible(False)
-        layout.addWidget(self.sample_label)
-
         self.status_label = QtWidgets.QLabel("")
         layout.addWidget(self.status_label)
 
@@ -2248,7 +2242,6 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self.cert_path_edit.clear()  # NEW
         self.skip_cert_validation_cb.setChecked(False)  # NEW
         self.cert_info_label.setVisible(False)  # NEW
-        self.sample_label.setVisible(False)
         self.status_label.setText('')
         self.save_cb.setChecked(True)
         self._sync_port_with_tls()
@@ -2281,7 +2274,6 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         from ui.background import background
 
         self.status_label.setText("Testing connection...")
-        self.sample_label.hide()
         self.connection_info_panel.setVisible(False)
         try:
             data = self.get_connection_data()
@@ -2414,7 +2406,6 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             if err:
                 msg += f"\n\nError details:\n{err}"
             QtWidgets.QMessageBox.critical(self, "Test Connection", msg)
-            self.sample_label.setVisible(False)
             self.connection_info_panel.setVisible(False)
             return
         
@@ -2426,34 +2417,6 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         self._update_connection_info_panel(conn_info)
         self.connection_info_panel.setVisible(True)
 
-        from ldap3.core.exceptions import LDAPException
-
-        def read_sample(_progress):
-            try:
-                return ldap_utils.get_entry_sample(
-                    data['host'], data['port'], data['use_ssl'], data['bind_dn'], data['password'],
-                    data['base_dn'], data['search_filter'], data['start_tls'], timeout=data['timeout'],
-                    certificate=data.get('certificate', ''),
-                    skip_cert_validation=data.get('skip_cert_validation', False),
-                )
-            except LDAPException as exc:
-                raise ValueError(str(exc)) from exc
-
-        try:
-            sample = background(self, "Test LDAP Connection", read_sample,
-                                status="Connection successful. Reading a sample entry...")
-            if sample:
-                fields = []
-                for key in sorted(sample.keys())[:6]:
-                    fields.append(f"{key}={sample[key]}")
-                self.sample_label.setText("Sample entry: " + " | ".join(fields))
-                self.sample_label.setVisible(True)
-            else:
-                self.sample_label.setText("Connected, but no matching entries found.")
-                self.sample_label.setVisible(True)
-        except ValueError as exc:
-            self.sample_label.setText(f"Connected, but sample read failed: {exc}")
-            self.sample_label.setVisible(True)
         QtWidgets.QMessageBox.information(self, "Test Connection", "LDAP connection successful.")
 
     def _update_connection_info_panel(self, conn_info: dict):
