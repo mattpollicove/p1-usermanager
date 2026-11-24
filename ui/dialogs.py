@@ -2409,11 +2409,14 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
             data = self.get_connection_data()
             
             # For SSL/LDAPs connections, always retrieve and show certificate first
-            if data.get('use_ssl'):
-                from api.certificate_discovery import retrieve_server_certificate, parse_certificate_info
+            if data.get('use_ssl') and not data.get('skip_cert_validation'):
+                from api.certificate_discovery import (
+                    retrieve_server_certificate, parse_certificate_info,
+                    save_certificate
+                )
                 
                 try:
-                    host = data.get('host', '')
+                    host = data.get('host', '').split(':')[0]  # Remove port if included in host
                     port = int(data.get('port') or 636)
                     
                     self.status_label.setText("Retrieving server certificate...")
@@ -2426,7 +2429,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                         QtWidgets.QMessageBox.warning(
                             self,
                             "Certificate Retrieval Failed",
-                            f"Could not retrieve certificate from {host}:{port}"
+                            f"Could not retrieve certificate from {host}:{port}. "
+                            f"Check that the host and port are correct and the server is accessible."
                         )
                         return
                     
@@ -2437,7 +2441,7 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                         QtWidgets.QMessageBox.warning(
                             self,
                             "Certificate Parsing Failed",
-                            "Could not parse certificate information"
+                            "Could not parse certificate information from the server."
                         )
                         return
                     
@@ -2449,16 +2453,16 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
                     
                     # Certificate was accepted - save it to secure storage
                     if cert_pem:
-                        from api.certificate_discovery import save_certificate
-                        success, msg = save_certificate(cert_pem, host, int(port))
+                        success, msg = save_certificate(cert_pem, host, port)
                         if success:
-                            logger.info(f"Certificate saved for {host}:{int(port)}")
+                            logger.info(f"Certificate saved for {host}:{port}")
+                            self.status_label.setText("Certificate accepted and saved.")
                         else:
                             logger.warning(f"Failed to save certificate: {msg}")
-                            # Non-fatal - continue anyway
+                            self.status_label.setText("Certificate accepted (save failed, but continuing).")
                 
                 except Exception as e:
-                    logger.error(f"Certificate handling error: {e}")
+                    logger.error(f"Certificate handling error: {e}", exc_info=True)
                     self.status_label.setText("Certificate handling failed.")
                     QtWidgets.QMessageBox.critical(
                         self,

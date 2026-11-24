@@ -41,12 +41,11 @@ def retrieve_server_certificate(host: str, port: int = 636) -> Optional[str]:
                 if cert_der:
                     # Convert DER to PEM format
                     import base64
-                    pem_cert = "-----BEGIN CERTIFICATE-----\n"
-                    pem_cert += base64.b64encode(cert_der).decode('ascii')
+                    # Encode DER to base64
+                    b64_cert = base64.b64encode(cert_der).decode('ascii')
                     # Add line breaks every 64 characters for proper PEM format
-                    pem_lines = []
-                    for i in range(0, len(pem_cert.split('\n')[1]), 64):
-                        pem_lines.append(pem_cert.split('\n')[1][i:i+64])
+                    pem_lines = [b64_cert[i:i+64] for i in range(0, len(b64_cert), 64)]
+                    # Build final PEM certificate
                     pem_cert = "-----BEGIN CERTIFICATE-----\n"
                     pem_cert += "\n".join(pem_lines)
                     pem_cert += "\n-----END CERTIFICATE-----\n"
@@ -184,7 +183,7 @@ def parse_certificate_info(cert_pem: str) -> Optional[Dict]:
             'issuer': cert.issuer.rfc4514_string(),
             'not_before': cert.not_valid_before_utc.isoformat(),
             'not_after': cert.not_valid_after_utc.isoformat(),
-            'self_signed': cert.issuer == cert.subject,
+            'is_self_signed': cert.issuer == cert.subject,
             'fingerprint': get_certificate_fingerprint(cert_pem),
         }
         

@@ -11,6 +11,8 @@ pyobjc-framework-LocalAuthentication; sys_platform == 'darwin'
 # Optional: enables local JSON Schema validation of user records during import
 # (api/client.py local_validate_user + user_schema.json). Skipped if absent.
 jsonschema
+# SSL certificate handling and parsing for LDAP/LDAPS connections
+cryptography
 # Note: test_connection.py is a standalone legacy diagnostic that imports
 # pymysql. The app itself is JDBC-only, so pymysql is intentionally not a
 # requirement here.
