@@ -137,6 +137,94 @@ def apply_combo_typeahead(combo: QtWidgets.QComboBox, options: List[str]):
     combo.setCompleter(completer)
 
 
+class LDAPOUCompleter(QtCore.QObject):
+    """Progressive LDAP OU search completer for Base DN inputs.
+    
+    Provides real-time auto-complete as user types in a Base DN field,
+    querying LDAP directory for matching organizational units.
+    """
+    
+    def __init__(self, line_edit: QtWidgets.QLineEdit, ldap_config: dict):
+        """Initialize the completer.
+        
+        Args:
+            line_edit: QLineEdit field to attach completer to
+            ldap_config: LDAP connection configuration dict with keys like host, port, bind_dn, password
+        """
+        super().__init__(line_edit)
+        self.line_edit = line_edit
+        self.ldap_config = ldap_config
+        self.completer_model = QtCore.QStringListModel([])
+        self.completer = QtWidgets.QCompleter(self.completer_model, line_edit)
+        self.completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        self.completer.setFilterMode(QtCore.Qt.MatchContains)
+        line_edit.setCompleter(self.completer)
+        
+        # Connect text changes to trigger LDAP search
+        self.line_edit.textChanged.connect(self._on_text_changed)
+        self._search_timer = QtCore.QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._search_ldap)
+        
+    def _on_text_changed(self, text: str):
+        """Trigger LDAP search after user stops typing."""
+        self._search_timer.stop()
+        if text.strip():
+            self._search_timer.start(300)  # Delay 300ms to batch rapid typing
+    
+    def _search_ldap(self):
+        """Search LDAP directory for matching OUs."""
+        try:
+            current_text = self.line_edit.text().strip()
+            if not current_text:
+                self.completer_model.setStringList([])
+                return
+            
+            from api.ldap_groups import connect
+            
+            # Try to connect and search for matching OUs
+            suggestions = []
+            try:
+                with connect(self.ldap_config) as conn:
+                    from ldap3 import SUBTREE
+                    
+                    # Search for all organizational units
+                    filter_str = "(objectClass=organizationalUnit)"
+                    base_dn = self.ldap_config.get('base_dn', '')
+                    
+                    if not base_dn:
+                        self.completer_model.setStringList([])
+                        return
+                    
+                    conn.search(base_dn, filter_str, search_scope=SUBTREE, attributes=['ou', 'distinguishedName'])
+                    
+                    # Collect matching OUs that contain the user's typed text
+                    for entry in conn.entries:
+                        try:
+                            # Get the distinguished name
+                            dn = entry.entry_dn if hasattr(entry, 'entry_dn') else str(entry)
+                            ou_name = entry.ou.value if hasattr(entry, 'ou') else ''
+                            
+                            # Match against current input (case-insensitive)
+                            if current_text.lower() in dn.lower():
+                                suggestions.append(dn)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"LDAP OU search error: {e}")
+                # Silently fail and show empty suggestions
+            
+            # Update completer model with unique sorted suggestions
+            self.completer_model.setStringList(sorted(set(suggestions)))
+            
+            # Show popup if there are suggestions
+            if suggestions:
+                self.completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+                self.completer.complete()
+        except Exception as e:
+            logger.debug(f"Error in LDAP OU completer: {e}")
+
+
 class _ClearNoneComboFilter(QtCore.QObject):
     """Clear editable combo text when interacting with a '<None>' placeholder."""
 
@@ -2259,6 +2347,9 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         if not self.timeout_edit.text().strip():
             self.timeout_edit.setText('30')
         ensure_dialog_caption_fit(self)
+        
+        # Setup LDAP OU completer for group_base_dn_edit
+        self._setup_ldap_ou_completer()
 
     def _new_connection(self):
         """Reset fields to defaults so user can define a new LDAP connection."""
@@ -2602,6 +2693,30 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         display = cert_mgr.get_certificate_info_display(cert_info)
         self.cert_info_label.setText(display)
         self.cert_info_label.setVisible(True)
+
+    def _setup_ldap_ou_completer(self):
+        """Setup progressive LDAP OU search completer for group_base_dn_edit field."""
+        try:
+            # Build a minimal LDAP config from current form values
+            ldap_config = {
+                'host': self.host_edit.text().strip(),
+                'port': int(self.port_edit.text() or 389),
+                'use_ssl': bool(self.use_ssl_cb.isChecked()),
+                'start_tls': bool(self.start_tls_cb.isChecked()),
+                'base_dn': self.base_dn_edit.text().strip(),
+                'bind_dn': self.bind_dn_edit.text().strip(),
+                'password': self.pw_edit.text(),
+                'timeout': int(self.timeout_edit.text() or 30),
+                'skip_cert_validation': bool(self.skip_cert_validation_cb.isChecked()),
+                'certificate': self.cert_path_edit.text().strip() if self.use_cert_cb.isChecked() else '',
+            }
+            
+            # Only setup completer if we have enough connection info
+            if ldap_config.get('host') and ldap_config.get('base_dn'):
+                self.ldap_ou_completer = LDAPOUCompleter(self.group_base_dn_edit, ldap_config)
+        except Exception as e:
+            logger.debug(f"Could not setup LDAP OU completer: {e}")
+            # Silently fail - completer is optional
 
     def get_connection_data(self) -> dict:
         return {
