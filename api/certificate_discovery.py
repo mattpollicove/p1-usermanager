@@ -91,16 +91,16 @@ def get_certificate_fingerprint(cert_pem: str) -> Optional[str]:
     try:
         from cryptography import x509
         from cryptography.hazmat.backends import default_backend
-        import hashlib
+        from cryptography.hazmat.primitives import hashes
+        import base64
         
         # Remove PEM headers and decode
         cert_data = cert_pem.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
-        import base64
         cert_der = base64.b64decode(cert_data)
         
         # Load and get fingerprint
         cert = x509.load_der_x509_certificate(cert_der, default_backend())
-        fingerprint = cert.fingerprint(hashlib.sha256())
+        fingerprint = cert.fingerprint(hashes.SHA256())
         return fingerprint.hex().upper()
     except Exception as e:
         logger.error(f"Failed to get certificate fingerprint: {e}")
@@ -120,7 +120,7 @@ def parse_certificate_info(cert_pem: str) -> Optional[Dict]:
         from cryptography import x509
         from cryptography.hazmat.backends import default_backend
         import base64
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         # Remove PEM headers and decode
         cert_data = cert_pem.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
@@ -133,15 +133,15 @@ def parse_certificate_info(cert_pem: str) -> Optional[Dict]:
         info = {
             'subject': cert.subject.rfc4514_string(),
             'issuer': cert.issuer.rfc4514_string(),
-            'not_before': cert.not_valid_before.isoformat(),
-            'not_after': cert.not_valid_after.isoformat(),
+            'not_before': cert.not_valid_before_utc.isoformat(),
+            'not_after': cert.not_valid_after_utc.isoformat(),
             'self_signed': cert.issuer == cert.subject,
             'fingerprint': get_certificate_fingerprint(cert_pem),
         }
         
         # Check if expired
-        now = datetime.utcnow()
-        info['is_expired'] = now > cert.not_valid_after
+        now = datetime.now(timezone.utc)
+        info['is_expired'] = now > cert.not_valid_after_utc
         
         return info
     except Exception as e:
