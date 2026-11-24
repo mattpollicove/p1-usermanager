@@ -289,7 +289,7 @@ def browse_ldap_dn(parent, config: Dict, title: str = "Select DN") -> str:
                 
                 score, matched_text = _match_search_term(dn, search_term)
                 if score > 0:
-                    matches.append((score, dn, item, matched_text))
+                    matches.append((score, matched_text, item, dn))
             
             if not matches:
                 search_input.setStyleSheet("background-color: #ffe0e0;")
@@ -298,64 +298,45 @@ def browse_ldap_dn(parent, config: Dict, title: str = "Select DN") -> str:
                     item.setHidden(True)
                 return
             
-            search_input.setStyleSheet("")
-            matches.sort(key=lambda x: (-x[0], x[1]))
-            
-            # Build visible set and ancestry map
-            visible_dns = {m[1] for m in matches}
-            ancestry_map = {}
-            for item in all_items:
-                dn = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if not dn:
-                    continue
-                parent_item = item.parent()
-                if parent_item:
-                    parent_dn = parent_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                    if parent_dn:
-                        if parent_dn not in ancestry_map:
-                            ancestry_map[parent_dn] = set()
-                        ancestry_map[parent_dn].add(dn)
-            
-            def add_ancestors(dn):
-                parts = dn.split(',')
-                while len(parts) > 1:
-                    parts = parts[1:]
-                    parent = ','.join(parts)
-                    visible_dns.add(parent)
-                    if parent in ancestry_map:
-                        for child in ancestry_map[parent]:
-                            add_ancestors(child)
-            
-            for dn in list(visible_dns):
-                add_ancestors(dn)
-            
-            # Highlight and show items
-            for item in all_items:
-                dn = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                is_match = dn in {m[1] for m in matches}
-                is_visible = dn in visible_dns
+            # Collect matched items and their ancestors
+            matched_items = set()
+            for score, matched_text, item, dn in matches:
+                matched_items.add(item)
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+                item.setBackground(0, QtGui.QBrush(QtGui.QColor("#e8f5e9")))
                 
-                item.setHidden(not is_visible)
+                # Auto-expand parents of matching items
+                parent = item.parent()
+                while parent:
+                    matched_items.add(parent)
+                    tree.expandItem(parent)
+                    parent = parent.parent()
+            
+            # Helper to check if ancestor is parent of item
+            def _is_ancestor(ancestor, item):
+                current = item.parent()
+                while current:
+                    if current == ancestor:
+                        return True
+                    current = current.parent()
+                return False
+            
+            # Hide non-matched items (but show parents of matches)
+            for item in all_items:
+                is_ancestor_of_match = any(
+                    _is_ancestor(item, m) for m in matched_items
+                )
+                item.setHidden(not (item in matched_items or is_ancestor_of_match))
                 
-                if is_match:
-                    font = item.font(0)
-                    font.setBold(True)
-                    item.setFont(0, font)
-                    item.setBackground(0, QtGui.QBrush(QtGui.QColor("#e8f5e9")))
-                else:
+                if item not in matched_items and not is_ancestor_of_match:
                     font = item.font(0)
                     font.setBold(False)
                     item.setFont(0, font)
                     item.setBackground(0, QtGui.QBrush())
             
-            # Expand ancestors of matches for visibility
-            for item in all_items:
-                dn = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if dn in {m[1] for m in matches}:
-                    parent = item.parent()
-                    while parent:
-                        tree.expandItem(parent)
-                        parent = parent.parent()
+            search_input.setStyleSheet("background-color: #e6f3ff;")
         
         # Connect signals
         tree.itemExpanded.connect(lambda item: expand_item(item))
