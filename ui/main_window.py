@@ -142,7 +142,6 @@ from ui.version_manager import read_version, bump_version, get_version_string
 
 APP_NAME = "PingOne UserManager"
 APP_VERSION = read_version()  # Read from version.txt
-DEFAULT_PINGONE_CONSOLE_URL = "https://console.pingone.com/"
 KEYRING_SERVICE = "pingone_usermanager"
 KEYCHAIN_ALLOW_ALL_APPS = True
 
@@ -195,7 +194,6 @@ Database Import/Export:
 - Mapping dialogs support common aliases and core fields including middle name, employee type, and address targets.
 - Mapping choices include custom PingOne attributes discovered from tenant user data.
 - LDAP directories are also supported via Manage LDAP Connections.
-- Use the Configuration action "Open PingOne Console" to launch the active environment in your browser.
 
 Status Bar:
 - Shows live API call summaries when "Show API calls in status bar" is enabled.
@@ -207,8 +205,6 @@ Preferences:
 - Access via File → Preferences (Cmd/Ctrl+,) or the application menu on macOS.
 - Contains all application settings and runtime options.
 - Dark Mode: Toggle between light and dark themes (Cmd/Ctrl+D).
-- Set PingOne Console URL: Configure the base console URL used by the
-    "Open PingOne Console" action.
 - Auto-connect: Automatically connect to the last working profile on startup.
 - Theme preference is saved and restored on startup.
 - Dark mode applies a comfortable color scheme for low-light environments.
@@ -383,7 +379,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.all_columns = set()
         self.json_editing_enabled = False
         self.use_friendly_names = True
-        self.pingone_console_url = DEFAULT_PINGONE_CONSOLE_URL
         self._closing = False
         self.hide_raw_http_columns = True
         self.show_user_update_success = True
@@ -1070,12 +1065,9 @@ class MainWindow(QtWidgets.QMainWindow):
             open_capture_btn.clicked.connect(self.show_api_capture_dialog)
             revert_columns_btn = QtWidgets.QPushButton("Revert Columns")
             revert_columns_btn.clicked.connect(self.revert_to_default_columns)
-            console_url_btn = QtWidgets.QPushButton("Set Console URL")
-            console_url_btn.clicked.connect(self.set_pingone_console_url)
             tools_lay.addWidget(open_logs_btn)
             tools_lay.addWidget(open_capture_btn)
             tools_lay.addWidget(revert_columns_btn)
-            tools_lay.addWidget(console_url_btn)
             lay.addWidget(tools_box)
 
             btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -1246,9 +1238,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capture_api_action = QtGui.QAction("Capture API Calls...", self)
         self.capture_api_action.triggered.connect(self.show_api_capture_dialog)
 
-        self.set_console_url_action = QtGui.QAction("Set PingOne Console URL...", self)
-        self.set_console_url_action.triggered.connect(self.set_pingone_console_url)
-
         # Separate Logs submenu for quick actions (reset, clear, archive)
         groups_menu = menubar.addMenu("Groups")
         for importing in (True, False):
@@ -1382,25 +1371,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_action_combo.setToolTip("Select a configuration action")
         self.config_action_execute_btn = QtWidgets.QPushButton("Execute")
         self.config_action_execute_btn.clicked.connect(self.execute_config_action)
-        self.open_pingone_console_btn = QtWidgets.QPushButton("Open PingOne Console")
-        self.open_pingone_console_btn.setToolTip("Launch the active PingOne environment in your browser")
-        self.open_pingone_console_btn.clicked.connect(self.open_pingone_console)
-        self.open_pingone_console_env_label = QtWidgets.QLabel(f"{self.pingone_console_url.rstrip('/')}/?env=")
-        self.open_pingone_console_env_label.setToolTip("Full URL used for Open PingOne Console")
-        self.open_pingone_console_env_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-            | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-        self.open_pingone_console_env_label.setCursor(
-            QtGui.QCursor(QtCore.Qt.CursorShape.IBeamCursor)
-        )
-        self.env_id.textChanged.connect(self.update_pingone_console_env_label)
         config_action_row = QtWidgets.QHBoxLayout()
         config_action_row.addWidget(self.config_action_combo)
         config_action_row.addWidget(self.config_action_execute_btn)
-        config_action_row.addWidget(self.open_pingone_console_btn)
-        config_action_row.addWidget(self.open_pingone_console_env_label)
-        self.update_pingone_console_env_label(self.env_id.text())
         cred_form.addRow("Action:", config_action_row)
 
         # Preserve keyboard shortcuts for frequent configuration actions.
@@ -1768,126 +1741,6 @@ class MainWindow(QtWidgets.QMainWindow):
         fn = handlers.get(action)
         if fn:
             fn()
-
-    def open_pingone_console(self):
-        """Open the PingOne admin console for the active environment."""
-        env = (self.env_id.text() or "").strip()
-        
-        # If the stored URL already contains query params or fragment, use it as-is
-        if '?' in self.pingone_console_url or '#' in self.pingone_console_url:
-            if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(self.pingone_console_url)):
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "PingOne Console",
-                    f"Unable to open browser URL:\n{self.pingone_console_url}"
-                )
-            return
-        
-        # Otherwise, append the env_id as a query param
-        if not env:
-            QtWidgets.QMessageBox.information(self, "PingOne Console", "Enter an Environment ID first.")
-            return
-        
-        base = self.pingone_console_url.rstrip('/')
-        encoded_env = QtCore.QUrl.toPercentEncoding(env).data().decode()
-        primary_url = f"{base}/?env={encoded_env}"
-        fallback_url = f"{base}/"
-        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(primary_url)):
-            if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(fallback_url)):
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "PingOne Console",
-                    f"Unable to open browser URL:\n{primary_url}\n\nFallback also failed:\n{fallback_url}"
-                )
-
-    def update_pingone_console_env_label(self, value=""):
-        """Display the full URL used by the Open PingOne Console button."""
-        env = (value or "").strip()
-        
-        # If URL already has query params or fragment, show as-is
-        if '?' in self.pingone_console_url or '#' in self.pingone_console_url:
-            self.open_pingone_console_env_label.setText(self.pingone_console_url)
-        else:
-            # Otherwise append env_id if provided
-            base = self.pingone_console_url.rstrip('/')
-            encoded_env = QtCore.QUrl.toPercentEncoding(env).data().decode() if env else ""
-            self.open_pingone_console_env_label.setText(f"{base}/?env={encoded_env}")
-
-    def _normalize_pingone_console_url(self, value: str) -> str:
-        """Return a normalized PingOne console URL or raise ValueError."""
-        raw = (value or "").strip()
-        if not raw:
-            return DEFAULT_PINGONE_CONSOLE_URL
-        
-        # Allow simple domain.com → https://domain.com
-        if "://" not in raw:
-            raw = f"https://{raw}"
-        
-        try:
-            qurl = QtCore.QUrl(raw)
-            if not qurl.isValid():
-                raise ValueError(f"Invalid URL format: {raw}")
-            
-            host = qurl.host()
-            if not host:
-                raise ValueError(f"URL missing host: {raw}")
-            
-            # Return the full URL as entered (preserving query params, fragments, paths, etc)
-            return raw
-        except Exception as e:
-            raise ValueError(f"Please enter a valid URL (e.g., https://console.pingone.com): {e}")
-
-    def _apply_pingone_console_url(self, value: str, persist: bool = True) -> bool:
-        """Apply a console URL, refresh the label, and optionally persist."""
-        try:
-            normalized = self._normalize_pingone_console_url(value)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.warning(self, "PingOne Console URL", str(exc))
-            return False
-
-        try:
-            self.pingone_console_url = normalized
-            
-            # Update label: if URL has query/fragment, show as-is; otherwise append env_id
-            if '?' in self.pingone_console_url or '#' in self.pingone_console_url:
-                label_text = self.pingone_console_url
-            else:
-                env = (self.env_id.text() or "").strip()
-                base = self.pingone_console_url.rstrip('/')
-                encoded_env = QtCore.QUrl.toPercentEncoding(env).data().decode() if env else ""
-                label_text = f"{base}/?env={encoded_env}"
-            
-            self.open_pingone_console_env_label.setText(label_text)
-            self.open_pingone_console_env_label.repaint()
-            
-            if persist:
-                self.save_app_settings()
-                try:
-                    msg = f"PingOne Console URL updated: {self.pingone_console_url}"
-                    self._set_processing_message(msg, 3000)
-                except Exception:
-                    pass
-            
-            return True
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Error", f"Failed to update URL: {e}")
-            return False
-
-    def set_pingone_console_url(self):
-        """Prompt the user to set a custom PingOne Console URL."""
-        current = self.pingone_console_url
-        url, ok = QtWidgets.QInputDialog.getText(
-            self, "Set PingOne Console URL",
-            "Enter the base URL for the PingOne Console:",
-            QtWidgets.QLineEdit.EchoMode.Normal, current
-        )
-        if ok and url.strip():
-            success = self._apply_pingone_console_url(url, persist=True)
-            if success:
-                QtWidgets.QMessageBox.information(
-                    self, "PingOne Console URL",
-                    f"URL updated and saved:\n{self.pingone_console_url}"
-                )
 
     def execute_transfer_action(self):
         """Execute the selected import/export action from the transfer pulldown."""
@@ -2453,8 +2306,6 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             meta = cfg.get('__meta__', {})
             self.auto_connect_cb.setChecked(bool(meta.get('auto_connect_last', False)))
-            saved_url = (meta.get('pingone_console_url', '') or '').strip()
-            self._apply_pingone_console_url(saved_url or DEFAULT_PINGONE_CONSOLE_URL, persist=False)
             self.prompt_before_delete = bool(meta.get('prompt_before_delete', True))
         except Exception:
             pass
@@ -2627,7 +2478,6 @@ class MainWindow(QtWidgets.QMainWindow):
             meta = cfg.get('__meta__', {})
             meta['auto_connect_last'] = bool(self.auto_connect_cb.isChecked())
             meta['theme'] = self.theme_manager.get_current_theme()
-            meta['pingone_console_url'] = self.pingone_console_url
             meta['prompt_before_delete'] = bool(getattr(self, 'prompt_before_delete', True))
             cfg['__meta__'] = meta
             self._write_config(cfg)
