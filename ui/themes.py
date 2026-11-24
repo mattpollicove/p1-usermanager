@@ -4,7 +4,30 @@ Provides light and dark mode themes with appropriate color schemes
 for the application UI.
 """
 
+import platform
 from PySide6 import QtGui, QtWidgets
+
+
+def get_monospace_font_family() -> str:
+    """Get the best available monospace font for the current platform.
+    
+    Returns the most appropriate monospace font family available on the system,
+    avoiding "Monospace" which may not exist and causes Qt warnings.
+    
+    Returns:
+        Font family name suitable for monospace text.
+    """
+    system = platform.system()
+    
+    if system == 'Darwin':  # macOS
+        # Try Monaco first, then fall back to Courier New
+        return "Monaco"
+    elif system == 'Windows':
+        # Windows: Consolas is modern, Courier New is fallback
+        return "Consolas"
+    else:  # Linux and others
+        # Linux: DejaVu Sans Mono is widely available
+        return "DejaVu Sans Mono"
 
 
 class ThemeManager:

@@ -22,6 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from PySide6 import QtWidgets, QtCore, QtGui
+from ui.themes import get_monospace_font_family
 
 logger = logging.getLogger(__name__)
 
@@ -2139,7 +2140,8 @@ class LDAPConnectionDialog(QtWidgets.QDialog):
         
         # Row 2: Bind DN
         self.info_bind_dn = QtWidgets.QLabel("")
-        self.info_bind_dn.setStyleSheet("font-family: monospace; font-size: 9px;")
+        monospace_font = get_monospace_font_family()
+        self.info_bind_dn.setStyleSheet(f"font-family: {monospace_font}; font-size: 9px;")
         self.info_bind_dn.setWordWrap(True)
         self.info_bind_dn.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         info_layout.addWidget(QtWidgets.QLabel("Bind DN:"), 2, 0, alignment=QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignTop)
@@ -4511,7 +4513,8 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
         
         self.details_text = QtWidgets.QTextEdit()
         self.details_text.setReadOnly(True)
-        self.details_text.setStyleSheet("font-family: monospace; font-size: 9px;")
+        monospace_font = get_monospace_font_family()
+        self.details_text.setStyleSheet(f"font-family: {monospace_font}; font-size: 9px;")
         
         # Build details text
         details = []
@@ -4604,7 +4607,7 @@ class CertificateAcceptanceDialog(QtWidgets.QDialog):
             # Make fingerprint monospace
             if field == "Fingerprint (SHA-256)":
                 font = value_item.font()
-                font.setFamily("Courier New")
+                font.setFamily(get_monospace_font_family())
                 value_item.setFont(font)
             table.setItem(row, 1, value_item)
         
